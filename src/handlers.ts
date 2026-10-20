@@ -783,6 +783,8 @@ export function createHandlers(knowledge: Knowledge, TbError: ErrorFactory) {
     async keysChanged() {
       const s = knowledge.current();
       if (s) knowledge.forgetResearchModel(s);
+      // C296 INFO-2: a key the engine waited for may be set now (or one was removed)
+      await knowledge.checkProviderKeys().catch(() => undefined);
     },
   };
 
