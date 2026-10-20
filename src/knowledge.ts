@@ -192,7 +192,7 @@ export class Knowledge {
       return { code: ENGINE_MISSING, reason: "No memory engine runs: the GBrain service is not deployed with this app, so recall is keyword-only. Redeploy the app from Portal to add it." };
     }
     if (this.provisionAttempt > PROVISION_UNREACHABLE_AFTER) {
-      return { code: ENGINE_UNREACHABLE, reason: "The memory engine service does not answer, so its memory areas cannot be set up and recall is keyword-only. Check the GBrain service in your project." };
+      return { code: ENGINE_UNREACHABLE, reason: "A memory area cannot be set up in the memory engine (retried for over a minute), so recall there is keyword-only. Check the GBrain service in your project." };
     }
     const { state, detail } = this.engineHealth;
     const list = detail.join(", ").slice(0, 80);

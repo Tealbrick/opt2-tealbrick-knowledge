@@ -95,7 +95,8 @@ export class Areas {
           this.db.prepare("UPDATE kn_areas SET notebook_id = ? WHERE id = ?").run(notebookId, area.id);
         }
       } catch (error) {
-        log?.("area provisioning failed; retrying later", { area: area.id, error: error instanceof Error ? error.message : "unknown" });
+        // The error code only: a helper message can carry the upstream response body (C296 review).
+        log?.("area provisioning failed; retrying later", { area: area.id, error: error && typeof error === "object" && "code" in error ? String((error as { code: unknown }).code).slice(0, 64) : "provision_failed" });
       }
     }
   }
