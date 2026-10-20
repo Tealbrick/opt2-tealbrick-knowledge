@@ -84,7 +84,8 @@ describe("companion claim gate (QA-C296-4)", () => {
       const winner = await Promise.race([claimed.then((ok) => (ok ? "claimed" : "timeout")), exited.then(() => "exited")]);
       child.kill("SIGTERM");
       assert.equal(winner, "claimed", `no claim from ${svc.id}; tb-exec said:\n${log.join("").slice(-2000)}`);
-      const claim = bridge.claims[bridge.claims.length - 1]!.request;
+      const claim = bridge.claims.at(-1)?.request;
+      assert.ok(claim);
       assert.equal(claim.service, svc.id);
       assert.equal(claim.manifestDigest, manifestDigest(manifest), "the companion claims for the deployed manifest");
       assert.equal(claim.version, manifest.version);
