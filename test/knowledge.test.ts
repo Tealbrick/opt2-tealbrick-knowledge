@@ -727,3 +727,18 @@ test("C296 review: stop() during an in-flight background provision does not sche
   assert.equal(knowledge.provisionRetrying(), false);
   assert.equal(calls, 2, "no retry after stop()");
 });
+
+test("C296 (prod): the engine catalog fails visibly before the company source exists and lists the tools once it does", async () => {
+  const { ctx, run, definition } = await setup();
+  const dynamic = definition.dynamic?.engine;
+  assert.ok(dynamic);
+  const warned: string[] = [];
+  const hookCtx = { db: ctx(ADA).db, log: { debug() {}, info() {}, warn: (msg: string) => void warned.push(msg), error() {} }, getKey: async () => null, signal: new AbortController().signal, secrets: memorySecrets() };
+  gbrain.sources.clear();
+  // Before: no source in the engine yet. An empty list would be cached by the bridge as "no tools" with no signal.
+  await assert.rejects(dynamic.catalog(null, hookCtx as never), Error);
+  assert.ok(warned.includes("engine catalog failed"));
+  await run("recall", { query: "warm up" }, ctx(ADA)); // provisions the sources
+  const names = (await dynamic.catalog(null, hookCtx as never)).map((entry) => entry.name);
+  assert.ok(names.includes("gb_query") && names.includes("gb_get_page"), "the engine tools are listed once the source exists");
+});

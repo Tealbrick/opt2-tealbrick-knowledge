@@ -194,7 +194,17 @@ export class GBrainClient {
   }
 
   async tools(sourceId: string): Promise<Record<string, unknown>[]> {
-    return listTools({ baseUrl: this.baseUrl, token: await this.token(sourceId), fetch: this.fetcher });
+    const list = async () => listTools({ baseUrl: this.baseUrl, token: await this.token(sourceId), fetch: this.fetcher });
+    try {
+      return await list();
+    } catch (error) {
+      // C296: a stale token (e.g. the engine restarted) is retried once with a fresh one, as tool calls are.
+      if (error instanceof GBrainError && error.kind === "http" && error.status === 401) {
+        this.invalidate(sourceId);
+        return list();
+      }
+      throw error;
+    }
   }
 
   /** Knowledge owns its projected pages: write against the current revision with a deterministic request id. */
