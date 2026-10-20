@@ -742,3 +742,47 @@ test("C296 (prod): the engine catalog fails visibly before the company source ex
   const names = (await dynamic.catalog(null, hookCtx as never)).map((entry) => entry.name);
   assert.ok(names.includes("gb_query") && names.includes("gb_get_page"), "the engine tools are listed once the source exists");
 });
+
+test("C296 Settings: engine (GBrain, Hindsight greyed soon), models and key names, documents, capabilities, areas; never a key value", async () => {
+  const { ctx, run } = await setup();
+  await run("remember", { text: "Settings probe memory" }, ctx(ADA));
+  await run("recall", { query: "warm up" }, ctx(ADA)); // provisions the sources
+  const owner = ctx(ADA, { caller: { type: "person", id: "per_01OWNER000000000000000000" as `per_${string}`, name: "Owner", mode: null } });
+  const out = await run("settings_overview", {}, owner);
+  assert.equal(out.engine.configured, "gbrain");
+  assert.equal(out.engine.running, true);
+  assert.deepEqual(out.engine.choices, [{ value: "gbrain", label: "GBrain", note: "Sourced pages and facts, hybrid search, a typed graph of people and companies." }, { value: "hindsight", label: "Hindsight", note: "soon", disabled: true }]);
+  assert.deepEqual(out.models.keys, ["OPENAI_API_KEY"]);
+  assert.equal(out.documents.total, 1);
+  assert.ok(Array.isArray(out.areas) && out.areas.some((a: Record<string, unknown>) => a.id === ADA_AREA && a.engineReady === true));
+  assert.equal(out.tools.error, null);
+  assert.ok(out.tools.offered >= 1);
+  const cap = (id: string) => out.capabilities.find((c: Record<string, unknown>) => c.id === id);
+  assert.equal(cap("entities").state, "on");
+  assert.equal(cap("think").state, "off", "the engine reports no chat model key");
+  assert.match(cap("think").reason, /chat model key/u);
+  assert.equal(out.embeddings.readiness.state, "ok");
+  assert.ok(out.embeddings.chunks >= 2 && out.embeddings.embedded === out.embeddings.chunks, "chunks embedded n of N from the engine");
+  assert.equal(out.engine.version, "0.60.57.0");
+  assert.equal(cap("reranker").state, "off");
+  assert.match(cap("reranker").reason, /VOYAGE_API_KEY/u);
+  assert.ok(!JSON.stringify(out).includes(gbrain.adminToken), "no secret in the answer");
+});
+
+test("C296 Settings without an engine: engine_missing, nothing running, every capability off", async () => {
+  const db = memoryDb();
+  const scopes = new FakeScopes();
+  const { definition } = knowledgeDefinition({ KNOWLEDGE_ENGINE: "hindsight" }, TestError, { drainIntervalMs: 0 });
+  const log = { debug() {}, info() {}, warn() {}, error() {} };
+  await definition.events?.agentAdded?.({ id: ADA, name: "Ada", mode: "free", status: "active" }, { db, scopes: scopes.asStore(), log, callApp: async () => { throw new Error("no companions"); }, statusChanged() {}, ownerLink: () => null });
+  const spec = definition.handlers.settings_overview;
+  const handler = typeof spec === "function" ? spec : spec?.run;
+  assert.ok(handler);
+  const owner = context(db, scopes, ADA, { caller: { type: "person", id: "per_01OWNER000000000000000000" as `per_${string}`, name: "Owner", mode: null } });
+  const out = (await handler({} as Json, owner)) as Record<string, any>;
+  assert.equal(out.engine.configured, "hindsight");
+  assert.equal(out.engine.running, false);
+  assert.equal(out.engine.attention.code, ENGINE_MISSING);
+  assert.ok(out.capabilities.every((c: Record<string, unknown>) => c.state === "off"));
+  assert.equal(out.tools.offered, null);
+});

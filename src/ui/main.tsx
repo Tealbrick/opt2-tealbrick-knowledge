@@ -8,6 +8,7 @@ import { ErrorNotice, errText, PageHead, useOverview } from "./common.tsx";
 import { Library, type LibraryNav } from "./library.tsx";
 import { Recall } from "./recall.tsx";
 import { Research } from "./research.tsx";
+import { Settings } from "./settings.tsx";
 import { type Agent, AgentsPage, BackupsPage, errorMessage, HoldsPage, portalHref, ReceiptsPage, standardRoutes, useHoldList, useNav } from "./standard.tsx";
 
 const NAME = "Knowledge";
@@ -15,9 +16,9 @@ const NAME = "Knowledge";
 const STILLS = new URL("./stills/", import.meta.url).href;
 
 /** Shell page id → path under the base `/a/knowledge/`. Memory is the launch page (manifest `ui.launchPath`), Agents & scopes is `ui.configurePath`. */
-const ROUTES = { ...standardRoutes("memory"), research: "research", keys: "keys" };
+const ROUTES = { ...standardRoutes("memory"), research: "research", settings: "settings", keys: "keys" };
 /** Own pages first, then the standard ones (the kit list holds Holds, Receipts, Agents & scopes, Keys, Backups & export). */
-const PAGES = [{ id: "memory", label: "Memory" }, { id: "research", label: "Research" }, ...STANDARD_PAGES.filter((p) => p.id in ROUTES)];
+const PAGES = [{ id: "memory", label: "Memory" }, { id: "research", label: "Research" }, { id: "settings", label: "Settings" }, ...STANDARD_PAGES.filter((p) => p.id in ROUTES)];
 
 type MemoryTab = "library" | "recall" | "status";
 const MEMORY_TABS: { value: MemoryTab; label: string }[] = [
@@ -324,6 +325,8 @@ function App() {
         <HoldsPage list={holds} only={nav.hold} empty="Nothing waits for your approval." />
       ) : nav.page === "receipts" ? (
         <ReceiptsPage empty="No agent actions recorded yet." />
+      ) : nav.page === "settings" ? (
+        <Settings />
       ) : nav.page === "keys" ? (
         <Keys />
       ) : nav.page === "backups" ? (

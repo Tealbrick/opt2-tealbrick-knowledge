@@ -99,6 +99,21 @@ export interface RecallAnswer {
   degraded: string[];
 }
 
+export interface EngineReadiness {
+  capability: string;
+  state: string;
+  reason: string | null;
+}
+
+export interface EngineSettings {
+  tools: { offered: string[] | null; error: string | null };
+  readiness: EngineReadiness[] | null;
+  readinessError: string | null;
+  surface: string | null;
+  counts: { pages: number | null; chunks: number | null; embedded: number | null; version: string | null } | null;
+  countsError: string | null;
+}
+
 export class GBrainEngine {
   readonly id = "gbrain";
   private readonly client: GBrainClient;
@@ -152,6 +167,37 @@ export class GBrainEngine {
 
   async catalog(): Promise<DynamicCatalogEntry[]> {
     return catalogEntries(await this.client.tools(this.catalogSource));
+  }
+
+  /**
+   * C296 owner Settings: what the engine itself reports, each part best effort (a failing part names its error code,
+   * never upstream text): the tools agents are offered, the engine's readiness (embeddings, chat model, tool surface)
+   * and brain-wide counts (pages, chunks, embedded chunks).
+   */
+  async settings(): Promise<EngineSettings> {
+    const codeOf = (error: unknown) => (error && typeof error === "object" && "code" in error ? String((error as { code: unknown }).code).slice(0, 64) : "engine_error");
+    const [tools, caps, stats] = await Promise.allSettled([this.catalog(), this.client.capabilities(this.catalogSource), this.client.fullStats()]);
+    const readiness: EngineReadiness[] = [];
+    let surface: string | null = null;
+    if (caps.status === "fulfilled" && caps.value && typeof caps.value === "object") {
+      const value = caps.value as Record<string, unknown>;
+      surface = typeof value.surface === "string" ? value.surface.slice(0, 32) : null;
+      for (const entry of Array.isArray(value.readiness) ? value.readiness : []) {
+        if (!entry || typeof entry !== "object") continue;
+        const { capability, state, reason } = entry as Record<string, unknown>;
+        if (typeof capability === "string" && typeof state === "string") readiness.push({ capability: capability.slice(0, 32), state: state.slice(0, 32), reason: typeof reason === "string" ? reason.slice(0, 64) : null });
+      }
+    }
+    const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+    const counts = stats.status === "fulfilled" ? stats.value : null;
+    return {
+      tools: tools.status === "fulfilled" ? { offered: tools.value.map((entry) => entry.name), error: null } : { offered: null, error: codeOf(tools.reason) },
+      readiness: caps.status === "fulfilled" ? readiness : null,
+      readinessError: caps.status === "rejected" ? codeOf(caps.reason) : null,
+      surface,
+      counts: counts ? { pages: num(counts.page_count), chunks: num(counts.chunk_count), embedded: num(counts.embedded_count), version: typeof counts.version === "string" ? counts.version.slice(0, 32) : null } : null,
+      countsError: stats.status === "rejected" ? codeOf(stats.reason) : null,
+    };
   }
 
   resolve(entryName: string) {

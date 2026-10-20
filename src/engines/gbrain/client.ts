@@ -4,7 +4,7 @@
 // (one Knowledge area), so upstream itself enforces source isolation. One client per (source, agent)
 // keeps upstream ownership (forget) and delta cursors per agent.
 import { createHash, randomBytes } from "node:crypto";
-import { callToolAnswer, GBrainError, listTools, type ToolAnswer } from "./transport.ts";
+import { callToolAnswer, GBrainError, listTools, readJsonResource, type ToolAnswer } from "./transport.ts";
 
 /** Upstream source id grammar (≤ 32 chars). */
 export const SOURCE_ID = /^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/u;
@@ -205,6 +205,36 @@ export class GBrainClient {
       }
       throw error;
     }
+  }
+
+  /** C296: the engine's own view of this connection (`gbrain://capabilities`): surface, visible operations, readiness. */
+  async capabilities(sourceId: string): Promise<unknown> {
+    const read = async () => readJsonResource({ baseUrl: this.baseUrl, token: await this.token(sourceId), uri: "gbrain://capabilities", fetch: this.fetcher });
+    try {
+      return await read();
+    } catch (error) {
+      if (error instanceof GBrainError && error.kind === "http" && error.status === 401) {
+        this.invalidate(sourceId);
+        return read();
+      }
+      throw error;
+    }
+  }
+
+  /** C296: brain-wide counts from the admin API (`/admin/api/full-stats`): pages, chunks, embedded chunks, version. */
+  async fullStats(): Promise<Record<string, unknown>> {
+    let response: Response;
+    try {
+      response = await this.fetcher(`${this.baseUrl}/admin/api/full-stats`, { redirect: "error", signal: AbortSignal.timeout(15_000), headers: { cookie: await this.admin() } });
+    } catch (error) {
+      if (error instanceof GBrainServiceError) throw error;
+      throw new GBrainServiceError("gbrain_admin_unavailable");
+    }
+    if (response.status === 401) this.adminCookie = null;
+    const body = (await response.json().catch(() => null)) as Record<string, unknown> | null;
+    // 503 still carries the probe body (status "degraded"); anything without counts is unavailable.
+    if (!body || typeof body.page_count !== "number") throw new GBrainServiceError("gbrain_admin_unavailable");
+    return body;
   }
 
   /** Knowledge owns its projected pages: write against the current revision with a deterministic request id. */

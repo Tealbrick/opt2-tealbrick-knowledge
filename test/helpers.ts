@@ -173,6 +173,11 @@ export async function fakeGBrain(): Promise<FakeGBrain> {
       clients.set(clientId, { secret: `s${counter}`, source });
       return json(200, { clientId, clientSecret: `s${counter}` });
     }
+    if (req.url === "/admin/api/full-stats") {
+      if (req.headers.cookie !== "gbrain_admin=s1") return json(401, {});
+      const pages = [...state.pages.values()].reduce((n, m) => n + m.size, 0);
+      return json(200, { status: "ok", version: "0.60.57.0", engine: "postgres", page_count: pages, chunk_count: pages * 2, embedded_count: pages * 2 });
+    }
     if (req.url === "/token") {
       const form = new URLSearchParams(text);
       const client = clients.get(form.get("client_id") ?? "");
@@ -189,12 +194,17 @@ export async function fakeGBrain(): Promise<FakeGBrain> {
       const toolError = (error: string) => reply({ isError: true, content: [{ type: "text", text: JSON.stringify({ error, message: "secret detail" }) }] });
       if (message.method === "tools/list") {
         return reply({
-          tools: ["query", "remember", "forget", "get_page", "entity", "sources_list"].map((name) => ({
+          tools: ["query", "remember", "forget", "get_page", "entity", "think", "sources_list"].map((name) => ({
             name,
             description: `${name} tool`,
             inputSchema: { type: "object", properties: { source_id: { type: "string" }, query: { type: "string" } }, required: ["source_id"] },
           })),
         });
+      }
+      if (message.method === "resources/read") {
+        // gbrain://capabilities at the pin: surface + config readiness (embeddings, chat model, tool surface).
+        const capabilities = { surface: "full", scopes: ["read", "write"], readiness: [{ capability: "embeddings", state: "ok", reason: "configured" }, { capability: "chat_llm", state: "missing", reason: "key_missing" }] };
+        return reply({ contents: [{ uri: (message.params as { uri: string }).uri, mimeType: "application/json", text: JSON.stringify(capabilities) }] });
       }
       const { name, arguments: args } = message.params as { name: string; arguments: Record<string, unknown> };
       state.calls.push({ source, name, args });
