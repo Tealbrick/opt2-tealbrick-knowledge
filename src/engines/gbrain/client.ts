@@ -4,7 +4,7 @@
 // (one Knowledge area), so upstream itself enforces source isolation. One client per (source, agent)
 // keeps upstream ownership (forget) and delta cursors per agent.
 import { createHash, randomBytes } from "node:crypto";
-import { callToolAnswer, GBrainError, listTools, type ToolAnswer } from "./transport.ts";
+import { callToolAnswer, GBrainError, listTools, readJsonResource, type ToolAnswer } from "./transport.ts";
 
 /** Upstream source id grammar (≤ 32 chars). */
 export const SOURCE_ID = /^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/u;
@@ -194,7 +194,55 @@ export class GBrainClient {
   }
 
   async tools(sourceId: string): Promise<Record<string, unknown>[]> {
-    return listTools({ baseUrl: this.baseUrl, token: await this.token(sourceId), fetch: this.fetcher });
+    const list = async () => listTools({ baseUrl: this.baseUrl, token: await this.token(sourceId), fetch: this.fetcher });
+    try {
+      return await list();
+    } catch (error) {
+      // C296: a stale token (e.g. the engine restarted) is retried once with a fresh one, as tool calls are.
+      if (error instanceof GBrainError && error.kind === "http" && error.status === 401) {
+        this.invalidate(sourceId);
+        return list();
+      }
+      throw error;
+    }
+  }
+
+  /** C296: the engine's own view of this connection (`gbrain://capabilities`): surface, visible operations, readiness. */
+  async capabilities(sourceId: string): Promise<unknown> {
+    const read = async () => readJsonResource({ baseUrl: this.baseUrl, token: await this.token(sourceId), uri: "gbrain://capabilities", fetch: this.fetcher });
+    try {
+      return await read();
+    } catch (error) {
+      if (error instanceof GBrainError && error.kind === "http" && error.status === 401) {
+        this.invalidate(sourceId);
+        return read();
+      }
+      throw error;
+    }
+  }
+
+  /** C296: brain-wide counts from the admin API (`/admin/api/full-stats`): pages, chunks, embedded chunks, version. */
+  async fullStats(): Promise<Record<string, unknown>> {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      let response: Response;
+      try {
+        response = await this.fetcher(`${this.baseUrl}/admin/api/full-stats`, { redirect: "error", signal: AbortSignal.timeout(15_000), headers: { cookie: await this.admin() } });
+      } catch (error) {
+        if (error instanceof GBrainServiceError) throw error;
+        throw new GBrainServiceError("gbrain_admin_unavailable");
+      }
+      // Admin sessions live in the engine's memory: after an engine restart the cookie is unknown; log in again once.
+      if (response.status === 401 && attempt === 0) {
+        await response.body?.cancel();
+        this.adminCookie = null;
+        continue;
+      }
+      const body = (await response.json().catch(() => null)) as Record<string, unknown> | null;
+      // An unhealthy engine answers 503 {error, error_description}: no counts → unavailable.
+      if (!body || typeof body.page_count !== "number") throw new GBrainServiceError("gbrain_admin_unavailable");
+      return body;
+    }
+    throw new GBrainServiceError("gbrain_admin_unavailable");
   }
 
   /** Knowledge owns its projected pages: write against the current revision with a deterministic request id. */

@@ -714,9 +714,16 @@ export function createHandlers(knowledge: Knowledge, TbError: ErrorFactory) {
       const s = knowledge.bind(ctx.db, secretsOf(ctx));
       if (!s.engine) return [];
       try {
-        return await s.engine.catalog();
-      } catch {
-        return [];
+        const entries = await s.engine.catalog();
+        // An engine that answers but matches none of the exposed tools (an upstream surface change) is never silent either.
+        if (!entries.length) ctx.log.warn("engine catalog empty", { engine: "gbrain" });
+        return entries;
+      } catch (error) {
+        // C296 (prod): an empty answer was cached by the bridge as "no tools" and nobody was told. Fail instead: the bridge
+        // marks the op catalog_failed (status toolsOmitted → Core) and asks again on the next tools/list.
+        const failure = engineError(error);
+        ctx.log.warn("engine catalog failed", { code: String((failure as { code?: unknown }).code ?? "engine_error").slice(0, 64) });
+        throw failure;
       }
     },
     async resolve(tool): Promise<DynamicResolution | null> {

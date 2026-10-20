@@ -244,3 +244,18 @@ export async function listTools(opts: TransportOptions): Promise<Record<string, 
   }
   return message.result.tools.filter(isRecord);
 }
+
+/** MCP resources/read: the first text content parsed as JSON (C296: `gbrain://capabilities`, readiness + surface). */
+export async function readJsonResource(opts: TransportOptions & { uri: string }): Promise<unknown> {
+  const id = randomUUID();
+  const { text, sse } = await rpc(opts.baseUrl, opts.token, { jsonrpc: "2.0", id, method: "resources/read", params: { uri: opts.uri } }, opts.timeoutMs ?? 15_000, opts.fetch ?? fetch);
+  const message = sse ? sseResult(text, id) : parseEnvelope(text);
+  const contents = isRecord(message) && message.id === id && isRecord(message.result) && Array.isArray(message.result.contents) ? message.result.contents : null;
+  const first = contents?.find((c): c is Record<string, unknown> => isRecord(c) && typeof c.text === "string");
+  if (!first) throw new GBrainError("protocol", "invalid GBrain MCP resources/read response");
+  try {
+    return JSON.parse(first.text as string);
+  } catch {
+    throw new GBrainError("protocol", "GBrain resource is not JSON");
+  }
+}

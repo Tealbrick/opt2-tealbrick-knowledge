@@ -591,7 +591,7 @@ test("R-2: a provider_error on the embedding stage reads as a rejected key (fire
 test("C296: no memory engine is never silent: engine_missing for a setting that is not available and for a missing service (fires); quiet with GBrain", async () => {
   const { definition } = knowledgeDefinition({ KNOWLEDGE_ENGINE: "hindsight", KNOWLEDGE_MODEL_PROVIDER: "openai" }, TestError, { drainIntervalMs: 0 });
   assert.equal((await definition.attention?.())?.code, ENGINE_MISSING);
-  assert.match((await definition.attention?.())?.reason ?? "", /"hindsight" is not available yet.*Switch the engine to GBrain/u);
+  assert.match((await definition.attention?.())?.reason ?? "", /"hindsight" is not available yet.*Choose GBrain in Portal/u);
   const noService = knowledgeDefinition({ KNOWLEDGE_ENGINE: "gbrain" }, TestError, { drainIntervalMs: 0 });
   assert.equal(noService.knowledge.attention()?.code, ENGINE_MISSING);
   assert.match(noService.knowledge.attention()?.reason ?? "", /GBrain service is not deployed/u);
@@ -726,4 +726,76 @@ test("C296 review: stop() during an in-flight background provision does not sche
   await new Promise((resolve) => setTimeout(resolve, 20));
   assert.equal(knowledge.provisionRetrying(), false);
   assert.equal(calls, 2, "no retry after stop()");
+});
+
+test("C296 (prod): the engine catalog fails visibly before the company source exists and lists the tools once it does", async () => {
+  const { ctx, run, definition } = await setup();
+  const dynamic = definition.dynamic?.engine;
+  assert.ok(dynamic);
+  const warned: string[] = [];
+  const hookCtx = { db: ctx(ADA).db, log: { debug() {}, info() {}, warn: (msg: string) => void warned.push(msg), error() {} }, getKey: async () => null, signal: new AbortController().signal, secrets: memorySecrets() };
+  gbrain.sources.clear();
+  // Before: no source in the engine yet. An empty list would be cached by the bridge as "no tools" with no signal.
+  await assert.rejects(dynamic.catalog(null, hookCtx as never), Error);
+  assert.ok(warned.includes("engine catalog failed"));
+  await run("recall", { query: "warm up" }, ctx(ADA)); // provisions the sources
+  const names = (await dynamic.catalog(null, hookCtx as never)).map((entry) => entry.name);
+  assert.ok(names.includes("gb_query") && names.includes("gb_get_page"), "the engine tools are listed once the source exists");
+});
+
+test("C296 Settings: engine (GBrain, Hindsight greyed soon), models and key names, documents, capabilities, areas; never a key value", async () => {
+  const { ctx, run } = await setup();
+  await run("remember", { text: "Settings probe memory" }, ctx(ADA));
+  await run("recall", { query: "warm up" }, ctx(ADA)); // provisions the sources
+  const owner = ctx(ADA, { caller: { type: "person", id: "per_01OWNER000000000000000000" as `per_${string}`, name: "Owner", mode: null } });
+  const out = await run("settings_overview", {}, owner);
+  assert.equal(out.engine.configured, "gbrain");
+  assert.equal(out.engine.running, true);
+  assert.deepEqual(out.engine.choices, [{ value: "gbrain", label: "GBrain", note: "Sourced pages and facts, hybrid search, a typed graph of people and companies." }, { value: "hindsight", label: "Hindsight", note: "soon", disabled: true }]);
+  assert.deepEqual(out.models.keys, ["OPENAI_API_KEY"]);
+  assert.equal(out.documents.total, 1);
+  assert.ok(Array.isArray(out.areas) && out.areas.some((a: Record<string, unknown>) => a.id === ADA_AREA && a.engineReady === true));
+  assert.equal(out.tools.error, null);
+  assert.ok(out.tools.offered >= 1);
+  const cap = (id: string) => out.capabilities.find((c: Record<string, unknown>) => c.id === id);
+  assert.equal(cap("entities").state, "on");
+  assert.equal(cap("think").state, "off", "the engine reports no chat model key");
+  assert.match(cap("think").reason, /Needs OPENAI_API_KEY in the engine/u, "the configured provider's key is named");
+  assert.equal(out.embeddings.readiness.state, "ok");
+  assert.ok(out.embeddings.chunks >= 2 && out.embeddings.embedded === out.embeddings.chunks, "chunks embedded n of N from the engine");
+  assert.equal(out.engine.version, "0.60.57.0");
+  assert.equal(cap("reranker").state, "off");
+  assert.match(cap("reranker").reason, /VOYAGE_API_KEY/u);
+  const text = JSON.stringify(out);
+  for (const secret of [gbrain.adminToken, "gbrain_admin=s1", "must-not-leak"]) assert.ok(!text.includes(secret), `no ${secret} in the answer`);
+});
+
+test("C296 Settings without an engine: engine_missing, nothing running, every capability off", async () => {
+  const db = memoryDb();
+  const scopes = new FakeScopes();
+  const { definition } = knowledgeDefinition({ KNOWLEDGE_ENGINE: "hindsight" }, TestError, { drainIntervalMs: 0 });
+  const log = { debug() {}, info() {}, warn() {}, error() {} };
+  await definition.events?.agentAdded?.({ id: ADA, name: "Ada", mode: "free", status: "active" }, { db, scopes: scopes.asStore(), log, callApp: async () => { throw new Error("no companions"); }, statusChanged() {}, ownerLink: () => null });
+  const spec = definition.handlers.settings_overview;
+  const handler = typeof spec === "function" ? spec : spec?.run;
+  assert.ok(handler);
+  const owner = context(db, scopes, ADA, { caller: { type: "person", id: "per_01OWNER000000000000000000" as `per_${string}`, name: "Owner", mode: null } });
+  const out = (await handler({} as Json, owner)) as Record<string, any>;
+  assert.equal(out.engine.configured, "hindsight");
+  assert.equal(out.engine.running, false);
+  assert.equal(out.engine.attention.code, ENGINE_MISSING);
+  assert.ok(out.capabilities.every((c: Record<string, unknown>) => c.state === "off"));
+  assert.equal(out.tools.offered, null);
+});
+
+test("C296 review: Settings reads the engine counts again after an engine restart forgot the admin session (one re-login)", async () => {
+  const { ctx, run } = await setup();
+  await run("remember", { text: "Restart probe" }, ctx(ADA));
+  await run("recall", { query: "warm up" }, ctx(ADA));
+  const owner = ctx(ADA, { caller: { type: "person", id: "per_01OWNER000000000000000000" as `per_${string}`, name: "Owner", mode: null } });
+  assert.ok((await run("settings_overview", {}, owner)).embeddings.chunks !== null);
+  gbrain.adminSessionsLost = true;
+  const out = await run("settings_overview", {}, owner);
+  assert.ok(out.embeddings.chunks !== null, "counts after one re-login");
+  assert.equal(out.embeddings.error, null);
 });

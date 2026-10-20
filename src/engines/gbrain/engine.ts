@@ -99,6 +99,24 @@ export interface RecallAnswer {
   degraded: string[];
 }
 
+/** C296 review: the owner Settings page waits at most this long for the engine's own report. */
+export const SETTINGS_DEADLINE_MS = 6_000;
+
+export interface EngineReadiness {
+  capability: string;
+  state: string;
+  reason: string | null;
+}
+
+export interface EngineSettings {
+  tools: { offered: string[] | null; error: string | null };
+  readiness: EngineReadiness[] | null;
+  readinessError: string | null;
+  surface: string | null;
+  counts: { pages: number | null; chunks: number | null; embedded: number | null; version: string | null } | null;
+  countsError: string | null;
+}
+
 export class GBrainEngine {
   readonly id = "gbrain";
   private readonly client: GBrainClient;
@@ -152,6 +170,45 @@ export class GBrainEngine {
 
   async catalog(): Promise<DynamicCatalogEntry[]> {
     return catalogEntries(await this.client.tools(this.catalogSource));
+  }
+
+  /**
+   * C296 owner Settings: what the engine itself reports, each part best effort (a failing part names its error code,
+   * never upstream text): the tools agents are offered, the engine's readiness (embeddings, chat model, tool surface)
+   * and brain-wide counts (pages, chunks, embedded chunks).
+   */
+  async settings(deadlineMs = SETTINGS_DEADLINE_MS): Promise<EngineSettings> {
+    const codeOf = (error: unknown) => {
+      const code = error && typeof error === "object" ? (error as { code?: unknown; kind?: unknown }).code : undefined;
+      if (typeof code === "string" && code) return code.slice(0, 64);
+      const kind = error && typeof error === "object" ? (error as { kind?: unknown }).kind : undefined;
+      return typeof kind === "string" && kind ? `engine_${kind}`.slice(0, 64) : "engine_error";
+    };
+    // One deadline for the whole page: an engine that accepts and never answers must not hang the owner's Settings.
+    const deadline = <T>(promise: Promise<T>) =>
+      Promise.race([promise, new Promise<never>((_, reject) => setTimeout(() => reject(Object.assign(new Error("engine timeout"), { code: "engine_timeout" })), deadlineMs).unref())]);
+    const [tools, caps, stats] = await Promise.allSettled([deadline(this.catalog()), deadline(this.client.capabilities(this.catalogSource)), deadline(this.client.fullStats())]);
+    const readiness: EngineReadiness[] = [];
+    let surface: string | null = null;
+    if (caps.status === "fulfilled" && caps.value && typeof caps.value === "object") {
+      const value = caps.value as Record<string, unknown>;
+      surface = typeof value.surface === "string" ? value.surface.slice(0, 32) : null;
+      for (const entry of Array.isArray(value.readiness) ? value.readiness : []) {
+        if (!entry || typeof entry !== "object") continue;
+        const { capability, state, reason } = entry as Record<string, unknown>;
+        if (typeof capability === "string" && typeof state === "string") readiness.push({ capability: capability.slice(0, 32), state: state.slice(0, 32), reason: typeof reason === "string" ? reason.slice(0, 64) : null });
+      }
+    }
+    const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+    const counts = stats.status === "fulfilled" ? stats.value : null;
+    return {
+      tools: tools.status === "fulfilled" ? { offered: tools.value.map((entry) => entry.name), error: null } : { offered: null, error: codeOf(tools.reason) },
+      readiness: caps.status === "fulfilled" ? readiness : null,
+      readinessError: caps.status === "rejected" ? codeOf(caps.reason) : null,
+      surface,
+      counts: counts ? { pages: num(counts.page_count), chunks: num(counts.chunk_count), embedded: num(counts.embedded_count), version: typeof counts.version === "string" ? counts.version.slice(0, 32) : null } : null,
+      countsError: stats.status === "rejected" ? codeOf(stats.reason) : null,
+    };
   }
 
   resolve(entryName: string) {
