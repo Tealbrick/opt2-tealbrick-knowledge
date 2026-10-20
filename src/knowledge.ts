@@ -113,6 +113,8 @@ export class Knowledge {
   private provisionAccess: ServiceAccess | null = null;
   /** C296 INFO-2: provider keys the engine needs that the bridge reports unset (last check) */
   private missingKeys: string[] = [];
+  private keyCheckSeq = 0;
+  private provisionInFlight = false;
   private provisionLog: ((msg: string, fields: Record<string, string>) => void) | null = null;
   private stopped = false;
 
@@ -308,13 +310,16 @@ export class Knowledge {
     if (this.provisionAttempt === PROVISION_UNREACHABLE_AFTER + 1) this.statusChanged?.();
     this.provisionTimer = setTimeout(() => {
       if (this.stopped) return;
+      this.provisionInFlight = true;
       const attempt = this.provisionAttempt;
       // Log the first failure and every 5th, never upstream bodies (Areas logs the error message only).
       const quiet = attempt !== 1 && attempt % 5 !== 0;
       void this.provision(this.services ?? current, known, quiet ? undefined : this.provisionLog ?? undefined)
         .catch(() => undefined)
-        .then(() => this.checkProviderKeys())
+        .then(() => (this.stopped ? undefined : this.checkProviderKeys()))
+        .catch(() => undefined)
         .then(() => {
+          this.provisionInFlight = false;
           this.provisionTimer = null;
           if (this.stopped) return;
           this.kick(this.services ?? current);
@@ -331,20 +336,36 @@ export class Knowledge {
   async checkProviderKeys(access?: Pick<ServiceAccess, "getKey">): Promise<string[]> {
     const source = access ?? this.provisionAccess;
     if (!source || this.config.engine !== "gbrain") return this.missingKeys;
+    const seq = ++this.keyCheckSeq;
     const missing: string[] = [];
     for (const name of PROVIDER_MODELS[this.config.modelProvider].keys) {
       try {
         if ((await source.getKey(name)) === null) missing.push(name);
       } catch {
-        /* unknown: not counted */
+        // the bridge cannot answer right now (paused, updating): keep what was known for this key (review)
+        if (this.missingKeys.includes(name)) missing.push(name);
       }
     }
+    if (seq !== this.keyCheckSeq) return this.missingKeys; // a newer check started meanwhile: it decides (review)
     missing.sort();
     if (missing.join(",") !== this.missingKeys.join(",")) {
+      const keysArrived = this.missingKeys.length > 0 && missing.length === 0;
       this.missingKeys = missing;
       this.statusChanged?.();
+      // The engine starts now (tb-exec had held it): provision again at once, not after the long backoff, so the owner never
+      // reads "cannot be set up" for minutes after entering the key (review).
+      if (keysArrived) this.restartProvisioning();
     }
     return missing;
+  }
+
+  /** C296 INFO-2: start the background provisioning over (counter reset, next try soon), e.g. once the engine's key arrived. */
+  private restartProvisioning(): void {
+    this.provisionAttempt = 0;
+    if (this.provisionInFlight || !this.provisionTimer || !this.services) return; // a running try reschedules from attempt 0
+    clearTimeout(this.provisionTimer);
+    this.provisionTimer = null;
+    this.retryProvision(this.services);
   }
 
   /** True while a background provisioning retry is scheduled or running. */

@@ -831,8 +831,47 @@ test("C296 INFO-2: an unknown key state is not 'missing'; the Anthropic provider
   const { knowledge } = knowledgeDefinition(env, TestError, { drainIntervalMs: 0 });
   assert.deepEqual(await knowledge.checkProviderKeys({ getKey: async () => { throw new Error("key_unavailable"); } }), [], "the bridge did not answer: unknown, not missing");
   assert.deepEqual(await knowledge.checkProviderKeys({ getKey: async () => null }), ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"]);
+  // review: a known-missing key stays missing while the bridge cannot answer (paused, updating) — no flapping
+  assert.deepEqual(await knowledge.checkProviderKeys({ getKey: async () => { throw new Error("key_unavailable"); } }), ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"]);
   assert.match(knowledge.attention()?.reason ?? "", /waits for ANTHROPIC_API_KEY, OPENAI_API_KEY, so recall is keyword-only\. Enter them/u);
   const none = knowledgeDefinition({ KNOWLEDGE_ENGINE: "hindsight" }, TestError, { drainIntervalMs: 0 }).knowledge;
   assert.deepEqual(await none.checkProviderKeys({ getKey: async () => null }), [], "no engine: no engine key to wait for");
   assert.equal(none.attention()?.code, ENGINE_MISSING);
+});
+
+test("C296 INFO-2 review: once the key arrives the owner never reads 'cannot be set up'; provisioning starts over at once; each retry re-checks the key", async () => {
+  const db = memoryDb();
+  const scopes = new FakeScopes();
+  const env = { KNOWLEDGE_ENGINE: "gbrain", KNOWLEDGE_GBRAIN_URL: gbrain.url, KNOWLEDGE_GBRAIN_ADMIN_TOKEN: gbrain.adminToken, KNOWLEDGE_MODEL_PROVIDER: "openai" };
+  const { definition, knowledge } = knowledgeDefinition(env, TestError, { drainIntervalMs: 0, engineProbeMs: 0, provisionRetryMs: 1 });
+  let key: string | null | "error" = "error"; // the bridge cannot answer at boot
+  const getKey = async () => {
+    if (key === "error") throw new Error("key_unavailable");
+    return key;
+  };
+  // tb-exec holds GBrain without its key: sources cannot be created until the key is set
+  const callServiceHelper = (async (_service: string, _path: string, body: Json) => {
+    if (key === null || key === "error") throw new Error("upstream_not_started");
+    gbrain.sources.add(String((body as Record<string, unknown>).id));
+    return {};
+  }) as OpContext["callServiceHelper"];
+  const log = { debug() {}, info() {}, warn() {}, error() {} };
+  const wait = async (done: () => boolean) => {
+    for (let i = 0; i < 300 && !done(); i++) await new Promise((resolve) => setTimeout(resolve, 5));
+  };
+  try {
+    await definition.onStart({ db, secrets: memorySecrets(), log: log as never, scopes: scopes.asStore(), getKey, callServiceHelper, statusChanged() {} });
+    assert.notEqual(knowledge.attention()?.code, ENGINE_KEY_MISSING, "unknown at boot: not missing");
+    key = null; // now the bridge answers: unset — a background retry finds it (no event needed)
+    await wait(() => knowledge.attention()?.code === ENGINE_KEY_MISSING);
+    assert.equal(knowledge.attention()?.code, ENGINE_KEY_MISSING, "each retry re-checks the key");
+    await new Promise((resolve) => setTimeout(resolve, 100)); // retries climb past the unreachable threshold meanwhile
+    key = "sk-test-value";
+    await definition.events?.keysChanged?.(["OPENAI_API_KEY"], { db, scopes: scopes.asStore(), log, callApp: async () => ({}) as never, statusChanged() {}, ownerLink: () => null } as never);
+    assert.notEqual(knowledge.attention()?.code, ENGINE_UNREACHABLE, "never 'cannot be set up' right after the key arrives");
+    await wait(() => knowledge.current()?.areas.get("company")?.sourceReady === true);
+    assert.equal(knowledge.current()?.areas.get("company")?.sourceReady, true, "provisioning started over and succeeded");
+  } finally {
+    knowledge.stop();
+  }
 });
