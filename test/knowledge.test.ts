@@ -8,7 +8,7 @@ import type { Json, OpContext } from "@opt2-tealbrick/spec/sdk";
 import { knowledgeDefinition } from "../src/app.ts";
 import { NARROWING_POLICY } from "../src/handlers.ts";
 import { areaSourceId } from "../src/ids.ts";
-import { ENGINE_MISSING, ENGINE_UNREACHABLE, KEY_REJECTED, memorySecrets, SECRET_NAME } from "../src/knowledge.ts";
+import { ENGINE_KEY_MISSING, ENGINE_MISSING, ENGINE_UNREACHABLE, KEY_REJECTED, memorySecrets, SECRET_NAME } from "../src/knowledge.ts";
 import { context, type FakeGBrain, FakeScopes, fakeGBrain, memoryDb, TestError } from "./helpers.ts";
 
 const ADA = "agt_01AAAAAAAAAAAAAAAAAAAAAAAA";
@@ -686,7 +686,7 @@ test("C296 review: an engine that never answers is reported (memory_engine_unrea
   let pushes = 0;
   const log = { debug() {}, info() {}, warn: (msg: string) => void warned.push(msg), error() {} };
   try {
-    await definition.onStart({ db, secrets: memorySecrets(), log: log as never, scopes: scopes.asStore(), getKey: async () => null, callServiceHelper, statusChanged: () => void pushes++ });
+    await definition.onStart({ db, secrets: memorySecrets(), log: log as never, scopes: scopes.asStore(), getKey: async () => "sk-test", callServiceHelper, statusChanged: () => void pushes++ });
     const wait = async (done: () => boolean) => {
       for (let i = 0; i < 300 && !done(); i++) await new Promise((resolve) => setTimeout(resolve, 5));
     };
@@ -798,4 +798,41 @@ test("C296 review: Settings reads the engine counts again after an engine restar
   const out = await run("settings_overview", {}, owner);
   assert.ok(out.embeddings.chunks !== null, "counts after one re-login");
   assert.equal(out.embeddings.error, null);
+});
+
+test("C296 INFO-2: while the engine waits for its provider key the attention names the key; it clears when the key is set (quiet)", async () => {
+  const db = memoryDb();
+  const scopes = new FakeScopes();
+  const env = { KNOWLEDGE_ENGINE: "gbrain", KNOWLEDGE_GBRAIN_URL: gbrain.url, KNOWLEDGE_GBRAIN_ADMIN_TOKEN: gbrain.adminToken, KNOWLEDGE_MODEL_PROVIDER: "openai" };
+  const { definition, knowledge } = knowledgeDefinition(env, TestError, { drainIntervalMs: 0, engineProbeMs: 0, provisionRetryMs: 1_000_000 });
+  let key: string | null = null;
+  let pushes = 0;
+  const callServiceHelper = (async (_service: string, _path: string, body: Json) => {
+    gbrain.sources.add(String((body as Record<string, unknown>).id));
+    return {};
+  }) as OpContext["callServiceHelper"];
+  const log = { debug() {}, info() {}, warn() {}, error() {} };
+  try {
+    await definition.onStart({ db, secrets: memorySecrets(), log: log as never, scopes: scopes.asStore(), getKey: async () => key, callServiceHelper, statusChanged: () => void pushes++ });
+    assert.equal(knowledge.attention()?.code, ENGINE_KEY_MISSING, "fires");
+    assert.match(knowledge.attention()?.reason ?? "", /waits for OPENAI_API_KEY.*bridge key page.*starts by itself/u);
+    assert.ok(pushes >= 1, "the status is pushed");
+    key = "sk-test-value";
+    await definition.events?.keysChanged?.(["OPENAI_API_KEY"], { db, scopes: scopes.asStore(), log, callApp: async () => ({}) as never, statusChanged() {}, ownerLink: () => null } as never);
+    assert.notEqual(knowledge.attention()?.code, ENGINE_KEY_MISSING, "quiet once the key is set");
+    assert.ok(!JSON.stringify(knowledge.attention() ?? {}).includes("sk-test-value"), "never the value");
+  } finally {
+    knowledge.stop();
+  }
+});
+
+test("C296 INFO-2: an unknown key state is not 'missing'; the Anthropic provider names both keys; no engine keeps engine_missing first", async () => {
+  const env = { KNOWLEDGE_ENGINE: "gbrain", KNOWLEDGE_GBRAIN_URL: gbrain.url, KNOWLEDGE_GBRAIN_ADMIN_TOKEN: gbrain.adminToken, KNOWLEDGE_MODEL_PROVIDER: "anthropic" };
+  const { knowledge } = knowledgeDefinition(env, TestError, { drainIntervalMs: 0 });
+  assert.deepEqual(await knowledge.checkProviderKeys({ getKey: async () => { throw new Error("key_unavailable"); } }), [], "the bridge did not answer: unknown, not missing");
+  assert.deepEqual(await knowledge.checkProviderKeys({ getKey: async () => null }), ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"]);
+  assert.match(knowledge.attention()?.reason ?? "", /waits for ANTHROPIC_API_KEY, OPENAI_API_KEY, so recall is keyword-only\. Enter them/u);
+  const none = knowledgeDefinition({ KNOWLEDGE_ENGINE: "hindsight" }, TestError, { drainIntervalMs: 0 }).knowledge;
+  assert.deepEqual(await none.checkProviderKeys({ getKey: async () => null }), [], "no engine: no engine key to wait for");
+  assert.equal(none.attention()?.code, ENGINE_MISSING);
 });

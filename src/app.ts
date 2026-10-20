@@ -59,6 +59,8 @@ export function knowledgeDefinition(env: Record<string, string | undefined>, TbE
         knowledge.kick(services);
         // F89: probe the engine now (and every 10 min) so a degraded engine shows before the first recall.
         await knowledge.watchEngine(services, ctx.statusChanged ? () => ctx.statusChanged?.() : null, opts.engineProbeMs).catch(() => undefined);
+        // C296 INFO-2: a missing provider key is named at once (the engine waits for it).
+        await knowledge.checkProviderKeys(ctx).catch(() => undefined);
         ctx.log.info("knowledge started", { engine: services.engine ? "gbrain" : "none", configured: knowledge.config.engine, attention: knowledge.attention()?.code ?? "none", engineState: knowledge.engineStatus().state, research: services.notebook !== null, areas: services.areas.list().length });
       },
     },

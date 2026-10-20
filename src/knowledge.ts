@@ -81,6 +81,8 @@ export const PROVISION_RETRY_MAX_MS = 5 * 60_000;
 export const PROVISION_UNREACHABLE_AFTER = 4;
 /** C296 review: attention code when the engine companion does not answer, so its sources cannot be created. */
 export const ENGINE_UNREACHABLE = "memory_engine_unreachable";
+/** C296 QA INFO-2: attention code while the memory engine waits for its provider key (tb-exec holds GBrain until it is set). */
+export const ENGINE_KEY_MISSING = "memory_engine_key_missing";
 /** C296: attention code when no memory engine runs at all (a setting that is not available, or no engine service). */
 export const ENGINE_MISSING = "engine_missing";
 
@@ -109,6 +111,8 @@ export class Knowledge {
   private provisionTimer: ReturnType<typeof setTimeout> | null = null;
   private provisionAttempt = 0;
   private provisionAccess: ServiceAccess | null = null;
+  /** C296 INFO-2: provider keys the engine needs that the bridge reports unset (last check) */
+  private missingKeys: string[] = [];
   private provisionLog: ((msg: string, fields: Record<string, string>) => void) | null = null;
   private stopped = false;
 
@@ -190,6 +194,14 @@ export class Knowledge {
     }
     if (!this.config.gbrainUrl || !this.config.gbrainAdminToken) {
       return { code: ENGINE_MISSING, reason: "No memory engine runs: the GBrain service is not deployed with this app, so recall is keyword-only. Redeploy the app from Portal to add it." };
+    }
+    // C296 INFO-2: the engine cannot start without its provider key: name it (more precise than "unreachable").
+    if (this.missingKeys.length) {
+      const keys = this.missingKeys.join(", ");
+      return {
+        code: ENGINE_KEY_MISSING,
+        reason: `The memory engine waits for ${keys}, so recall is keyword-only. Enter ${this.missingKeys.length > 1 ? "them" : "it"} on the bridge key page (open it from Portal); the engine then starts by itself.`.slice(0, 200),
+      };
     }
     if (this.provisionAttempt > PROVISION_UNREACHABLE_AFTER) {
       return { code: ENGINE_UNREACHABLE, reason: "A memory area cannot be set up in the memory engine (retried for over a minute), so recall there is keyword-only. Check the GBrain service in your project." };
@@ -301,6 +313,7 @@ export class Knowledge {
       const quiet = attempt !== 1 && attempt % 5 !== 0;
       void this.provision(this.services ?? current, known, quiet ? undefined : this.provisionLog ?? undefined)
         .catch(() => undefined)
+        .then(() => this.checkProviderKeys())
         .then(() => {
           this.provisionTimer = null;
           if (this.stopped) return;
@@ -309,6 +322,29 @@ export class Knowledge {
         });
     }, delay);
     this.provisionTimer.unref();
+  }
+
+  /**
+   * C296 INFO-2: which provider keys of the configured model provider the bridge reports unset (getKey → null). A key the
+   * bridge cannot answer for right now is not counted (unknown is not "missing"). The status is pushed when the set changes.
+   */
+  async checkProviderKeys(access?: Pick<ServiceAccess, "getKey">): Promise<string[]> {
+    const source = access ?? this.provisionAccess;
+    if (!source || this.config.engine !== "gbrain") return this.missingKeys;
+    const missing: string[] = [];
+    for (const name of PROVIDER_MODELS[this.config.modelProvider].keys) {
+      try {
+        if ((await source.getKey(name)) === null) missing.push(name);
+      } catch {
+        /* unknown: not counted */
+      }
+    }
+    missing.sort();
+    if (missing.join(",") !== this.missingKeys.join(",")) {
+      this.missingKeys = missing;
+      this.statusChanged?.();
+    }
+    return missing;
   }
 
   /** True while a background provisioning retry is scheduled or running. */
