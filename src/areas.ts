@@ -85,8 +85,9 @@ export class Areas {
           await provisioner.createSource(area.sourceId, area.id);
           this.db.transaction(() => {
             this.db.prepare("UPDATE kn_areas SET source_ready = 1 WHERE id = ?").run(area.id);
-            // Documents written before the engine source existed are projected right away.
-            this.db.prepare("UPDATE kn_projection SET next_attempt_at = 0, attempts = 0 WHERE area_id = ? AND state = 'pending'").run(area.id);
+            // Documents written before the engine source existed are projected right away; rows that gave up on
+            // area_not_ready while the source was missing (C296) are re-armed too.
+            this.db.prepare("UPDATE kn_projection SET state = 'pending', next_attempt_at = 0, attempts = 0 WHERE area_id = ? AND state IN ('pending', 'failed')").run(area.id);
           });
         }
         if (!area.notebookId && provisioner.ensureNotebook) {

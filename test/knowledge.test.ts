@@ -599,26 +599,69 @@ test("C296: no memory engine is never silent: engine_missing for a setting that 
   assert.equal(knowledge.attention(), null);
 });
 
-test("C296: an engine that arrives where none ran re-projects every document once; an install that already projected does not", async () => {
+test("C296: documents written with no engine reach GBrain on the first GBrain boot (hindsight → gbrain switch); a restore requeues in onStart", async () => {
   const db = memoryDb();
   const scopes = new FakeScopes();
   const none = knowledgeDefinition({ KNOWLEDGE_ENGINE: "hindsight" }, TestError, { drainIntervalMs: 0 }).knowledge;
   const s0 = none.bind(db);
   await s0.areas.ensureShared(scopes.asStore());
-  for (const title of ["one", "two", "three"]) s0.store.createDocument({ area: "company", title, body: `${title} body`, status: "published", actor: ADA });
-  db.prepare("UPDATE kn_projection SET state = 'failed', attempts = 9").run(); // rows that gave up while no engine ran
-  assert.equal(none.noteBootEngine(s0), 0, "no engine: nothing to project");
-  assert.equal((db.prepare("SELECT value FROM kn_meta WHERE key = 'engine'").get() as { value: string }).value, "none");
+  for (const title of ["c296 one", "c296 two", "c296 three"]) s0.store.createDocument({ area: "company", title, body: `${title} body`, status: "published", actor: ADA });
+  assert.equal(s0.projector, null, "no engine: nothing projects");
   const env = { KNOWLEDGE_ENGINE: "gbrain", KNOWLEDGE_GBRAIN_URL: gbrain.url, KNOWLEDGE_GBRAIN_ADMIN_TOKEN: gbrain.adminToken };
-  const switched = knowledgeDefinition(env, TestError, { drainIntervalMs: 0 }).knowledge;
-  const s1 = switched.bind(db);
-  assert.equal(switched.noteBootEngine(s1), 3, "every document is requeued");
-  assert.deepEqual(db.prepare("SELECT state, COUNT(*) AS n FROM kn_projection GROUP BY state").all().map((r) => ({ ...r })), [{ state: "pending", n: 3 }]);
-  assert.equal(switched.noteBootEngine(s1), 0, "the next boot does not requeue again");
-  // An install from before the marker that already projected (no marker, ready rows): no requeue.
-  db.prepare("DELETE FROM kn_meta").run();
-  db.prepare("UPDATE kn_projection SET state = 'ready'").run();
-  assert.equal(switched.noteBootEngine(s1), 0);
-  assert.equal((db.prepare("SELECT value FROM kn_meta WHERE key = 'engine'").get() as { value: string }).value, "gbrain");
-  switched.stop();
+  const boot = async (restore: boolean) => {
+    const { definition, knowledge } = knowledgeDefinition(env, TestError, { drainIntervalMs: 0, engineProbeMs: 0 });
+    const lines: string[] = [];
+    const log = { debug() {}, info: (msg: string) => void lines.push(msg), warn() {}, error() {} };
+    const callServiceHelper = (async (_service: string, _path: string, body: Json) => {
+      gbrain.sources.add(String((body as Record<string, unknown>).id));
+      return {};
+    }) as OpContext["callServiceHelper"];
+    if (restore) await definition.backup?.afterRestore?.();
+    await definition.onStart({ db, secrets: memorySecrets(), log: log as never, scopes: scopes.asStore(), getKey: async () => null, callServiceHelper, statusChanged() {} });
+    await knowledge.current()?.projector?.drain();
+    knowledge.stop();
+    return { lines, attention: knowledge.attention() };
+  };
+  const first = await boot(false);
+  assert.deepEqual(db.prepare("SELECT state, COUNT(*) AS n FROM kn_projection GROUP BY state").all().map((r) => ({ ...r })), [{ state: "ready", n: 3 }]);
+  const company = [...gbrain.pages.values()].flatMap((pages) => [...pages.values()].map((p) => p.content)).filter((c) => c.includes("c296"));
+  assert.equal(company.length, 3, "every document is a GBrain page");
+  assert.notEqual(first.attention?.code, ENGINE_MISSING);
+  assert.ok(!first.lines.includes("projection requeued after restore"), "quiet without a restore");
+  const second = await boot(true);
+  assert.ok(second.lines.includes("projection requeued after restore"), "a restore before onStart requeues (the SDK restores before bind)");
+});
+
+test("C296 (prod): the engine comes up after Knowledge: provisioning retries in the background and every document reaches GBrain", async () => {
+  const db = memoryDb();
+  const scopes = new FakeScopes();
+  const none = knowledgeDefinition({ KNOWLEDGE_ENGINE: "hindsight" }, TestError, { drainIntervalMs: 0 }).knowledge;
+  const s0 = none.bind(db);
+  await s0.areas.ensureShared(scopes.asStore());
+  for (const title of ["late one", "late two"]) s0.store.createDocument({ area: "company", title, body: `${title} body`, status: "published", actor: ADA });
+  const env = { KNOWLEDGE_ENGINE: "gbrain", KNOWLEDGE_GBRAIN_URL: gbrain.url, KNOWLEDGE_GBRAIN_ADMIN_TOKEN: gbrain.adminToken };
+  const { definition, knowledge } = knowledgeDefinition(env, TestError, { drainIntervalMs: 0, engineProbeMs: 0, provisionRetryMs: 5 });
+  let down = 3; // the companion is not reachable for the boot provision and two retries
+  const callServiceHelper = (async (_service: string, _path: string, body: Json) => {
+    if (down-- > 0) throw new Error("service_unreachable");
+    gbrain.sources.add(String((body as Record<string, unknown>).id));
+    return {};
+  }) as OpContext["callServiceHelper"];
+  const log = { debug() {}, info() {}, warn() {}, error() {} };
+  try {
+    await definition.onStart({ db, secrets: memorySecrets(), log: log as never, scopes: scopes.asStore(), getKey: async () => null, callServiceHelper, statusChanged() {} });
+    assert.equal(knowledge.current()?.areas.get("company")?.sourceReady, false, "the boot provision failed");
+    // A drain while the area is not ready makes the rows fail area_not_ready (what prod showed).
+    await knowledge.current()?.projector?.drain();
+    db.prepare("UPDATE kn_projection SET state = 'failed', attempts = 12").run(); // a long outage: the rows gave up
+    const state = () => db.prepare("SELECT state, COUNT(*) AS n FROM kn_projection GROUP BY state").all().map((r) => ({ ...r }));
+    for (let i = 0; i < 200 && JSON.stringify(state()) !== JSON.stringify([{ state: "ready", n: 2 }]); i++) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      await knowledge.current()?.projector?.drain();
+    }
+    assert.deepEqual(state(), [{ state: "ready", n: 2 }], "no agent call was needed");
+    assert.equal(knowledge.current()?.areas.get("company")?.sourceReady, true);
+  } finally {
+    knowledge.stop();
+  }
 });

@@ -74,6 +74,9 @@ export interface Attention {
 export const ENGINE_PROBE_MS = 10 * 60_000;
 /** QA R-2: attention code when the provider refuses the engine's embedding calls (the key is set but rejected). */
 export const KEY_REJECTED = "memory_engine_key_rejected";
+/** C296: background provisioning retry while an area lacks its engine source (the engine service may start after Knowledge). */
+export const PROVISION_RETRY_MS = 5_000;
+export const PROVISION_RETRY_MAX_MS = 5 * 60_000;
 /** C296: attention code when no memory engine runs at all (a setting that is not available, or no engine service). */
 export const ENGINE_MISSING = "engine_missing";
 
@@ -84,6 +87,8 @@ export interface KnowledgeOptions {
   drainIntervalMs?: number;
   /** engine probe interval (default ENGINE_PROBE_MS); 0 probes once at start only */
   engineProbeMs?: number;
+  /** first background provisioning retry delay (default PROVISION_RETRY_MS, doubles up to PROVISION_RETRY_MAX_MS) */
+  provisionRetryMs?: number;
 }
 
 export class Knowledge {
@@ -96,6 +101,9 @@ export class Knowledge {
   private engineHealth: EngineHealth = { state: "unknown", detail: [], at: 0 };
   private statusChanged: (() => void) | null = null;
   private probeTimer: ReturnType<typeof setInterval> | null = null;
+  private pendingRequeue = false;
+  private provisionTimer: ReturnType<typeof setTimeout> | null = null;
+  private provisionAttempt = 0;
 
   constructor(config: KnowledgeConfig, opts: KnowledgeOptions = {}) {
     this.config = config;
@@ -143,6 +151,8 @@ export class Knowledge {
     this.timer = null;
     if (this.probeTimer) clearInterval(this.probeTimer);
     this.probeTimer = null;
+    if (this.provisionTimer) clearTimeout(this.provisionTimer);
+    this.provisionTimer = null;
   }
 
   /** Record what the engine just showed; a change pushes the app status at once (SDK `statusChanged`). */
@@ -220,20 +230,21 @@ export class Knowledge {
     return this.probeEngine(services);
   }
 
-  /**
-   * C296: record the engine this boot runs with. When an engine arrives where none ran before (marker 'none', or no
-   * marker yet and nothing was ever projected), every document is re-projected (the afterRestore path). Returns the rows.
-   */
-  noteBootEngine(services: Services): number {
-    const engine = services.engine ? "gbrain" : "none";
-    const before = (services.db.prepare("SELECT value FROM kn_meta WHERE key = 'engine'").get() as { value: string } | undefined)?.value;
-    let requeued = 0;
-    if (services.projector && before !== "gbrain") {
-      const neverProjected = !services.db.prepare("SELECT 1 FROM kn_projection WHERE state = 'ready' LIMIT 1").get();
-      if (before !== undefined || neverProjected) requeued = services.projector.requeueAll();
-    }
-    if (before !== engine) services.db.prepare("INSERT INTO kn_meta (key, value) VALUES ('engine', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(engine);
-    return requeued;
+  /** After a restore the engine may hold an older or newer state: re-project every live document and re-delete tombstones.
+   *  The SDK restores before onStart binds the services, so `restored()` only marks it and onStart runs the requeue. */
+  restored(): void {
+    const services = this.services;
+    if (services?.projector) {
+      services.projector.requeueAll();
+      this.kick(services);
+    } else this.pendingRequeue = true;
+  }
+
+  /** The requeue a restore asked for before the services were bound (once). Returns the rows. */
+  requeueAfterRestore(services: Services): number {
+    if (!this.pendingRequeue || !services.projector) return 0;
+    this.pendingRequeue = false;
+    return services.projector.requeueAll();
   }
 
   /** Kick the projection outbox without waiting (called after every document write). */
@@ -247,6 +258,32 @@ export class Knowledge {
       this.provisioning = services.areas.provisionPending(this.provisioner(services, access)).finally(() => (this.provisioning = null));
     }
     return this.provisioning;
+  }
+
+  /**
+   * C296 (prod 2026-10-20): onStart provisions before a new engine companion is reachable, and before this only an agent
+   * call retried it, so every projection row failed area_not_ready. While an area lacks its source, retry in the
+   * background with backoff; an area that becomes ready re-arms its rows (Areas.provisionPending) and the outbox drains.
+   */
+  retryProvision(services: Services, access: ServiceAccess): void {
+    const current = this.services ?? services;
+    if (!current.engine || this.provisionTimer) return;
+    if (!current.areas.list().some((area) => !area.sourceReady)) {
+      this.provisionAttempt = 0;
+      return;
+    }
+    const delay = Math.min((this.opts.provisionRetryMs ?? PROVISION_RETRY_MS) * 2 ** this.provisionAttempt, PROVISION_RETRY_MAX_MS);
+    this.provisionAttempt++;
+    this.provisionTimer = setTimeout(() => {
+      this.provisionTimer = null;
+      void this.provision(this.services ?? current, access)
+        .catch(() => undefined)
+        .then(() => {
+          this.kick(this.services ?? current);
+          this.retryProvision(this.services ?? current, access);
+        });
+    }, delay);
+    this.provisionTimer.unref();
   }
 
   private provisioner(services: Services, access: ServiceAccess): AreaProvisioner {
