@@ -8,7 +8,7 @@ import type { Json, OpContext } from "@opt2-tealbrick/spec/sdk";
 import { knowledgeDefinition } from "../src/app.ts";
 import { NARROWING_POLICY } from "../src/handlers.ts";
 import { areaSourceId } from "../src/ids.ts";
-import { KEY_REJECTED, memorySecrets, SECRET_NAME } from "../src/knowledge.ts";
+import { ENGINE_MISSING, KEY_REJECTED, memorySecrets, SECRET_NAME } from "../src/knowledge.ts";
 import { context, type FakeGBrain, FakeScopes, fakeGBrain, memoryDb, TestError } from "./helpers.ts";
 
 const ADA = "agt_01AAAAAAAAAAAAAAAAAAAAAAAA";
@@ -586,4 +586,39 @@ test("R-2: a provider_error on the embedding stage reads as a rejected key (fire
   assert.equal(knowledge.attention()?.code, "memory_engine_degraded");
   knowledge.noteEngine({ state: "ok", detail: [] });
   assert.equal(knowledge.attention(), null);
+});
+
+test("C296: no memory engine is never silent: engine_missing for a setting that is not available and for a missing service (fires); quiet with GBrain", async () => {
+  const { definition } = knowledgeDefinition({ KNOWLEDGE_ENGINE: "hindsight", KNOWLEDGE_MODEL_PROVIDER: "openai" }, TestError, { drainIntervalMs: 0 });
+  assert.equal((await definition.attention?.())?.code, ENGINE_MISSING);
+  assert.match((await definition.attention?.())?.reason ?? "", /"hindsight" is not available yet.*Switch the engine to GBrain/u);
+  const noService = knowledgeDefinition({ KNOWLEDGE_ENGINE: "gbrain" }, TestError, { drainIntervalMs: 0 });
+  assert.equal(noService.knowledge.attention()?.code, ENGINE_MISSING);
+  assert.match(noService.knowledge.attention()?.reason ?? "", /GBrain service is not deployed/u);
+  const { knowledge } = await setup();
+  assert.equal(knowledge.attention(), null);
+});
+
+test("C296: an engine that arrives where none ran re-projects every document once; an install that already projected does not", async () => {
+  const db = memoryDb();
+  const scopes = new FakeScopes();
+  const none = knowledgeDefinition({ KNOWLEDGE_ENGINE: "hindsight" }, TestError, { drainIntervalMs: 0 }).knowledge;
+  const s0 = none.bind(db);
+  await s0.areas.ensureShared(scopes.asStore());
+  for (const title of ["one", "two", "three"]) s0.store.createDocument({ area: "company", title, body: `${title} body`, status: "published", actor: ADA });
+  db.prepare("UPDATE kn_projection SET state = 'failed', attempts = 9").run(); // rows that gave up while no engine ran
+  assert.equal(none.noteBootEngine(s0), 0, "no engine: nothing to project");
+  assert.equal((db.prepare("SELECT value FROM kn_meta WHERE key = 'engine'").get() as { value: string }).value, "none");
+  const env = { KNOWLEDGE_ENGINE: "gbrain", KNOWLEDGE_GBRAIN_URL: gbrain.url, KNOWLEDGE_GBRAIN_ADMIN_TOKEN: gbrain.adminToken };
+  const switched = knowledgeDefinition(env, TestError, { drainIntervalMs: 0 }).knowledge;
+  const s1 = switched.bind(db);
+  assert.equal(switched.noteBootEngine(s1), 3, "every document is requeued");
+  assert.deepEqual(db.prepare("SELECT state, COUNT(*) AS n FROM kn_projection GROUP BY state").all().map((r) => ({ ...r })), [{ state: "pending", n: 3 }]);
+  assert.equal(switched.noteBootEngine(s1), 0, "the next boot does not requeue again");
+  // An install from before the marker that already projected (no marker, ready rows): no requeue.
+  db.prepare("DELETE FROM kn_meta").run();
+  db.prepare("UPDATE kn_projection SET state = 'ready'").run();
+  assert.equal(switched.noteBootEngine(s1), 0);
+  assert.equal((db.prepare("SELECT value FROM kn_meta WHERE key = 'engine'").get() as { value: string }).value, "gbrain");
+  switched.stop();
 });

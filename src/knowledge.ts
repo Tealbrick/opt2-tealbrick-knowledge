@@ -74,6 +74,8 @@ export interface Attention {
 export const ENGINE_PROBE_MS = 10 * 60_000;
 /** QA R-2: attention code when the provider refuses the engine's embedding calls (the key is set but rejected). */
 export const KEY_REJECTED = "memory_engine_key_rejected";
+/** C296: attention code when no memory engine runs at all (a setting that is not available, or no engine service). */
+export const ENGINE_MISSING = "engine_missing";
 
 export interface KnowledgeOptions {
   fetch?: typeof fetch;
@@ -161,7 +163,16 @@ export class Knowledge {
    * falls back to keyword search), so this is an attention, not a failure.
    */
   attention(): Attention | null {
-    if (this.config.engine !== "gbrain") return null;
+    // C296: never silent when no engine runs (prod ran engine "hindsight", a "soon" choice, with no engine for days).
+    if (this.config.engine !== "gbrain") {
+      return {
+        code: ENGINE_MISSING,
+        reason: `No memory engine runs: the engine setting "${this.config.engine}" is not available yet, so recall is keyword-only. Switch the engine to GBrain in the app settings.`.slice(0, 200),
+      };
+    }
+    if (!this.config.gbrainUrl || !this.config.gbrainAdminToken) {
+      return { code: ENGINE_MISSING, reason: "No memory engine runs: the GBrain service is not deployed with this app, so recall is keyword-only. Redeploy the app from Portal to add it." };
+    }
     const { state, detail } = this.engineHealth;
     const list = detail.join(", ").slice(0, 80);
     if (state === "degraded") {
@@ -207,6 +218,22 @@ export class Knowledge {
       this.probeTimer.unref();
     }
     return this.probeEngine(services);
+  }
+
+  /**
+   * C296: record the engine this boot runs with. When an engine arrives where none ran before (marker 'none', or no
+   * marker yet and nothing was ever projected), every document is re-projected (the afterRestore path). Returns the rows.
+   */
+  noteBootEngine(services: Services): number {
+    const engine = services.engine ? "gbrain" : "none";
+    const before = (services.db.prepare("SELECT value FROM kn_meta WHERE key = 'engine'").get() as { value: string } | undefined)?.value;
+    let requeued = 0;
+    if (services.projector && before !== "gbrain") {
+      const neverProjected = !services.db.prepare("SELECT 1 FROM kn_projection WHERE state = 'ready' LIMIT 1").get();
+      if (before !== undefined || neverProjected) requeued = services.projector.requeueAll();
+    }
+    if (before !== engine) services.db.prepare("INSERT INTO kn_meta (key, value) VALUES ('engine', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(engine);
+    return requeued;
   }
 
   /** Kick the projection outbox without waiting (called after every document write). */
