@@ -36,12 +36,15 @@ const ENGINE_CHOICES = (() => {
 
 type CapabilityState = "on" | "off" | "unknown";
 
+/** The key the engine's chat model uses for each provider (services/gbrain/entrypoint.sh). */
+const CHAT_KEY: Record<string, string> = { openai: "OPENAI_API_KEY", anthropic: "ANTHROPIC_API_KEY", google: "GOOGLE_GENERATIVE_AI_API_KEY" };
+
 /**
  * C296 (Martin): GBrain capabilities on/off with what each needs. From the engine's own readiness and the tools agents are
  * offered; dream and autopilot are GBrain background cycles that this deployment does not run (`gbrain serve` only), the
  * reranker needs a Voyage key Knowledge does not declare, agent runs need the engine's agent scope (not exposed).
  */
-export function engineCapabilities(running: boolean, report: EngineSettings | null): { id: string; label: string; state: CapabilityState; reason: string }[] {
+export function engineCapabilities(running: boolean, report: EngineSettings | null, chatKey = "a chat model key"): { id: string; label: string; state: CapabilityState; reason: string }[] {
   const offered = report?.tools.offered ? new Set(report.tools.offered) : null;
   const has = (...ops: string[]) => (offered ? ops.some((op) => offered.has(`${ENTRY_PREFIX}${op}`)) : null);
   const chat = report?.readiness?.find((r) => r.capability === "chat_llm") ?? null;
@@ -49,9 +52,9 @@ export function engineCapabilities(running: boolean, report: EngineSettings | nu
     if (!running) return { state: "off", reason: "No memory engine runs." };
     const listed = has(...ops);
     if (listed === null) return { state: "unknown", reason: "The engine tools could not be read." };
-    if (!listed) return { state: "off", reason: "Not offered by the engine to agents." };
-    if (needsChat && chat && chat.state !== "ok") return { state: "off", reason: "Needs a chat model key (ANTHROPIC_API_KEY or OPENAI_API_KEY) in the engine." };
-    if (needsChat && !chat) return { state: "unknown", reason: "Needs a chat model key; the engine did not report it." };
+    if (!listed) return { state: "off", reason: "Not offered to agents (the engine does not list it, or Knowledge does not expose it)." };
+    if (needsChat && chat && chat.state !== "ok") return { state: "off", reason: `Needs ${chatKey} in the engine; without it only the gathered evidence is returned.` };
+    if (needsChat && !chat) return { state: "unknown", reason: `Needs ${chatKey}; the engine did not report it.` };
     return { state: "on", reason: needsChat ? "Uses the chat model key." : "No model key needed." };
   };
   return [
@@ -118,7 +121,7 @@ export function createLibraryHandlers(d: LibraryDeps): Record<string, HandlerSpe
               error: report?.countsError ?? null,
             },
             tools: { offered: report?.tools.offered?.length ?? null, error: report?.tools.error ?? null, surface: report?.surface ?? null },
-            capabilities: engineCapabilities(s.engine !== null, report),
+            capabilities: engineCapabilities(s.engine !== null, report, CHAT_KEY[config.modelProvider]),
             areas,
           });
         }),

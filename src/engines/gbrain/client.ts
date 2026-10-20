@@ -223,18 +223,26 @@ export class GBrainClient {
 
   /** C296: brain-wide counts from the admin API (`/admin/api/full-stats`): pages, chunks, embedded chunks, version. */
   async fullStats(): Promise<Record<string, unknown>> {
-    let response: Response;
-    try {
-      response = await this.fetcher(`${this.baseUrl}/admin/api/full-stats`, { redirect: "error", signal: AbortSignal.timeout(15_000), headers: { cookie: await this.admin() } });
-    } catch (error) {
-      if (error instanceof GBrainServiceError) throw error;
-      throw new GBrainServiceError("gbrain_admin_unavailable");
+    for (let attempt = 0; attempt < 2; attempt++) {
+      let response: Response;
+      try {
+        response = await this.fetcher(`${this.baseUrl}/admin/api/full-stats`, { redirect: "error", signal: AbortSignal.timeout(15_000), headers: { cookie: await this.admin() } });
+      } catch (error) {
+        if (error instanceof GBrainServiceError) throw error;
+        throw new GBrainServiceError("gbrain_admin_unavailable");
+      }
+      // Admin sessions live in the engine's memory: after an engine restart the cookie is unknown; log in again once.
+      if (response.status === 401 && attempt === 0) {
+        await response.body?.cancel();
+        this.adminCookie = null;
+        continue;
+      }
+      const body = (await response.json().catch(() => null)) as Record<string, unknown> | null;
+      // An unhealthy engine answers 503 {error, error_description}: no counts → unavailable.
+      if (!body || typeof body.page_count !== "number") throw new GBrainServiceError("gbrain_admin_unavailable");
+      return body;
     }
-    if (response.status === 401) this.adminCookie = null;
-    const body = (await response.json().catch(() => null)) as Record<string, unknown> | null;
-    // 503 still carries the probe body (status "degraded"); anything without counts is unavailable.
-    if (!body || typeof body.page_count !== "number") throw new GBrainServiceError("gbrain_admin_unavailable");
-    return body;
+    throw new GBrainServiceError("gbrain_admin_unavailable");
   }
 
   /** Knowledge owns its projected pages: write against the current revision with a deterministic request id. */

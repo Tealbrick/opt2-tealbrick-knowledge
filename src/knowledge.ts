@@ -185,7 +185,7 @@ export class Knowledge {
     if (this.config.engine !== "gbrain") {
       return {
         code: ENGINE_MISSING,
-        reason: `No memory engine runs: the engine setting "${this.config.engine}" is not available yet, so recall is keyword-only. Switch the engine to GBrain in the app settings.`.slice(0, 200),
+        reason: `No memory engine runs: the engine setting "${this.config.engine}" is not available yet, so recall is keyword-only. Choose GBrain in Portal, in the app settings.`.slice(0, 200),
       };
     }
     if (!this.config.gbrainUrl || !this.config.gbrainAdminToken) {

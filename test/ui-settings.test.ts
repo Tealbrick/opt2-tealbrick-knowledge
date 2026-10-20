@@ -60,7 +60,8 @@ globalThis.fetch = (async (input: string | URL | Request) => {
   if (path === "session") return json(200, { principal: { type: "person", id: "per_1", instance: "ins_1" }, csrf: "csrf-token", idempotencyRequired: [] });
   const op = /^ops\/(.+)$/.exec(path)?.[1];
   if (op === "settings_overview") return json(200, { status: "ok", output: overview(stub.running) });
-  if (op === "tb.keys_status") return json(200, { status: "ok", output: [{ name: "OPENAI_API_KEY", required: true, present: stub.keyPresent, source: null }] });
+  // a stray value field: the page must never render it
+  if (op === "tb.keys_status") return json(200, { status: "ok", output: [{ name: "OPENAI_API_KEY", required: true, present: stub.keyPresent, source: null, value: SECRET }] });
   return json(404, { error: { code: "not_found", message: String(op) } });
 }) as typeof fetch;
 
@@ -74,7 +75,13 @@ async function mount(Settings: SettingsModule["Settings"]) {
   const r = createRoot(host);
   await act(async () => r.render(h(TbProvider, { product: "knowledge" }, h(Settings))));
   for (let i = 0; i < 6; i++) await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
-  return { host, unmount: async () => (await act(async () => r.unmount()), host.remove()) };
+  return {
+    host,
+    unmount: async () => {
+      await act(async () => r.unmount());
+      host.remove();
+    },
+  };
 }
 
 let mod: SettingsModule;
@@ -93,12 +100,10 @@ describe("Settings page (C296)", () => {
     stub.keyPresent = false;
     const m = await mount(mod.Settings);
     const text = m.host.textContent ?? "";
-    const radios = [...m.host.querySelectorAll('[role="radio"]')];
-    const hindsight = radios.find((r) => r.textContent?.includes("Hindsight"));
-    assert.ok(hindsight);
-    assert.equal(hindsight.getAttribute("aria-disabled"), "true");
-    assert.match(hindsight.textContent ?? "", /soon/u);
-    assert.equal(radios.find((r) => r.textContent?.includes("GBrain"))?.getAttribute("aria-checked"), "true");
+    const rows = [...m.host.querySelectorAll('section[aria-label="Memory engine"] tr')].map((r) => r.textContent ?? "");
+    assert.ok(rows.some((r) => /^GBrain\s*chosen$/u.test(r.trim())), rows.join("|"));
+    assert.ok(rows.some((r) => /^Hindsight\s*soon$/u.test(r.trim())), "Hindsight greyed 'soon', never chosen");
+    assert.equal(m.host.querySelectorAll('[role="radio"]').length, 0, "read-only: nothing to pick here");
     assert.match(text, /52 of 52/u);
     assert.match(text, /366 of 366/u);
     assert.match(text, /88 engine tools are offered/u);

@@ -591,7 +591,7 @@ test("R-2: a provider_error on the embedding stage reads as a rejected key (fire
 test("C296: no memory engine is never silent: engine_missing for a setting that is not available and for a missing service (fires); quiet with GBrain", async () => {
   const { definition } = knowledgeDefinition({ KNOWLEDGE_ENGINE: "hindsight", KNOWLEDGE_MODEL_PROVIDER: "openai" }, TestError, { drainIntervalMs: 0 });
   assert.equal((await definition.attention?.())?.code, ENGINE_MISSING);
-  assert.match((await definition.attention?.())?.reason ?? "", /"hindsight" is not available yet.*Switch the engine to GBrain/u);
+  assert.match((await definition.attention?.())?.reason ?? "", /"hindsight" is not available yet.*Choose GBrain in Portal/u);
   const noService = knowledgeDefinition({ KNOWLEDGE_ENGINE: "gbrain" }, TestError, { drainIntervalMs: 0 });
   assert.equal(noService.knowledge.attention()?.code, ENGINE_MISSING);
   assert.match(noService.knowledge.attention()?.reason ?? "", /GBrain service is not deployed/u);
@@ -760,13 +760,14 @@ test("C296 Settings: engine (GBrain, Hindsight greyed soon), models and key name
   const cap = (id: string) => out.capabilities.find((c: Record<string, unknown>) => c.id === id);
   assert.equal(cap("entities").state, "on");
   assert.equal(cap("think").state, "off", "the engine reports no chat model key");
-  assert.match(cap("think").reason, /chat model key/u);
+  assert.match(cap("think").reason, /Needs OPENAI_API_KEY in the engine/u, "the configured provider's key is named");
   assert.equal(out.embeddings.readiness.state, "ok");
   assert.ok(out.embeddings.chunks >= 2 && out.embeddings.embedded === out.embeddings.chunks, "chunks embedded n of N from the engine");
   assert.equal(out.engine.version, "0.60.57.0");
   assert.equal(cap("reranker").state, "off");
   assert.match(cap("reranker").reason, /VOYAGE_API_KEY/u);
-  assert.ok(!JSON.stringify(out).includes(gbrain.adminToken), "no secret in the answer");
+  const text = JSON.stringify(out);
+  for (const secret of [gbrain.adminToken, "gbrain_admin=s1", "must-not-leak"]) assert.ok(!text.includes(secret), `no ${secret} in the answer`);
 });
 
 test("C296 Settings without an engine: engine_missing, nothing running, every capability off", async () => {
@@ -785,4 +786,16 @@ test("C296 Settings without an engine: engine_missing, nothing running, every ca
   assert.equal(out.engine.attention.code, ENGINE_MISSING);
   assert.ok(out.capabilities.every((c: Record<string, unknown>) => c.state === "off"));
   assert.equal(out.tools.offered, null);
+});
+
+test("C296 review: Settings reads the engine counts again after an engine restart forgot the admin session (one re-login)", async () => {
+  const { ctx, run } = await setup();
+  await run("remember", { text: "Restart probe" }, ctx(ADA));
+  await run("recall", { query: "warm up" }, ctx(ADA));
+  const owner = ctx(ADA, { caller: { type: "person", id: "per_01OWNER000000000000000000" as `per_${string}`, name: "Owner", mode: null } });
+  assert.ok((await run("settings_overview", {}, owner)).embeddings.chunks !== null);
+  gbrain.adminSessionsLost = true;
+  const out = await run("settings_overview", {}, owner);
+  assert.ok(out.embeddings.chunks !== null, "counts after one re-login");
+  assert.equal(out.embeddings.error, null);
 });

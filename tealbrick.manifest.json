@@ -2555,8 +2555,7 @@
           "model_provider": [
             "openai",
             "anthropic"
-          ],
-          "engine": "gbrain"
+          ]
         },
         "step": "models"
       },
@@ -2571,8 +2570,7 @@
           "app"
         ],
         "when": {
-          "model_provider": "anthropic",
-          "engine": "gbrain"
+          "model_provider": "anthropic"
         },
         "step": "models"
       },
@@ -2587,8 +2585,7 @@
           "app"
         ],
         "when": {
-          "model_provider": "google",
-          "engine": "gbrain"
+          "model_provider": "google"
         },
         "step": "models"
       }

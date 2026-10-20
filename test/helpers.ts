@@ -144,6 +144,8 @@ export interface FakeGBrain {
    * this fake's rows; `unparsable` = a text item that is not a row list.
    */
   queryReply?: "fake" | "upstream-degraded" | "unparsable";
+  /** the next admin API call answers 401 once (an engine restart forgot the admin session) */
+  adminSessionsLost?: boolean;
   close(): Promise<void>;
 }
 
@@ -174,6 +176,10 @@ export async function fakeGBrain(): Promise<FakeGBrain> {
       return json(200, { clientId, clientSecret: `s${counter}` });
     }
     if (req.url === "/admin/api/full-stats") {
+      if (state.adminSessionsLost) {
+        state.adminSessionsLost = false; // an engine restart forgot every admin session once
+        return json(401, {});
+      }
       if (req.headers.cookie !== "gbrain_admin=s1") return json(401, {});
       const pages = [...state.pages.values()].reduce((n, m) => n + m.size, 0);
       return json(200, { status: "ok", version: "0.60.57.0", engine: "postgres", page_count: pages, chunk_count: pages * 2, embedded_count: pages * 2 });
@@ -203,7 +209,19 @@ export async function fakeGBrain(): Promise<FakeGBrain> {
       }
       if (message.method === "resources/read") {
         // gbrain://capabilities at the pin: surface + config readiness (embeddings, chat model, tool surface).
-        const capabilities = { surface: "full", scopes: ["read", "write"], readiness: [{ capability: "embeddings", state: "ok", reason: "configured" }, { capability: "chat_llm", state: "missing", reason: "key_missing" }] };
+        // Secret-bearing fields upstream also sends (client id, repair command, admin hints): Knowledge must never copy them.
+        const capabilities = {
+          surface: "full",
+          scopes: ["read", "write"],
+          client_id: "client-id-must-not-leak",
+          allowed_operations: ["op-list-must-not-leak"],
+          delegation_repair: { preview_command: "gbrain clients rescope --secret repair-must-not-leak" },
+          administration: { next_action: "admin-hint-must-not-leak" },
+          readiness: [
+            { capability: "embeddings", state: "ok", reason: "configured", why: "why-must-not-leak" },
+            { capability: "chat_llm", state: "missing", reason: "not_configured", fix: { command: "fix-must-not-leak" } },
+          ],
+        };
         return reply({ contents: [{ uri: (message.params as { uri: string }).uri, mimeType: "application/json", text: JSON.stringify(capabilities) }] });
       }
       const { name, arguments: args } = message.params as { name: string; arguments: Record<string, unknown> };

@@ -2,8 +2,8 @@
 // a value), embedding status, the engine capabilities and the memory areas. Read-only: the engine is fixed at install and
 // changed in Portal; keys are entered only on the bridge key page.
 import { callOp } from "@opt2-tealbrick/miniapp-sdk/client";
-import { Button, Choices, Notice, Table, Tag } from "@opt2-tealbrick/ui";
-import { useCallback, useEffect, useState } from "react";
+import { Button, Notice, Table, Tag } from "@opt2-tealbrick/ui";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { errText, PageHead } from "./common.tsx";
 
 interface Choice {
@@ -26,8 +26,14 @@ interface SettingsOverview {
 
 interface KeyRow {
   name: string;
+  required: boolean;
   present: boolean;
 }
+
+/** QA R-2: the attention code for a set key the provider refuses (src/knowledge.ts KEY_REJECTED); same rule as the Keys page. */
+const KEY_REJECTED_CODE = "memory_engine_key_rejected";
+/** The page stops waiting after this; the engine part then reads "not reported". */
+const LOAD_TIMEOUT_MS = 15_000;
 
 const PROVIDERS: Record<string, string> = { openai: "OpenAI", google: "Google Gemini", anthropic: "Anthropic (with OpenAI embeddings)" };
 
@@ -44,20 +50,37 @@ export function Settings() {
   const [data, setData] = useState<SettingsOverview | null>(null);
   const [keys, setKeys] = useState<KeyRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Only the latest load may set the page (a slow older answer never overwrites a newer one).
+  const latest = useRef(0);
   const load = useCallback(() => {
+    const call = ++latest.current;
     setError(null);
+    const timer = setTimeout(() => call === latest.current && setError("The memory engine is slow to answer. Try Refresh in a moment."), LOAD_TIMEOUT_MS);
     callOp<SettingsOverview>("settings_overview", {})
-      .then(setData)
-      .catch((e: unknown) => setError(errText(e)));
+      .then((d) => {
+        if (call !== latest.current) return;
+        setData(d);
+        setError(null);
+      })
+      .catch((e: unknown) => call === latest.current && setError(errText(e)))
+      .finally(() => clearTimeout(timer));
     callOp<KeyRow[] | { keys: KeyRow[] }>("tb.keys_status", {})
-      .then((r) => setKeys(Array.isArray(r) ? r : (r.keys ?? [])))
-      .catch(() => setKeys(null));
+      .then((r) => call === latest.current && setKeys(Array.isArray(r) ? r : (r.keys ?? [])))
+      .catch(() => call === latest.current && setKeys(null));
   }, []);
   useEffect(load, [load]);
+  const rejected = data?.engine.attention?.code === KEY_REJECTED_CODE;
   const keyState = (name: string) => {
     const row = keys?.find((k) => k.name === name);
     if (!row) return <Tag status="busy">unknown</Tag>;
-    return row.present ? <Tag status="live">set</Tag> : <Tag status="needs-you">missing</Tag>;
+    if (row.present && row.required && rejected) return <Tag status="needs-you">rejected by provider</Tag>;
+    if (row.present) return <Tag status="live">set</Tag>;
+    return row.required ? <Tag status="needs-you">missing</Tag> : <Tag>not needed</Tag>;
+  };
+  const meaning = (o: SettingsOverview): "on" | "off" | "unknown" => {
+    if (!o.engine.running || rejected) return "off";
+    if (o.engine.detail.some((d) => d.startsWith("embed") || d.startsWith("keyword_only"))) return "off";
+    return o.embeddings.readiness ? (o.embeddings.readiness.state === "ok" ? "on" : "off") : "unknown";
   };
   return (
     <section className="app-page" aria-label="Settings">
@@ -80,13 +103,22 @@ export function Settings() {
         <div className="tb-stack">
           <section className="tb-stack" aria-label="Memory engine">
             <h2>Memory engine</h2>
-            <Choices label="Memory engine" value={data.engine.configured} onChange={() => undefined} options={data.engine.choices.map((c) => ({ value: c.value, title: c.label, ...(c.disabled && c.note ? { note: c.note } : {}), disabled: true }))} />
+            <Table>
+              <tbody>
+                {data.engine.choices.map((c) => (
+                  <tr key={c.value}>
+                    <td className={c.disabled ? "tb-soft" : "strong"}>{c.label}</td>
+                    <td>{c.value === data.engine.configured ? <Tag status={c.disabled ? "needs-you" : "live"}>chosen</Tag> : c.disabled ? <Tag>{c.note ?? "not available"}</Tag> : null}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </Table>
             <p>
               Status: {engineTag(data.engine)}
               {data.engine.version ? <span className="tb-soft"> GBrain {data.engine.version}</span> : null}
             </p>
             {data.engine.attention ? <Notice tone="needs-you">{data.engine.attention.reason}</Notice> : null}
-            <p className="tb-soft kn-measure">The engine is chosen when the app is installed. You change it in Portal, in the app settings.</p>
+            <p className="tb-soft kn-measure">The engine is fixed when the app is installed. Only a choice that is not available yet can be changed, in Portal, in the app settings.</p>
           </section>
 
           <section className="tb-stack" aria-label="Model provider">
@@ -132,7 +164,7 @@ export function Settings() {
                 </tr>
                 <tr>
                   <td>Search by meaning</td>
-                  <td>{data.embeddings.readiness ? onOff(data.embeddings.readiness.state === "ok" ? "on" : "off") : onOff("unknown")}</td>
+                  <td>{onOff(meaning(data))}</td>
                 </tr>
               </tbody>
             </Table>

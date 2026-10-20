@@ -99,6 +99,9 @@ export interface RecallAnswer {
   degraded: string[];
 }
 
+/** C296 review: the owner Settings page waits at most this long for the engine's own report. */
+export const SETTINGS_DEADLINE_MS = 6_000;
+
 export interface EngineReadiness {
   capability: string;
   state: string;
@@ -174,9 +177,17 @@ export class GBrainEngine {
    * never upstream text): the tools agents are offered, the engine's readiness (embeddings, chat model, tool surface)
    * and brain-wide counts (pages, chunks, embedded chunks).
    */
-  async settings(): Promise<EngineSettings> {
-    const codeOf = (error: unknown) => (error && typeof error === "object" && "code" in error ? String((error as { code: unknown }).code).slice(0, 64) : "engine_error");
-    const [tools, caps, stats] = await Promise.allSettled([this.catalog(), this.client.capabilities(this.catalogSource), this.client.fullStats()]);
+  async settings(deadlineMs = SETTINGS_DEADLINE_MS): Promise<EngineSettings> {
+    const codeOf = (error: unknown) => {
+      const code = error && typeof error === "object" ? (error as { code?: unknown; kind?: unknown }).code : undefined;
+      if (typeof code === "string" && code) return code.slice(0, 64);
+      const kind = error && typeof error === "object" ? (error as { kind?: unknown }).kind : undefined;
+      return typeof kind === "string" && kind ? `engine_${kind}`.slice(0, 64) : "engine_error";
+    };
+    // One deadline for the whole page: an engine that accepts and never answers must not hang the owner's Settings.
+    const deadline = <T>(promise: Promise<T>) =>
+      Promise.race([promise, new Promise<never>((_, reject) => setTimeout(() => reject(Object.assign(new Error("engine timeout"), { code: "engine_timeout" })), deadlineMs).unref())]);
+    const [tools, caps, stats] = await Promise.allSettled([deadline(this.catalog()), deadline(this.client.capabilities(this.catalogSource)), deadline(this.client.fullStats())]);
     const readiness: EngineReadiness[] = [];
     let surface: string | null = null;
     if (caps.status === "fulfilled" && caps.value && typeof caps.value === "object") {
