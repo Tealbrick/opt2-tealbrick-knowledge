@@ -77,6 +77,10 @@ export const KEY_REJECTED = "memory_engine_key_rejected";
 /** C296: background provisioning retry while an area lacks its engine source (the engine service may start after Knowledge). */
 export const PROVISION_RETRY_MS = 5_000;
 export const PROVISION_RETRY_MAX_MS = 5 * 60_000;
+/** Retries after which an engine that still cannot create its sources is reported to the owner (5+10+20+40 s ≈ 75 s). */
+export const PROVISION_UNREACHABLE_AFTER = 4;
+/** C296 review: attention code when the engine companion does not answer, so its sources cannot be created. */
+export const ENGINE_UNREACHABLE = "memory_engine_unreachable";
 /** C296: attention code when no memory engine runs at all (a setting that is not available, or no engine service). */
 export const ENGINE_MISSING = "engine_missing";
 
@@ -104,6 +108,9 @@ export class Knowledge {
   private pendingRequeue = false;
   private provisionTimer: ReturnType<typeof setTimeout> | null = null;
   private provisionAttempt = 0;
+  private provisionAccess: ServiceAccess | null = null;
+  private provisionLog: ((msg: string, fields: Record<string, string>) => void) | null = null;
+  private stopped = false;
 
   constructor(config: KnowledgeConfig, opts: KnowledgeOptions = {}) {
     this.config = config;
@@ -153,6 +160,7 @@ export class Knowledge {
     this.probeTimer = null;
     if (this.provisionTimer) clearTimeout(this.provisionTimer);
     this.provisionTimer = null;
+    this.stopped = true;
   }
 
   /** Record what the engine just showed; a change pushes the app status at once (SDK `statusChanged`). */
@@ -182,6 +190,9 @@ export class Knowledge {
     }
     if (!this.config.gbrainUrl || !this.config.gbrainAdminToken) {
       return { code: ENGINE_MISSING, reason: "No memory engine runs: the GBrain service is not deployed with this app, so recall is keyword-only. Redeploy the app from Portal to add it." };
+    }
+    if (this.provisionAttempt > PROVISION_UNREACHABLE_AFTER) {
+      return { code: ENGINE_UNREACHABLE, reason: "The memory engine service does not answer, so its memory areas cannot be set up and recall is keyword-only. Check the GBrain service in your project." };
     }
     const { state, detail } = this.engineHealth;
     const list = detail.join(", ").slice(0, 80);
@@ -253,9 +264,9 @@ export class Knowledge {
   }
 
   /** Provision engine resources for areas that lack them (shared by concurrent callers). */
-  provision(services: Services, access: ServiceAccess): Promise<void> {
+  provision(services: Services, access: ServiceAccess, log?: (msg: string, fields: Record<string, string>) => void): Promise<void> {
     if (!this.provisioning) {
-      this.provisioning = services.areas.provisionPending(this.provisioner(services, access)).finally(() => (this.provisioning = null));
+      this.provisioning = services.areas.provisionPending(this.provisioner(services, access), log).finally(() => (this.provisioning = null));
     }
     return this.provisioning;
   }
@@ -265,25 +276,44 @@ export class Knowledge {
    * call retried it, so every projection row failed area_not_ready. While an area lacks its source, retry in the
    * background with backoff; an area that becomes ready re-arms its rows (Areas.provisionPending) and the outbox drains.
    */
-  retryProvision(services: Services, access: ServiceAccess): void {
+  retryProvision(services: Services, access?: ServiceAccess, log?: (msg: string, fields: Record<string, string>) => void): void {
+    if (access) this.provisionAccess = access;
+    if (log) this.provisionLog = log;
     const current = this.services ?? services;
-    if (!current.engine || this.provisionTimer) return;
+    const known = this.provisionAccess;
+    if (this.stopped || !known || !current.engine || this.provisionTimer) return;
     if (!current.areas.list().some((area) => !area.sourceReady)) {
+      const retried = this.provisionAttempt > 0;
+      const wasUnreachable = this.provisionAttempt > PROVISION_UNREACHABLE_AFTER;
       this.provisionAttempt = 0;
+      // Ready after retries: probe at once so the owner status does not wait for the 10 min probe; clear "unreachable".
+      if (wasUnreachable) this.statusChanged?.();
+      if (retried) void this.probeEngine(current).catch(() => undefined);
       return;
     }
     const delay = Math.min((this.opts.provisionRetryMs ?? PROVISION_RETRY_MS) * 2 ** this.provisionAttempt, PROVISION_RETRY_MAX_MS);
     this.provisionAttempt++;
+    if (this.provisionAttempt === PROVISION_UNREACHABLE_AFTER + 1) this.statusChanged?.();
     this.provisionTimer = setTimeout(() => {
-      this.provisionTimer = null;
-      void this.provision(this.services ?? current, access)
+      if (this.stopped) return;
+      const attempt = this.provisionAttempt;
+      // Log the first failure and every 5th, never upstream bodies (Areas logs the error message only).
+      const quiet = attempt !== 1 && attempt % 5 !== 0;
+      void this.provision(this.services ?? current, known, quiet ? undefined : this.provisionLog ?? undefined)
         .catch(() => undefined)
         .then(() => {
+          this.provisionTimer = null;
+          if (this.stopped) return;
           this.kick(this.services ?? current);
-          this.retryProvision(this.services ?? current, access);
+          this.retryProvision(this.services ?? current);
         });
     }, delay);
     this.provisionTimer.unref();
+  }
+
+  /** True while a background provisioning retry is scheduled or running. */
+  provisionRetrying(): boolean {
+    return this.provisionTimer !== null;
   }
 
   private provisioner(services: Services, access: ServiceAccess): AreaProvisioner {

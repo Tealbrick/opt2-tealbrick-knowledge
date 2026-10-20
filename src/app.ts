@@ -50,7 +50,7 @@ export function knowledgeDefinition(env: Record<string, string | undefined>, TbE
         await services.areas.ensureShared(ctx.scopes);
         await knowledge.provision(services, ctx as never);
         // C296: the engine companion may come up after Knowledge: keep provisioning in the background until every area is ready.
-        knowledge.retryProvision(services, ctx as never);
+        knowledge.retryProvision(services, ctx as never, (msg, fields) => ctx.log.warn(msg, fields));
         // Rows that gave up while the engine was unusable (e.g. before 0.1.6 no engine token could be stored) retry at boot.
         const retried = services.projector?.retryFailed() ?? 0;
         if (retried) ctx.log.info("projection retry after boot", { rows: retried });

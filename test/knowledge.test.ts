@@ -8,7 +8,7 @@ import type { Json, OpContext } from "@opt2-tealbrick/spec/sdk";
 import { knowledgeDefinition } from "../src/app.ts";
 import { NARROWING_POLICY } from "../src/handlers.ts";
 import { areaSourceId } from "../src/ids.ts";
-import { ENGINE_MISSING, KEY_REJECTED, memorySecrets, SECRET_NAME } from "../src/knowledge.ts";
+import { ENGINE_MISSING, ENGINE_UNREACHABLE, KEY_REJECTED, memorySecrets, SECRET_NAME } from "../src/knowledge.ts";
 import { context, type FakeGBrain, FakeScopes, fakeGBrain, memoryDb, TestError } from "./helpers.ts";
 
 const ADA = "agt_01AAAAAAAAAAAAAAAAAAAAAAAA";
@@ -628,8 +628,11 @@ test("C296: documents written with no engine reach GBrain on the first GBrain bo
   assert.equal(company.length, 3, "every document is a GBrain page");
   assert.notEqual(first.attention?.code, ENGINE_MISSING);
   assert.ok(!first.lines.includes("projection requeued after restore"), "quiet without a restore");
+  const puts = () => gbrain.calls.filter((c) => c.name === "put_page").length;
+  const before = puts();
   const second = await boot(true);
   assert.ok(second.lines.includes("projection requeued after restore"), "a restore before onStart requeues (the SDK restores before bind)");
+  assert.equal(puts() - before, 3, "every document is projected again (hashes cleared: a restore may leave the engine older or newer)");
 });
 
 test("C296 (prod): the engine comes up after Knowledge: provisioning retries in the background and every document reaches GBrain", async () => {
@@ -655,13 +658,72 @@ test("C296 (prod): the engine comes up after Knowledge: provisioning retries in 
     await knowledge.current()?.projector?.drain();
     db.prepare("UPDATE kn_projection SET state = 'failed', attempts = 12").run(); // a long outage: the rows gave up
     const state = () => db.prepare("SELECT state, COUNT(*) AS n FROM kn_projection GROUP BY state").all().map((r) => ({ ...r }));
-    for (let i = 0; i < 200 && JSON.stringify(state()) !== JSON.stringify([{ state: "ready", n: 2 }]); i++) {
-      await new Promise((resolve) => setTimeout(resolve, 10));
-      await knowledge.current()?.projector?.drain();
-    }
-    assert.deepEqual(state(), [{ state: "ready", n: 2 }], "no agent call was needed");
+    for (let i = 0; i < 200 && JSON.stringify(state()) !== JSON.stringify([{ state: "ready", n: 2 }]); i++) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.deepEqual(state(), [{ state: "ready", n: 2 }], "no agent call and no manual drain: the retry kicks the outbox");
     assert.equal(knowledge.current()?.areas.get("company")?.sourceReady, true);
+    assert.equal(knowledge.provisionRetrying(), false, "the retry loop ends once every area is ready");
+    // A new agent's area gets its source in the background too (no agent call).
+    await definition.events?.agentAdded?.({ id: BO, name: "Bo", mode: "free", status: "active" }, { db, scopes: scopes.asStore(), log, callApp: async () => { throw new Error("no companions"); }, statusChanged() {}, ownerLink: () => null });
+    for (let i = 0; i < 200 && !knowledge.current()?.areas.get(BO_AREA)?.sourceReady; i++) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(knowledge.current()?.areas.get(BO_AREA)?.sourceReady, true);
   } finally {
     knowledge.stop();
   }
+});
+
+test("C296 review: an engine that never answers is reported (memory_engine_unreachable) and clears when it comes up; stop() ends the loop", async () => {
+  const db = memoryDb();
+  const scopes = new FakeScopes();
+  const env = { KNOWLEDGE_ENGINE: "gbrain", KNOWLEDGE_GBRAIN_URL: gbrain.url, KNOWLEDGE_GBRAIN_ADMIN_TOKEN: gbrain.adminToken };
+  const { definition, knowledge } = knowledgeDefinition(env, TestError, { drainIntervalMs: 0, engineProbeMs: 0, provisionRetryMs: 1 });
+  let up = false;
+  const callServiceHelper = (async (_service: string, _path: string, body: Json) => {
+    if (!up) throw new Error("service_unreachable");
+    gbrain.sources.add(String((body as Record<string, unknown>).id));
+    return {};
+  }) as OpContext["callServiceHelper"];
+  const warned: string[] = [];
+  let pushes = 0;
+  const log = { debug() {}, info() {}, warn: (msg: string) => void warned.push(msg), error() {} };
+  try {
+    await definition.onStart({ db, secrets: memorySecrets(), log: log as never, scopes: scopes.asStore(), getKey: async () => null, callServiceHelper, statusChanged: () => void pushes++ });
+    const wait = async (done: () => boolean) => {
+      for (let i = 0; i < 300 && !done(); i++) await new Promise((resolve) => setTimeout(resolve, 5));
+    };
+    await wait(() => knowledge.attention()?.code === ENGINE_UNREACHABLE);
+    assert.equal(knowledge.attention()?.code, ENGINE_UNREACHABLE, "never silent (fires)");
+    assert.ok(pushes >= 1, "the status is pushed when it becomes unreachable");
+    assert.ok(warned.includes("area provisioning failed; retrying later"), "the first failure is logged");
+    up = true;
+    await wait(() => !knowledge.provisionRetrying());
+    assert.equal(knowledge.current()?.areas.get("company")?.sourceReady, true);
+    assert.notEqual(knowledge.attention()?.code, ENGINE_UNREACHABLE, "clears once the engine answers (quiet)");
+  } finally {
+    knowledge.stop();
+  }
+  assert.equal(knowledge.provisionRetrying(), false);
+});
+
+test("C296 review: stop() during an in-flight background provision does not schedule another retry", async () => {
+  const db = memoryDb();
+  const scopes = new FakeScopes();
+  const env = { KNOWLEDGE_ENGINE: "gbrain", KNOWLEDGE_GBRAIN_URL: gbrain.url, KNOWLEDGE_GBRAIN_ADMIN_TOKEN: gbrain.adminToken };
+  const { definition, knowledge } = knowledgeDefinition(env, TestError, { drainIntervalMs: 0, engineProbeMs: 0, provisionRetryMs: 1 });
+  let calls = 0;
+  let release: () => void = () => undefined;
+  const callServiceHelper = (async () => {
+    calls++;
+    if (calls === 1) throw new Error("service_unreachable");
+    await new Promise<void>((resolve) => (release = resolve));
+    throw new Error("service_unreachable");
+  }) as OpContext["callServiceHelper"];
+  const log = { debug() {}, info() {}, warn() {}, error() {} };
+  await definition.onStart({ db, secrets: memorySecrets(), log: log as never, scopes: scopes.asStore(), getKey: async () => null, callServiceHelper, statusChanged() {} });
+  for (let i = 0; i < 200 && calls < 2; i++) await new Promise((resolve) => setTimeout(resolve, 2));
+  assert.equal(calls, 2, "the background retry is in flight");
+  knowledge.stop();
+  release();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(knowledge.provisionRetrying(), false);
+  assert.equal(calls, 2, "no retry after stop()");
 });
