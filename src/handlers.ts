@@ -770,6 +770,8 @@ export function createHandlers(knowledge: Knowledge, TbError: ErrorFactory) {
       const s = knowledge.bind(ctx.db);
       await s.areas.ensureShared(ctx.scopes);
       await s.areas.ensureAgentArea(agent, ctx.scopes);
+      // C296 review: a new agent area gets its engine source in the background too (not only on the agent's first call).
+      knowledge.retryProvision(s);
     },
     async keysChanged() {
       const s = knowledge.current();

@@ -39,11 +39,9 @@ export function knowledgeDefinition(env: Record<string, string | undefined>, TbE
       attention: async () => knowledge.attention(),
       // The SDK backs up app.db and each deployed service (manifest `backups` + `services[].backup`).
       backup: {
+        // The SDK restores at boot, before onStart binds the services: the requeue then runs in onStart (C296 review).
         async afterRestore() {
-          const services = knowledge.current();
-          const requeued = services?.projector?.requeueAll() ?? 0;
-          if (services) knowledge.kick(services);
-          void requeued;
+          knowledge.restored();
         },
       },
       // After boot (and the claim): the company area exists, engine resources are provisioned, the outbox drains.
@@ -51,13 +49,17 @@ export function knowledgeDefinition(env: Record<string, string | undefined>, TbE
         const services = knowledge.bind(ctx.db, ctx.secrets);
         await services.areas.ensureShared(ctx.scopes);
         await knowledge.provision(services, ctx as never);
+        // C296: the engine companion may come up after Knowledge: keep provisioning in the background until every area is ready.
+        knowledge.retryProvision(services, ctx as never, (msg, fields) => ctx.log.warn(msg, fields));
         // Rows that gave up while the engine was unusable (e.g. before 0.1.6 no engine token could be stored) retry at boot.
         const retried = services.projector?.retryFailed() ?? 0;
         if (retried) ctx.log.info("projection retry after boot", { rows: retried });
+        const requeued = knowledge.requeueAfterRestore(services);
+        if (requeued) ctx.log.info("projection requeued after restore", { rows: requeued });
         knowledge.kick(services);
         // F89: probe the engine now (and every 10 min) so a degraded engine shows before the first recall.
         await knowledge.watchEngine(services, ctx.statusChanged ? () => ctx.statusChanged?.() : null, opts.engineProbeMs).catch(() => undefined);
-        ctx.log.info("knowledge started", { engine: services.engine ? "gbrain" : "none", engineState: knowledge.engineStatus().state, research: services.notebook !== null, areas: services.areas.list().length });
+        ctx.log.info("knowledge started", { engine: services.engine ? "gbrain" : "none", configured: knowledge.config.engine, attention: knowledge.attention()?.code ?? "none", engineState: knowledge.engineStatus().state, research: services.notebook !== null, areas: services.areas.list().length });
       },
     },
   };
