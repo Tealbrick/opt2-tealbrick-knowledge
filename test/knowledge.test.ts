@@ -9,6 +9,7 @@ import { knowledgeDefinition } from "../src/app.ts";
 import { NARROWING_POLICY } from "../src/handlers.ts";
 import { areaSourceId } from "../src/ids.ts";
 import { ENGINE_KEY_MISSING, ENGINE_MISSING, ENGINE_UNREACHABLE, KEY_REJECTED, memorySecrets, SECRET_NAME } from "../src/knowledge.ts";
+import { DocumentStore } from "../src/store/documents.ts";
 import { context, type FakeGBrain, FakeScopes, fakeGBrain, memoryDb, TestError } from "./helpers.ts";
 
 const ADA = "agt_01AAAAAAAAAAAAAAAAAAAAAAAA";
@@ -233,6 +234,101 @@ test("C336 M4: context packs entities through the engine, adds cited matches, ca
   assert.deepEqual(none, []);
   const all = await definition.dynamic?.engine?.catalog(null as never, hookCtx);
   assert.equal(all?.length, 6);
+});
+
+test("QA-KNOW17-1: engine facts are cited by id, opened with get, never shown bare; context pack lines carry their citation", async () => {
+  const { ctx, run, knowledge } = await setup();
+  await run("remember", { text: "warm up" }, ctx(ADA));
+  await run("recall", { query: "warm" }, ctx(ADA));
+  await knowledge.current()?.projector?.drain();
+  const source = areaSourceId(ADA_AREA);
+  gbrain.facts.set(source, [{ id: 41, fact: "Globex pays invoices on net 45", entity_slug: "globex", provenance: "call notes" }]);
+  try {
+    const out = await run("recall", { query: "globex invoices", area: ADA_AREA }, ctx(ADA));
+    const fact = out.results.find((row: { ref: { kind: string } }) => row.ref.kind === "fact");
+    assert.ok(fact, JSON.stringify(out));
+    assert.deepEqual(fact.ref, { kind: "fact", area: ADA_AREA, id: "41", lookup: { entity: "globex" } });
+    assert.deepEqual(fact.source, { ref: `knowledge:fact/${ADA_AREA}/41` });
+    assert.equal(out.areas[0].uncited, undefined, "a fact row is cited, not dropped");
+    const opened = await run("get", { ref: fact.ref }, ctx(ADA));
+    assert.equal(opened.text, "Globex pays invoices on net 45");
+    assert.equal(opened.source.ref, `knowledge:fact/${ADA_AREA}/41`);
+    assert.equal(opened.source.provenance, "call notes");
+    await assert.rejects(run("get", { ref: { ...fact.ref, id: "42" } }, ctx(ADA)), rejects("not_found"));
+    await assert.rejects(run("get", { ref: fact.ref }, ctx(BO)), rejects("not_found"));
+    await assert.rejects(run("get", { ref: fact.ref }, ctx(ADA, { context: narrowing({ anyOf: ["work"] }) })), rejects("not_found"));
+    await assert.rejects(run("get", { ref: { kind: "fact", area: ADA_AREA, id: "41" } }, ctx(ADA)), rejects("invalid_input"));
+    // a tag narrowing drops facts (their tags are unknown), like engine pages
+    const narrowed = await run("recall", { query: "globex invoices", area: ADA_AREA }, ctx(ADA, { context: narrowing({ noneOf: ["personal"] }) }));
+    assert.ok(!narrowed.results.some((row: { ref: { kind: string } }) => row.ref.kind === "fact"));
+  } finally {
+    gbrain.facts.delete(source);
+  }
+  const pack = await run("context", { purpose: "session_start", entities: ["Acme"] }, ctx(ADA));
+  for (const line of pack.text.split("\n").filter(Boolean)) assert.match(line, /\[knowledge:(document|page|fact)\//u, `every context line is cited: ${line}`);
+  assert.ok(pack.refs.some((ref: { kind: string }) => ref.kind === "fact"));
+});
+
+test("QA-KNOW17-2/-3: dedupe never names a memory the narrowing hides; an edited memory's key follows its body", async () => {
+  const { ctx, run, db } = await setup();
+  const secret = await run("remember", { text: "Dentist on Friday at nine.", tags: ["personal"] }, ctx(ADA));
+  const narrowed = ctx(ADA, { context: narrowing({ anyOf: ["work"] }) });
+  const again = await run("remember", { text: "Dentist on Friday at nine.", tags: ["work"] }, narrowed);
+  assert.equal(again.created, true, "the hidden memory is not reported as a duplicate");
+  assert.notEqual(again.documentId, secret.documentId);
+  const visible = await run("document_get", { id: again.documentId }, narrowed);
+  assert.deepEqual(visible.tags, ["work"]);
+  await assert.rejects(run("document_get", { id: secret.documentId }, narrowed), rejects("not_found"));
+  // batch form: same rule
+  const batch = await run("remember", { items: [{ text: "Dentist on Friday at nine.", tags: ["work"] }] }, narrowed);
+  assert.notEqual(batch.items[0].documentId, secret.documentId);
+  // -3: edit, then the old text is a new memory and the new text finds the edited one
+  const parking = await run("remember", { text: "Parking spot is number 12." }, ctx(ADA));
+  await run("document_update", { id: parking.documentId, body: "Parking spot is number 40.", expectedVersion: parking.version }, ctx(ADA));
+  const old = await run("remember", { text: "Parking spot is number 12." }, ctx(ADA));
+  assert.equal(old.created, true);
+  const edited = await run("remember", { text: "parking spot is number 40." }, ctx(ADA));
+  assert.equal(edited.created, false);
+  assert.equal(edited.documentId, parking.documentId);
+  assert.ok(db.prepare("SELECT 1 FROM kn_documents WHERE id = ? AND content_digest IS NOT NULL").get(parking.documentId));
+});
+
+test("QA-KNOW17-4: keyword and degraded rows are cited; dedupe is per area; a batch is all or nothing", async () => {
+  const { ctx, run } = await setup();
+  const shared = "Office wifi password rotates monthly.";
+  const ada = await run("remember", { text: shared }, ctx(ADA));
+  const bo = await run("remember", { text: shared }, ctx(BO));
+  assert.equal(bo.created, true, "the same text in another area is another memory");
+  assert.notEqual(bo.documentId, ada.documentId);
+  // engine answer unreadable → keyword fallback: every row still has ref + source
+  gbrain.queryReply = "unparsable";
+  try {
+    const out = await run("recall", { query: "wifi", area: ADA_AREA }, ctx(ADA));
+    assert.equal(out.degraded, true);
+    assert.ok(out.results.length >= 1);
+    for (const row of out.results) {
+      assert.equal(typeof row.source?.ref, "string");
+      assert.ok(row.ref?.kind);
+    }
+  } finally {
+    gbrain.queryReply = undefined;
+  }
+  // a failure on the second item rolls back the first (the store is patched for this call only)
+  const original = DocumentStore.prototype.createDocument;
+  let calls = 0;
+  DocumentStore.prototype.createDocument = function (this: DocumentStore, input: Parameters<typeof original>[0]) {
+    calls++;
+    if (calls === 2) throw new Error("disk full");
+    return original.call(this, input);
+  };
+  try {
+    await assert.rejects(run("remember", { items: [{ text: "Batch item one." }, { text: "Batch item two." }] }, ctx(ADA)));
+  } finally {
+    DocumentStore.prototype.createDocument = original;
+  }
+  assert.equal(calls, 2);
+  const search = await run("documents_search", { query: "Batch item" }, ctx(ADA));
+  assert.equal(search.hits.length, 0, "nothing of the failed batch is stored");
 });
 
 test("walled areas: another agent can neither recall nor read nor target the area", async () => {

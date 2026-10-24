@@ -146,6 +146,8 @@ export interface FakeGBrain {
    * this fake's rows; `unparsable` = a text item that is not a row list.
    */
   queryReply?: "fake" | "upstream-degraded" | "unparsable";
+  /** QA-KNOW17-1: saved facts per source; `query` adds matching ones as `result_type: "fact"` rows (no slug, as at 0.60.424), `recall` lists them */
+  facts: Map<string, { id: number; fact: string; entity_slug: string; provenance: string }[]>;
   /** the next admin API call answers 401 once (an engine restart forgot the admin session) */
   adminSessionsLost?: boolean;
   close(): Promise<void>;
@@ -160,7 +162,7 @@ export async function fakeGBrain(): Promise<FakeGBrain> {
   const clients = new Map<string, { secret: string; source: string }>();
   const tokens = new Map<string, string>();
   let counter = 0;
-  const state: Omit<FakeGBrain, "url" | "close"> = { adminToken, sources: new Set(), pages: new Map(), calls: [] };
+  const state: Omit<FakeGBrain, "url" | "close"> = { adminToken, sources: new Set(), pages: new Map(), calls: [], facts: new Map() };
   const server: Server = createServer(async (req, res) => {
     const text = await body(req);
     const json = (status: number, value: unknown, headers: Record<string, string> = {}) => {
@@ -251,14 +253,24 @@ export async function fakeGBrain(): Promise<FakeGBrain> {
       if (name === "context_pack") {
         // MEMORY_VERBS v1 shape (cards, facts, open threads); `entities` is a comma-separated string upstream
         const names = String(args.entities ?? "").split(",").map((n) => n.trim()).filter(Boolean);
-        return reply({ content: [{ type: "text", text: JSON.stringify({ protocol_version: 1, entities: names, cards: names.map((n) => ({ slug: `companies/${n.toLowerCase()}`, title: n, summary: `${n} card` })), facts: names.map((n) => ({ fact: `${n} renews in March`, entity_slug: n.toLowerCase() })), open_threads: [] }) }] });
+        return reply({ content: [{ type: "text", text: JSON.stringify({ protocol_version: 1, entities: names, cards: names.map((n) => ({ slug: `companies/${n.toLowerCase()}`, title: n, summary: `${n} card` })), facts: names.map((n, i) => ({ fact_id: String(900 + i), fact: `${n} renews in March`, entity_slug: n.toLowerCase() })), open_threads: [] }) }] });
+      }
+      if (name === "recall") {
+        const entity = typeof args.entity === "string" ? args.entity : null;
+        const grep = typeof args.grep === "string" ? args.grep.toLowerCase() : null;
+        const list = (state.facts.get(source) ?? []).filter((f) => (entity ? f.entity_slug === entity : grep ? f.fact.toLowerCase().includes(grep) : true));
+        return reply({ content: [{ type: "text", text: JSON.stringify({ protocol_version: 1, facts: list.map((f) => ({ ...f, fact_id: String(f.id) })), total: list.length }) }] });
       }
       if (name === "think") return reply({ content: [{ type: "text", text: JSON.stringify({ answer: `answer to ${String(args.question)}`, citations: [{ slug: "notes/x" }] }) }] });
       if (name === "query" || name === "search") {
         const words = String(args.query).toLowerCase().split(/\s+/u);
         const results = [...pages.entries()]
           .filter(([, page]) => words.some((word) => page.content.toLowerCase().includes(word)))
-          .map(([pageSlug, page], i) => ({ slug: pageSlug, title: pageSlug, chunk_text: page.content.slice(-200), score: 1 - i / 10, source_id: source }));
+          .map(([pageSlug, page], i): Record<string, unknown> => ({ slug: pageSlug, title: pageSlug, chunk_text: page.content.slice(-200), score: 1 - i / 10, source_id: source }));
+        for (const f of state.facts.get(source) ?? []) {
+          if (!words.some((word) => f.fact.toLowerCase().includes(word))) continue;
+          results.push({ result_type: "fact", fact_id: String(f.id), follow_up: { op: "recall", args: { entity: f.entity_slug, source_id: source } }, title: `Saved fact about ${f.entity_slug}`, chunk_text: `Saved fact: ${f.fact}`, score: 0.5, source_id: source });
+        }
         if (state.queryReply === "unparsable") return reply({ content: [{ type: "text", text: "search backend restarting" }, { type: "text", text: "[gbrain notice degraded_recall kind=degraded]\nwhy: x" }] });
         if (state.queryReply === "upstream-degraded") {
           const real = UPSTREAM_DEGRADED_QUERY as { content: { type: string; text: string }[]; _meta: Record<string, unknown> };

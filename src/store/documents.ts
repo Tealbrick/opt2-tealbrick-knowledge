@@ -386,9 +386,18 @@ export class DocumentStore {
       const at = this.now();
       const version = current.version + 1;
       const tags = JSON.stringify(tagList);
+      // QA-KNOW17-3: a memory with a dedupe key keeps it in step with its body; when another live memory of the area already
+      // has the new key, this one gives its key up (a later remember of that text finds the other one)
+      const row = this.db.prepare("SELECT content_digest FROM kn_documents WHERE id = ?").get(id);
+      let digest = row?.content_digest === null || row?.content_digest === undefined ? null : String(row.content_digest);
+      if (digest !== null && body !== current.body) {
+        const next = memoryDigest(body, current.area);
+        const taken = this.db.prepare("SELECT 1 FROM kn_documents WHERE area_id = ? AND content_digest = ? AND id <> ? AND deleted_at IS NULL").get(current.area, next, id);
+        digest = taken ? null : next;
+      }
       this.db
-        .prepare("UPDATE kn_documents SET title = ?, slug = ?, summary = ?, body = ?, status = ?, tags = ?, version = ?, updated_by = ?, updated_at = ? WHERE id = ? AND version = ?")
-        .run(title, slugify(title), summary, body, status, tags, version, actor, at, id, current.version);
+        .prepare("UPDATE kn_documents SET title = ?, slug = ?, summary = ?, body = ?, status = ?, tags = ?, version = ?, updated_by = ?, updated_at = ?, content_digest = ? WHERE id = ? AND version = ?")
+        .run(title, slugify(title), summary, body, status, tags, version, actor, at, digest, id, current.version);
       this.writeRevision(id, version, title, summary, body, status, tags, actor, at);
       const doc = this.getDocument(id) as Document;
       this.enqueue(doc.area, doc.id, "upsert");

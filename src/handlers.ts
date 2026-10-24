@@ -254,7 +254,7 @@ export function createHandlers(knowledge: Knowledge, TbError: ErrorFactory) {
     // C336 M1: every hit carries `ref` (what to open with get) and `source` (the citation). A canonical document cites its
     // imported source or itself; an engine page cites its area and slug. An engine row with neither cannot be cited: it is
     // left out and counted per area (`uncited`), never returned without a source.
-    type Ref = { kind: "document"; id: string } | { kind: "page"; area: string; slug: string };
+    type Ref = { kind: "document"; id: string } | { kind: "page"; area: string; slug: string } | { kind: "fact"; area: string; id: string; lookup?: { entity?: string; grep?: string } };
     type TaggedRow = RecallRow & { tags: string[]; ref: Ref; source: Citation | { ref: string } };
     const lists: { area: string; rows: TaggedRow[] }[] = [];
     const statuses: { area: string; ok: boolean; via: "engine" | "keyword"; error?: string; degraded?: string[]; uncited?: number }[] = [];
@@ -271,6 +271,11 @@ export function createHandlers(knowledge: Knowledge, TbError: ErrorFactory) {
           const doc = row.documentId ? known.get(row.documentId) : undefined;
           if (filter && (!doc || !tagsPass(doc.tags, filter))) return [];
           if (doc && row.documentId) return [{ ...row, tags: doc.tags, ref: { kind: "document", id: row.documentId }, source: doc.citation }];
+          // QA-KNOW17-1: a saved fact of the engine is cited by its id (and read again with `get` through its lookup)
+          if (row.factId) {
+            const ref: Ref = { kind: "fact", area: row.area, id: row.factId, ...(row.factLookup && Object.keys(row.factLookup).length ? { lookup: row.factLookup } : {}) };
+            return [{ ...row, tags: [], ref, source: { ref: `knowledge:fact/${row.area}/${row.factId}` } }];
+          }
           // A page that mirrors a deleted canonical document is stale: its document is gone, so it is not cited either.
           if (row.documentId || !row.slug) {
             uncited++;
@@ -353,7 +358,10 @@ export function createHandlers(knowledge: Knowledge, TbError: ErrorFactory) {
             items.map((item) => {
               const digest = memoryDigest(item.text, area);
               const known = s.store.findByDigest(area, digest);
-              if (known) return { doc: known, created: false };
+              // QA-KNOW17-2 (§18.4 a: hidden = missing): a duplicate the caller's narrowing hides is never named; the
+              // memory is stored as a new document with the caller's tags and no dedupe key (the hidden one keeps it)
+              const duplicateVisible = known !== null && !hidden(ctx)(known);
+              if (known && duplicateVisible) return { doc: known, created: false };
               const firstLine = item.text.split(/\r?\n/u).find((line) => line.trim())?.trim() ?? "Memory";
               const doc = s.store.createDocument({
                 area,
@@ -362,7 +370,7 @@ export function createHandlers(knowledge: Knowledge, TbError: ErrorFactory) {
                 status: "published",
                 tags: item.tags,
                 actor: actor(ctx),
-                contentDigest: digest,
+                ...(known ? {} : { contentDigest: digest }),
                 ...(sourceRef ? { sourceRef } : {}),
                 ...(sourceUrl ? { sourceUrl } : {}),
               });
@@ -401,6 +409,36 @@ export function createHandlers(knowledge: Knowledge, TbError: ErrorFactory) {
         wrap(async () => {
           const s = services(ctx);
           const ref = input.ref as In;
+          if (ref.kind === "fact") {
+            // QA-KNOW17-1: a saved fact of the engine, read again with its own recall lookup in the area and matched by id
+            if (typeof ref.area !== "string" || typeof ref.id !== "string") throw fail("invalid_input", "a fact ref needs area and id", 400);
+            const lookup = (ref.lookup ?? {}) as { entity?: unknown; grep?: unknown };
+            const args = typeof lookup.entity === "string" && lookup.entity ? { entity: lookup.entity } : typeof lookup.grep === "string" && lookup.grep ? { grep: lookup.grep } : null;
+            if (!args) throw fail("invalid_input", "a fact ref needs the lookup that recall returned with it", 400);
+            await readable(ctx, ref.area);
+            // engine facts carry no tags Knowledge can match: under a tag narrowing they answer like missing ones
+            if (tagFilter(ctx)) throw notFound();
+            const engine = s.engine;
+            if (!engine) throw notFound();
+            const area = await readyArea(ctx, s, ref.area, "source");
+            let answer: In;
+            try {
+              answer = (await engine.call(area.sourceId, "gb_recall", { ...args, limit: 50 }, ctx.caller.id)) as In;
+            } catch (error) {
+              throw engineError(error);
+            }
+            const facts = Array.isArray(answer?.facts) ? (answer.facts as In[]) : [];
+            const fact = facts.find((f) => String(f.fact_id ?? f.id) === ref.id);
+            if (!fact) throw notFound();
+            const provenance = typeof fact.provenance === "string" ? fact.provenance.slice(0, 500) : undefined;
+            return {
+              ref: { kind: "fact", area: ref.area, id: ref.id, lookup: args },
+              area: ref.area,
+              title: typeof fact.entity_slug === "string" ? `Saved fact about ${fact.entity_slug}` : "Saved fact",
+              text: String(fact.fact ?? ""),
+              source: { ref: `knowledge:fact/${ref.area}/${ref.id}`, ...(provenance ? { provenance } : {}) },
+            } as unknown as Json;
+          }
           let documentId = ref.kind === "document" && typeof ref.id === "string" ? ref.id : null;
           if (ref.kind === "page") {
             if (typeof ref.area !== "string" || typeof ref.slug !== "string") throw fail("invalid_input", "a page ref needs area and slug", 400);
@@ -456,9 +494,24 @@ export function createHandlers(knowledge: Knowledge, TbError: ErrorFactory) {
                 const area = await readyArea(ctx, s, own, "source");
                 const pack = (await s.engine.call(area.sourceId, "gb_context_pack", { entities: entities.join(","), budget_tokens: Math.floor(maxChars / 4) }, ctx.caller.id)) as In;
                 via = "context_pack";
-                for (const card of Array.isArray(pack?.cards) ? (pack.cards as In[]) : []) lines.push(`- ${String(card.title ?? card.slug ?? "")}: ${String(card.summary ?? card.text ?? card.compiled_truth ?? "").replace(/\s+/gu, " ").slice(0, 400)}`);
-                for (const fact of Array.isArray(pack?.facts) ? (pack.facts as In[]) : []) lines.push(`- ${String(fact.fact ?? "")}${fact.entity_slug ? ` (${String(fact.entity_slug)})` : ""}`);
-                for (const thread of Array.isArray(pack?.open_threads) ? (pack.open_threads as In[]) : []) lines.push(`- open: ${String(thread.title ?? thread.text ?? thread.slug ?? "")}`);
+                // QA-KNOW17-1: every pack line carries its citation (a card is an engine page, a fact is cited by id); a line
+                // that cannot be cited is left out, never shown without a source
+                for (const card of Array.isArray(pack?.cards) ? (pack.cards as In[]) : []) {
+                  if (typeof card.slug !== "string" || !card.slug) continue;
+                  lines.push(`- ${String(card.title ?? card.slug)}: ${String(card.summary ?? card.text ?? card.compiled_truth ?? "").replace(/\s+/gu, " ").slice(0, 400)} [knowledge:page/${own}/${card.slug}]`);
+                  refs.push({ kind: "page", area: own, slug: card.slug });
+                }
+                for (const fact of Array.isArray(pack?.facts) ? (pack.facts as In[]) : []) {
+                  const id = fact.fact_id ?? fact.id;
+                  if ((typeof id !== "string" && typeof id !== "number") || typeof fact.entity_slug !== "string") continue;
+                  lines.push(`- ${String(fact.fact ?? "")} (${fact.entity_slug}) [knowledge:fact/${own}/${String(id)}]`);
+                  refs.push({ kind: "fact", area: own, id: String(id), lookup: { entity: fact.entity_slug } });
+                }
+                for (const thread of Array.isArray(pack?.open_threads) ? (pack.open_threads as In[]) : []) {
+                  if (typeof thread.slug !== "string" || !thread.slug) continue;
+                  lines.push(`- open: ${String(thread.title ?? thread.text ?? thread.slug)} [knowledge:page/${own}/${thread.slug}]`);
+                  refs.push({ kind: "page", area: own, slug: thread.slug });
+                }
               } catch (error) {
                 // a context block never blocks the session: the word and meaning search below still answer
                 degraded = true;
