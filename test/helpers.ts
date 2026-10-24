@@ -167,7 +167,7 @@ export async function fakeGBrain(): Promise<FakeGBrain> {
       res.writeHead(status, { "content-type": "application/json", ...headers });
       res.end(JSON.stringify(value));
     };
-    if (req.url === "/health") return json(200, { status: "ok", version: "0.60.57.0", engine: "postgres" });
+    if (req.url === "/health") return json(200, { status: "ok", version: "0.60.424.0", engine: "postgres" });
     if (req.url === "/admin/login") return JSON.parse(text).token === adminToken ? json(200, { ok: true }, { "set-cookie": "gbrain_admin=s1; Path=/" }) : json(401, {});
     if (req.url === "/admin/api/register-client") {
       if (req.headers.cookie !== "gbrain_admin=s1") return json(401, {});
@@ -184,7 +184,7 @@ export async function fakeGBrain(): Promise<FakeGBrain> {
       }
       if (req.headers.cookie !== "gbrain_admin=s1") return json(401, {});
       const pages = [...state.pages.values()].reduce((n, m) => n + m.size, 0);
-      return json(200, { status: "ok", version: "0.60.57.0", engine: "postgres", page_count: pages, chunk_count: pages * 2, embedded_count: pages * 2 });
+      return json(200, { status: "ok", version: "0.60.424.0", engine: "postgres", page_count: pages, chunk_count: pages * 2, embedded_count: pages * 2 });
     }
     if (req.url === "/token") {
       const form = new URLSearchParams(text);

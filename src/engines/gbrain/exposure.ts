@@ -2,7 +2,7 @@
 // Source: the pinned operation surface (generated from upstream's registry at the tag) intersected
 // with the live `tools/list` of the running service. An op must be in both; anything else fails closed.
 import type { CrudAction, DynamicCatalogEntry, Effect, HoldFamily } from "@opt2-tealbrick/spec/manifest";
-import surfaceData from "./surface-0.60.57.0.json" with { type: "json" };
+import surfaceData from "./surface-0.60.424.0.json" with { type: "json" };
 
 interface UpstreamOperation {
   name: string;
@@ -45,6 +45,9 @@ const WRITE_CRUD: Readonly<Record<string, CrudAction[]>> = {
   revert_version: [U, D], put_raw_data: [C, U], log_ingest: [C], takes_add: [C], takes_update: [U], takes_resolve: [U],
   takes_supersede: [C, U], ontology_propose: [C], extract_entities: [C, U], extract_facts: [C, U], forget_fact: [D],
   mute_notice: [U],
+  // 0.60.424.0 (C336 M2): batch and multipart page writes, memory confirmation
+  append_page: [C, U], put_pages: [C, U], begin_page_upload: [C], upload_page_part: [U], commit_page_upload: [C, U],
+  abort_page_upload: [U], confirm_memory: [U],
 };
 
 /** Upstream ops callable by a read+write client that Knowledge does not delegate, with the reason. */
@@ -62,6 +65,14 @@ export const POLICY_EXCLUSIONS: Readonly<Record<string, string>> = {
   loops_close: "acts on open loops, which are withheld (A13)",
   loops_mute: "acts on open loops, which are withheld (A13)",
   loops_unmute: "acts on open loops, which are withheld (A13)",
+  // 0.60.424.0 (C336 M2): fail closed until upstream's check of these arguments against the area binding is verified
+  sources_resolve_path: "resolves paths of named engine sources, i.e. other areas",
+  rate_answer: "rates pages named as `source_id:slug` refs of any source",
+  questions_pin: "standing questions take a `source` argument the area binding is not verified to cover",
+  questions_list: "standing questions take a `source` argument the area binding is not verified to cover",
+  questions_status: "standing questions take a `source` argument the area binding is not verified to cover",
+  questions_refresh: "standing questions take a `source` argument the area binding is not verified to cover",
+  questions_unpin: "standing questions take a `source` argument the area binding is not verified to cover",
 };
 
 const FAN_OUT_READS = new Set([
@@ -69,7 +80,7 @@ const FAN_OUT_READS = new Set([
   "traverse_graph", "get_timeline", "find_trajectory", "takes_list", "takes_search",
 ]);
 const MODEL_COST = new Set(["think", "synthesize"]);
-const LONG = new Set(["think", "synthesize", "query", "assemble_evidence", "extract_facts", "extract_entities", "remember", "capture", "put_page"]);
+const LONG = new Set(["think", "synthesize", "query", "assemble_evidence", "extract_facts", "extract_entities", "remember", "capture", "put_page", "put_pages", "commit_page_upload", "search_exact"]);
 
 export interface Exposure {
   version: string;

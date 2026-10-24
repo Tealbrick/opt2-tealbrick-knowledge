@@ -42,16 +42,30 @@ test("argument guard refuses source selection, host access, private facts and fo
   assert.equal(argumentRefusal("remember", { fact: "ok" }), null);
 });
 
-test("exposure at the pin: 88 tools exposed, every write classified, destructive ops held", () => {
+test("exposure at the pin (0.60.424.0): 101 tools exposed, every write classified, destructive ops held", () => {
   const exposure = gbrainExposure();
-  assert.equal(exposure.exposed.size + exposure.excluded.size, 156);
-  assert.equal(exposure.exposed.size, 88);
+  assert.equal(exposure.version, "0.60.424.0");
+  assert.equal(exposure.exposed.size + exposure.excluded.size, 182);
+  assert.equal(exposure.exposed.size, 101);
   assert.ok(exposure.exposed.size <= 256);
   for (const op of exposure.exposed.values()) {
     assert.equal(op.effect === "read", op.crud.length === 1 && op.crud[0] === "read", op.name);
     if (op.crud.includes("delete")) assert.equal(op.holdFamily, "destructive", op.name);
   }
   assert.ok(exposure.excluded.has("sources_list"));
+  // C336 M2: new upstream ops that name other sources stay excluded until upstream's check is verified
+  for (const name of ["sources_resolve_path", "rate_answer", "questions_list", "questions_pin", "purge_fact"]) assert.ok(exposure.excluded.has(name), name);
+  for (const name of ["append_page", "put_pages", "commit_page_upload", "confirm_memory", "search_exact", "context_pack"]) assert.ok(exposure.exposed.has(name), name);
+});
+
+test("C336 M2 guard: batch and multipart page writes cannot touch knowledge-docs/; source-naming arguments are refused", () => {
+  assert.ok(argumentRefusal("put_pages", { pages: [{ slug: "notes/a", content: "x" }, { slug: "Knowledge-Docs/kdoc_x", content: "y" }] }));
+  assert.equal(argumentRefusal("put_pages", { pages: [{ slug: "notes/a", content: "x" }] }), null);
+  assert.ok(argumentRefusal("append_page", { slug: "knowledge-docs/kdoc_x", text: "y" }));
+  assert.ok(argumentRefusal("begin_page_upload", { slug: "knowledge-docs/kdoc_x", total_bytes: 1 }));
+  assert.ok(argumentRefusal("context_pack", { entities: "Acme", prefer_source_id: "ka-other" }));
+  assert.ok(argumentRefusal("context_pack", { entities: "Acme", entity_refs: [{ source_id: "ka-other", slug: "acme" }] }));
+  assert.equal(argumentRefusal("context_pack", { entities: "Acme", budget_tokens: 400 }), null);
 });
 
 test("SEC-10: guard refuses all_sources, include_private, purge and forced delete/restore", () => {

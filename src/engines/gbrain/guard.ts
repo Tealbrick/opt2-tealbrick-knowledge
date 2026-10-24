@@ -1,11 +1,15 @@
 // Argument guard applied before any upstream GBrain call; returns a refusal reason or null.
 const RESERVED_PAGE_PREFIXES = ["knowledge-docs/"];
-const PAGE_CONTENT_WRITES = new Set(["put_page", "delete_page", "restore_page", "edit_page", "revert_version", "capture", "put_raw_data"]);
+const PAGE_CONTENT_WRITES = new Set(["put_page", "delete_page", "restore_page", "edit_page", "revert_version", "capture", "put_raw_data", "append_page", "begin_page_upload"]);
 const FORCE_WRITES = new Set(["put_page", "remember", "capture", "edit_page", "revert_version", "delete_page", "restore_page"]);
+
+const reservedSlug = (slug: unknown) => typeof slug === "string" && RESERVED_PAGE_PREFIXES.some((prefix) => slug.toLowerCase().startsWith(prefix));
 
 export function argumentRefusal(operation: string, args: Record<string, unknown>): string | null {
   const present = (key: string) => Object.hasOwn(args, key) && args[key] !== undefined && args[key] !== null;
   if (Object.hasOwn(args, "source_id") || Object.hasOwn(args, "source_ids")) return "source_id is selected by Knowledge from the area";
+  // 0.60.424.0 (C336 M2): arguments that name engine sources directly
+  if (Object.hasOwn(args, "prefer_source_id") || Object.hasOwn(args, "entity_refs")) return "engine sources are selected by Knowledge from the area; pass entity names instead";
   if (["remember", "extract_facts", "ontology_propose"].includes(operation) && args.visibility === "private") {
     return "private visibility is not available; memory in an area is shared by everyone who may read the area";
   }
@@ -24,6 +28,9 @@ export function argumentRefusal(operation: string, args: Record<string, unknown>
   if ((operation === "think" || operation === "synthesize") && present("model")) return "model selection belongs to the deployment settings";
   if (operation === "think" && ((present("save") && args.save !== false) || (present("take") && args.take !== false))) return "think may not persist takes or pages";
   if (operation === "get_calibration_profile" && present("holder")) return "only the default calibration holder is available";
+  if (operation === "put_pages" && Array.isArray(args.pages) && args.pages.some((page) => reservedSlug((page as { slug?: unknown } | null)?.slug))) {
+    return "pages under knowledge-docs/ mirror Knowledge documents; change the document instead";
+  }
   if (PAGE_CONTENT_WRITES.has(operation) && typeof args.slug === "string" && RESERVED_PAGE_PREFIXES.some((prefix) => String(args.slug).toLowerCase().startsWith(prefix))) {
     return "pages under knowledge-docs/ mirror Knowledge documents; change the document instead";
   }

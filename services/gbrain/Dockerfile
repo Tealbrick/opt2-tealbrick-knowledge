@@ -13,8 +13,8 @@ RUN npm ci --prefix /opt/knowledge --omit=dev --ignore-scripts --no-audit --no-f
 
 FROM oven/bun:1.4.0-debian@sha256:5bb0f9be3a1a36a03e27c9a9dd894a3b1ad26657155c7df4dda771e17bf872ef
 ARG GBRAIN_REPO=https://github.com/garrytan/gbrain.git
-ARG GBRAIN_COMMIT=99de5707f6fc0916f43b4c167802a5f8d9ea0cf0
-ARG GBRAIN_VERSION=0.60.57.0
+ARG GBRAIN_COMMIT=36121271caf3dea8ffc2240deb28c5da50f7eade
+ARG GBRAIN_VERSION=0.60.424.0
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates git tini libstdc++6 && rm -rf /var/lib/apt/lists/* \
   && git init -q /opt/gbrain && cd /opt/gbrain && git remote add origin "$GBRAIN_REPO" \
   && git fetch -q --depth 1 origin "$GBRAIN_COMMIT" && git checkout -q FETCH_HEAD \

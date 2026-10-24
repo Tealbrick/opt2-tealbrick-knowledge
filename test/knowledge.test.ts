@@ -834,7 +834,7 @@ test("C296 Settings: engine (GBrain, Hindsight greyed soon), models and key name
   assert.match(cap("think").reason, /Needs OPENAI_API_KEY in the engine/u, "the configured provider's key is named");
   assert.equal(out.embeddings.readiness.state, "ok");
   assert.ok(out.embeddings.chunks >= 2 && out.embeddings.embedded === out.embeddings.chunks, "chunks embedded n of N from the engine");
-  assert.equal(out.engine.version, "0.60.57.0");
+  assert.equal(out.engine.version, "0.60.424.0");
   assert.equal(cap("reranker").state, "off");
   assert.match(cap("reranker").reason, /VOYAGE_API_KEY/u);
   const text = JSON.stringify(out);
