@@ -9,6 +9,10 @@ export interface KnowledgeConfig {
   gbrainAdminToken: string | null;
   notebookUrl: string | null;
   notebookPassword: string | null;
+  /** C336 F4: deep knowledge (helix-foundry) companion, behind its token proxy */
+  deep: boolean;
+  deepUrl: string | null;
+  deepToken: string | null;
 }
 
 export function readConfig(env: Record<string, string | undefined>): KnowledgeConfig {
@@ -22,6 +26,9 @@ export function readConfig(env: Record<string, string | undefined>): KnowledgeCo
     gbrainAdminToken: env.KNOWLEDGE_GBRAIN_ADMIN_TOKEN || null,
     notebookUrl: env.KNOWLEDGE_NOTEBOOK_URL || null,
     notebookPassword: env.KNOWLEDGE_NOTEBOOK_PASSWORD || null,
+    deep: env.KNOWLEDGE_DEEP === "true",
+    deepUrl: env.KNOWLEDGE_DEEP_URL || null,
+    deepToken: env.KNOWLEDGE_DEEP_TOKEN || null,
   };
 }
 

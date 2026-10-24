@@ -2,6 +2,7 @@
 import type { Db } from "@opt2-tealbrick/spec/sdk";
 import { type AreaProvisioner, Areas } from "./areas.ts";
 import { type KnowledgeConfig, PROVIDER_KEY, PROVIDER_MODELS } from "./config.ts";
+import { DeepClient, type DeepHealth } from "./engines/deep/client.ts";
 import { type ClientStore, GBrainClient, type StoredClient } from "./engines/gbrain/client.ts";
 import { GBrainEngine } from "./engines/gbrain/engine.ts";
 import { NotebookClient } from "./engines/notebook/client.ts";
@@ -22,6 +23,8 @@ export interface Services {
   engine: GBrainEngine | null;
   notebook: NotebookClient | null;
   projector: Projector | null;
+  /** C336 F4: deep knowledge companion client (null when the setting is off or the service is not wired) */
+  deep: DeepClient | null;
   config: KnowledgeConfig;
 }
 
@@ -85,6 +88,10 @@ export const ENGINE_UNREACHABLE = "memory_engine_unreachable";
 export const ENGINE_KEY_MISSING = "memory_engine_key_missing";
 /** C296: attention code when no memory engine runs at all (a setting that is not available, or no engine service). */
 export const ENGINE_MISSING = "engine_missing";
+/** C336 F4: deep knowledge is on but its service is not wired, or its proxy does not answer healthy */
+export const DEEP_MISSING = "deep_missing";
+export const DEEP_UNREACHABLE = "deep_unreachable";
+export const DEEP_RETRY_MS = 60_000;
 
 export interface KnowledgeOptions {
   fetch?: typeof fetch;
@@ -105,6 +112,9 @@ export class Knowledge {
   private provisioning: Promise<void> | null = null;
   private secrets: AppSecrets = memorySecrets();
   private engineHealth: EngineHealth = { state: "unknown", detail: [], at: 0 };
+  /** C336 F4: last deep knowledge probe (null = not probed yet) */
+  private deepHealth: DeepHealth | null = null;
+  private deepRetry: ReturnType<typeof setTimeout> | null = null;
   private statusChanged: (() => void) | null = null;
   private probeTimer: ReturnType<typeof setInterval> | null = null;
   private pendingRequeue = false;
@@ -145,7 +155,8 @@ export class Knowledge {
         ? new NotebookClient({ baseUrl: this.config.notebookUrl, password: this.config.notebookPassword, fetch: this.opts.fetch })
         : null;
     const projector = engine ? new Projector(db, store, areas, engine, now) : null;
-    this.services = { db, store, areas, engine, notebook, projector, config: this.config };
+    const deep = this.config.deep && this.config.deepUrl && this.config.deepToken ? new DeepClient({ baseUrl: this.config.deepUrl, token: this.config.deepToken, fetch: this.opts.fetch }) : null;
+    this.services = { db, store, areas, engine, notebook, projector, deep, config: this.config };
     const interval = this.opts.drainIntervalMs ?? 30_000;
     if (projector && interval > 0 && !this.timer) {
       this.timer = setInterval(() => void this.services?.projector?.drain().catch(() => undefined), interval);
@@ -166,6 +177,8 @@ export class Knowledge {
     this.probeTimer = null;
     if (this.provisionTimer) clearTimeout(this.provisionTimer);
     this.provisionTimer = null;
+    if (this.deepRetry) clearTimeout(this.deepRetry);
+    this.deepRetry = null;
     this.stopped = true;
   }
 
@@ -228,7 +241,34 @@ export class Knowledge {
       };
     }
     if (state === "failing") return { code: "memory_engine_failing", reason: `Memory engine answers fail (${list}): recall uses keyword search only.`.slice(0, 200) };
+    return this.deepAttention();
+  }
+
+  /** C336 F4: deep knowledge after the memory engine (memory is the core; a data service fault never hides an engine fault). */
+  private deepAttention(): Attention | null {
+    if (!this.config.deep) return null;
+    if (!this.config.deepUrl || !this.config.deepToken) return { code: DEEP_MISSING, reason: "Deep knowledge is on but its data service is not deployed with this app. Redeploy the app from Portal to add it." };
+    if (this.deepHealth && !this.deepHealth.ok) {
+      return { code: DEEP_UNREACHABLE, reason: `The deep knowledge service does not answer healthy (${this.deepHealth.status}${this.deepHealth.phase ? `: ${this.deepHealth.phase}` : ""}). Check the deep service in your project.`.slice(0, 200) };
+    }
     return null;
+  }
+
+  /** One deep knowledge probe (the proxy's /health); pushes the status when the result changes. */
+  async probeDeep(services: Services): Promise<void> {
+    if (!services.deep) return;
+    const next = await services.deep.health();
+    const changed = !this.deepHealth || this.deepHealth.ok !== next.ok || this.deepHealth.status !== next.status;
+    this.deepHealth = next;
+    if (changed) this.statusChanged?.();
+    // the service needs minutes to start (HelixDB, executor, API): look again in a minute, not only at the 10 min probe
+    if (!next.ok && !this.stopped && !this.deepRetry && (this.opts.engineProbeMs ?? ENGINE_PROBE_MS) > 0) {
+      this.deepRetry = setTimeout(() => {
+        this.deepRetry = null;
+        void this.probeDeep(this.services ?? services).catch(() => undefined);
+      }, DEEP_RETRY_MS);
+      this.deepRetry.unref();
+    }
   }
 
   /** One engine probe on the company area (no agent principal): a one-row query, recorded with `noteEngine`. */
@@ -248,11 +288,14 @@ export class Knowledge {
   /** Probe now and every ENGINE_PROBE_MS; `statusChanged` pushes the app status when the engine state changes. */
   watchEngine(services: Services, statusChanged: (() => void) | null, intervalMs = ENGINE_PROBE_MS): Promise<void> {
     this.statusChanged = statusChanged;
-    if (services.engine && intervalMs > 0 && !this.probeTimer) {
-      this.probeTimer = setInterval(() => void this.probeEngine(this.services ?? services).catch(() => undefined), intervalMs);
+    if ((services.engine || services.deep) && intervalMs > 0 && !this.probeTimer) {
+      this.probeTimer = setInterval(() => {
+        void this.probeEngine(this.services ?? services).catch(() => undefined);
+        void this.probeDeep(this.services ?? services).catch(() => undefined);
+      }, intervalMs);
       this.probeTimer.unref();
     }
-    return this.probeEngine(services);
+    return Promise.all([this.probeEngine(services), this.probeDeep(services)]).then(() => undefined);
   }
 
   /** After a restore the engine may hold an older or newer state: re-project every live document and re-delete tombstones.

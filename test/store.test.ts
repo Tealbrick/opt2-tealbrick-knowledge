@@ -88,3 +88,19 @@ test("ftsQuery quotes tokens (no FTS operator injection)", () => {
   assert.equal(ftsQuery('acme" OR body:*'), '"acme" OR "OR" OR "body"*');
   assert.equal(ftsQuery("  "), null);
 });
+
+test("C336 M1: a document cites its imported source, else itself; the dedupe key finds the live document only", async () => {
+  const { store, a } = await setup();
+  const imported = store.createDocument({ area: a, title: "Imported", body: "kettle from slack", status: "published", actor: "agt_x", sourceRef: "slack:C01/1700000000.000100", sourceUrl: "https://example.invalid/archives/C01/p1700000000000100", contentDigest: "d1" });
+  const own = store.createDocument({ area: a, title: "Own", body: "kettle written here", status: "published", actor: "agt_y" });
+  const cites = store.citationsOf([imported.id, own.id, "kdoc_missing"]);
+  assert.deepEqual(cites.get(imported.id)?.citation, { ref: "slack:C01/1700000000.000100", url: "https://example.invalid/archives/C01/p1700000000000100", author: "agt_x", at: imported.updatedAt });
+  assert.deepEqual(cites.get(own.id)?.citation, { ref: `knowledge:document/${own.id}`, author: "agt_y", at: own.updatedAt });
+  assert.equal(cites.has("kdoc_missing"), false);
+  const hit = store.search({ areas: [a], query: "kettle" }).find((h) => h.id === imported.id);
+  assert.equal(hit?.citation.ref, "slack:C01/1700000000.000100");
+  assert.equal(store.findByDigest(a, "d1")?.id, imported.id);
+  assert.throws(() => store.createDocument({ area: a, title: "Dup", body: "x", actor: "agt_x", contentDigest: "d1" }));
+  store.deleteDocument(imported.id, "agt_x");
+  assert.equal(store.findByDigest(a, "d1"), null);
+});

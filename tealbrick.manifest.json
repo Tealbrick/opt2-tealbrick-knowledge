@@ -5,7 +5,7 @@
   "name": "Knowledge",
   "summary": "Memory and documents for your agents: a private memory area per agent, a shared company area, research notebooks.",
   "description": "Knowledge gives every connected agent its own memory area and a shared company area. Agents remember and recall through memory tools; documents keep revisions, comments and links. Memory runs on GBrain, research on Open Notebook, both inside your own deployment.",
-  "version": "0.1.25",
+  "version": "0.1.27",
   "sdkMajor": 1,
   "publisher": {
     "name": "Tealbrick"
@@ -106,6 +106,18 @@
       {
         "name": "KNOWLEDGE_NOTEBOOK_PASSWORD",
         "value": "{{services.notebook.env.OPEN_NOTEBOOK_PASSWORD}}"
+      },
+      {
+        "name": "KNOWLEDGE_DEEP",
+        "setting": "deep"
+      },
+      {
+        "name": "KNOWLEDGE_DEEP_URL",
+        "value": "{{services.deep.url}}"
+      },
+      {
+        "name": "KNOWLEDGE_DEEP_TOKEN",
+        "value": "{{services.deep.env.DEEP_ACCESS_TOKEN}}"
       }
     ],
     "services": [
@@ -331,6 +343,49 @@
           "research": true
         },
         "startOrder": 1
+      },
+      {
+        "id": "deep",
+        "title": "Deep knowledge (helix-foundry)",
+        "build": {
+          "context": ".",
+          "dockerfile": "services/deep/Dockerfile"
+        },
+        "port": 3150,
+        "resources": {
+          "cpu": 2,
+          "memoryMb": 6144
+        },
+        "volumes": [
+          {
+            "id": "deep_data",
+            "mountPath": "/data",
+            "sizeGb": 20,
+            "purpose": "data"
+          }
+        ],
+        "health": {
+          "kind": "http",
+          "path": "/health"
+        },
+        "env": [
+          {
+            "name": "DEEP_ACCESS_TOKEN",
+            "generate": "secret"
+          },
+          {
+            "name": "ENCRYPTION_KEY",
+            "generate": "secret"
+          },
+          {
+            "name": "INTERNAL_KEY",
+            "generate": "secret"
+          }
+        ],
+        "when": {
+          "deep": true
+        },
+        "startOrder": 0
       }
     ]
   },
@@ -338,7 +393,7 @@
     {
       "id": "recall",
       "title": "Recall memories",
-      "description": "Search your memory: every area you can read (your own area and the company area), or one area. Returns ranked passages with the area and the tags of each. The owner's rules may limit results to memories with certain tags.",
+      "description": "Search your memory: every area you can read (your own area and the company area), or one area. Returns ranked passages; each has `ref` (open it with document_get or the engine tools), `source` (the citation), the area and its tags. The owner's rules may limit results to memories with certain tags.",
       "input": {
         "type": "object",
         "additionalProperties": false,
@@ -393,13 +448,10 @@
     {
       "id": "remember",
       "title": "Remember",
-      "description": "Save a memory as a document in an area you can write to (default: your own area). It becomes searchable by recall. Add tags (for example work or personal): the owner's rules can limit recall to some tags.",
+      "description": "Save a memory in an area you can write to (default: your own area): `text` for one memory, or `items` for several. Each memory is stored once per area (the same text again returns the stored one). It becomes searchable by recall and is cited with its `source` when you give one. Add tags (for example work or personal): the owner's rules can limit recall to some tags.",
       "input": {
         "type": "object",
         "additionalProperties": false,
-        "required": [
-          "text"
-        ],
         "properties": {
           "text": {
             "type": "string",
@@ -424,6 +476,73 @@
               "minLength": 1,
               "maxLength": 40
             }
+          },
+          "items": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 50,
+            "description": "Several memories in one call (hooks save a batch). Each item is stored once per area: the same text again returns the stored memory.",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "text"
+              ],
+              "properties": {
+                "text": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 20000
+                },
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "fact",
+                    "decision",
+                    "preference",
+                    "task",
+                    "note",
+                    "digest"
+                  ],
+                  "description": "Stored as a tag. `digest` = a session summary a harness hook saves before a compaction."
+                },
+                "tags": {
+                  "type": "array",
+                  "maxItems": 20,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 40
+                  }
+                }
+              }
+            }
+          },
+          "source": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "harness",
+              "session"
+            ],
+            "description": "Where the memory came from; becomes the citation of each item.",
+            "properties": {
+              "harness": {
+                "type": "string",
+                "pattern": "^[a-z0-9][a-z0-9-]{0,39}$"
+              },
+              "session": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^[A-Za-z0-9._:-]+$"
+              },
+              "url": {
+                "type": "string",
+                "maxLength": 2000,
+                "pattern": "^https://"
+              }
+            }
           }
         }
       },
@@ -443,6 +562,26 @@
           },
           "version": {
             "type": "integer"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "documentId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64
+                },
+                "created": {
+                  "type": "boolean"
+                }
+              }
+            }
+          },
+          "created": {
+            "type": "boolean"
           }
         }
       },
@@ -453,6 +592,275 @@
       "scopeType": "area",
       "idempotency": "required",
       "receipt": true,
+      "audience": "agent"
+    },
+    {
+      "id": "search",
+      "title": "Search memory by words",
+      "description": "Find memories, documents and engine pages that contain your words (exact words and names; use recall to search by meaning). Every area you can read, or one area. Each result has `ref` (open it with get) and `source` (the citation).",
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "query"
+        ],
+        "properties": {
+          "query": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "area": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]{1,63}$",
+            "description": "Area id. Omit to use every area you can read (your own area for ask)."
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 50
+          }
+        }
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "results": {
+            "type": "array"
+          },
+          "areas": {
+            "type": "array"
+          },
+          "partial": {
+            "type": "boolean"
+          },
+          "degraded": {
+            "type": "boolean"
+          }
+        }
+      },
+      "crud": [
+        "read"
+      ],
+      "effect": "read",
+      "scopeType": "area",
+      "idempotency": "none",
+      "receipt": false,
+      "audience": "agent"
+    },
+    {
+      "id": "get",
+      "title": "Open a memory",
+      "description": "Open the full text of one result by its `ref` (from recall, search or context): a document {kind: document, id}, an engine page {kind: page, area, slug} or a saved fact {kind: fact, area, id, lookup}. Returns the text and its `source` (the citation).",
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "ref"
+        ],
+        "properties": {
+          "ref": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "document",
+                  "page",
+                  "fact"
+                ]
+              },
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              },
+              "area": {
+                "type": "string",
+                "pattern": "^[a-z0-9][a-z0-9-]{1,63}$"
+              },
+              "slug": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 500
+              },
+              "lookup": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "For a fact: the lookup recall returned with it.",
+                "properties": {
+                  "entity": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  "grep": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "ref": {
+            "type": "object"
+          },
+          "title": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "tags": {
+            "type": "array"
+          },
+          "version": {
+            "type": "integer"
+          },
+          "area": {
+            "type": "string"
+          },
+          "source": {
+            "type": "object"
+          }
+        }
+      },
+      "crud": [
+        "read"
+      ],
+      "effect": "read",
+      "scopeType": "area",
+      "idempotency": "none",
+      "receipt": false,
+      "audience": "agent"
+    },
+    {
+      "id": "context",
+      "title": "Context block",
+      "description": "A short context block for the start of a session, after a compaction, or for a prompt: what your memory knows about the named entities or the query, newest memories when you name neither. Size-capped (maxChars). Harness hooks call this; you can too.",
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "purpose"
+        ],
+        "properties": {
+          "purpose": {
+            "type": "string",
+            "enum": [
+              "session_start",
+              "after_compact",
+              "prompt"
+            ]
+          },
+          "maxChars": {
+            "type": "integer",
+            "minimum": 200,
+            "maximum": 20000
+          },
+          "query": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          },
+          "entities": {
+            "type": "array",
+            "maxItems": 8,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            }
+          },
+          "area": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]{1,63}$",
+            "description": "Area id. Omit to use every area you can read (your own area for ask)."
+          }
+        }
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "text": {
+            "type": "string"
+          },
+          "refs": {
+            "type": "array"
+          },
+          "via": {
+            "type": "string"
+          },
+          "truncated": {
+            "type": "boolean"
+          },
+          "degraded": {
+            "type": "boolean"
+          }
+        }
+      },
+      "crud": [
+        "read"
+      ],
+      "effect": "read",
+      "scopeType": "area",
+      "idempotency": "none",
+      "receipt": false,
+      "audience": "agent"
+    },
+    {
+      "id": "ask",
+      "title": "Ask your memory",
+      "description": "Ask a question that needs an answer composed from several memories, with citations and a note on what the memory does not know. Uses the deployment's reasoning model (costs model budget); runs in an area you can write to (default: your own area).",
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "question"
+        ],
+        "properties": {
+          "question": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          },
+          "area": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]{1,63}$",
+            "description": "Area id. Omit to use your own area."
+          }
+        }
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "area": {
+            "type": "string"
+          },
+          "answer": {}
+        }
+      },
+      "crud": [
+        "read"
+      ],
+      "effect": "read",
+      "scopeType": "area",
+      "idempotency": "none",
+      "receipt": false,
       "audience": "agent"
     },
     {
@@ -1606,7 +2014,7 @@
     {
       "id": "engine",
       "title": "Memory engine tools",
-      "description": "Native memory engine operations (facts, entities, graph, timeline). Each appears as its own tool.",
+      "description": "The memory engine's own tools (GBrain: facts, entities, pages, graph, timeline, takes and more), bound to your areas. Search them by what you want to do, then call one with its arguments.",
       "crud": [
         "read"
       ],
@@ -1616,7 +2024,7 @@
       "receipt": false,
       "audience": "agent",
       "dynamic": {
-        "mode": "list",
+        "mode": "search",
         "crudCeiling": [
           "read",
           "create",
@@ -2504,6 +2912,14 @@
             "help": "Adds a research service and its database to your project.",
             "default": false,
             "mutable": false
+          },
+          {
+            "key": "deep",
+            "type": "boolean",
+            "label": "Add deep knowledge (company data: databases and APIs)",
+            "help": "Adds a data service (helix-foundry) to your project. Agents query company data you share from Connect; they see only the datasets you allow.",
+            "default": false,
+            "mutable": false
           }
         ]
       },
@@ -2617,7 +3033,7 @@
   "harnessHints": [
     {
       "harness": "generic",
-      "instructions": "Call knowledge__recall before answering questions about past work, people or decisions. Save durable facts with knowledge__remember into your own area. Cite the area of each memory you use."
+      "instructions": "Call knowledge__recall (by meaning) or knowledge__search (exact words) before answering questions about past work, people or decisions; open results with knowledge__get. Save durable facts with knowledge__remember into your own area. Cite the source of each memory you use. Find the memory engine's other tools with knowledge__engine_search."
     }
   ],
   "backups": {

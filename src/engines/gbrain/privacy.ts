@@ -1,4 +1,4 @@
-// Knowledge-side enforcement of GBrain privacy behaviour that unmodified upstream (v0.60.57.0) lacks.
+// Knowledge-side enforcement of GBrain privacy behaviour that unmodified upstream (seen at v0.60.57.0; kept as defence in depth at later pins) lacks.
 // Applied to every result before it leaves Knowledge; each rule fails closed.
 //   A1-A3  private facts are never written (refused by the argument guard), so supersession only touches world facts.
 //   A4     sources are created without a local path, so forget's fence mirror never runs.
