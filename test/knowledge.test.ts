@@ -126,7 +126,7 @@ test("C336 M1: every recall hit cites its source: a document itself, an engine p
 test("C336 M3: remember items[] saves a batch once per area, cites its source, and stores kind as a tag", async () => {
   const { ctx, run, db, knowledge } = await setup();
   const source = { harness: "claude-code", session: "sess-m3-01", url: "https://example.invalid/sessions/sess-m3-01" };
-  const first = await run("remember", { items: [{ text: "Acme renews in March.", kind: "fact", tags: ["work"] }, { text: "We chose  annual\nbilling for Acme." , kind: "decision" }], source }, ctx(ADA));
+  const first = await run("remember", { items: [{ text: "Acme renews in March.", kind: "fact", tags: ["work"] }, { text: "We chose  annual\nbilling for Acme.", kind: "decision" }], source }, ctx(ADA));
   assert.equal(first.area, ADA_AREA);
   assert.deepEqual(first.items.map((i: { created: boolean }) => i.created), [true, true]);
   // the hook sends an overlapping batch again: same texts (case and white space differ) are not stored twice
@@ -151,6 +151,9 @@ test("C336 M3: remember items[] saves a batch once per area, cites its source, a
   // the same text in another area is another memory
   const shared = await run("remember", { text: "Acme wants SSO." }, ctx(BO));
   assert.equal(shared.created, true);
+  // `digest` (a session summary from a pre-compaction hook) is a kind too
+  const digest = await run("remember", { items: [{ text: "Session digest: Acme SSO scoped.", kind: "digest" }], source }, ctx(ADA));
+  assert.equal(digest.items[0].created, true);
   // exactly one of text and items
   await assert.rejects(run("remember", { text: "a", items: [{ text: "b" }] }, ctx(ADA)), rejects("invalid_input"));
   await assert.rejects(run("remember", { tags: ["x"] }, ctx(ADA)), rejects("invalid_input"));

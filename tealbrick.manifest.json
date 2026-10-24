@@ -446,9 +446,10 @@
                     "decision",
                     "preference",
                     "task",
-                    "note"
+                    "note",
+                    "digest"
                   ],
-                  "description": "Stored as a tag."
+                  "description": "Stored as a tag. `digest` = a session summary a harness hook saves before a compaction."
                 },
                 "tags": {
                   "type": "array",
