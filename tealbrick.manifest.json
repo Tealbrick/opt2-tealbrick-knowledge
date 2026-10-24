@@ -106,6 +106,18 @@
       {
         "name": "KNOWLEDGE_NOTEBOOK_PASSWORD",
         "value": "{{services.notebook.env.OPEN_NOTEBOOK_PASSWORD}}"
+      },
+      {
+        "name": "KNOWLEDGE_DEEP",
+        "setting": "deep"
+      },
+      {
+        "name": "KNOWLEDGE_DEEP_URL",
+        "value": "{{services.deep.url}}"
+      },
+      {
+        "name": "KNOWLEDGE_DEEP_TOKEN",
+        "value": "{{services.deep.env.DEEP_ACCESS_TOKEN}}"
       }
     ],
     "services": [
@@ -331,6 +343,49 @@
           "research": true
         },
         "startOrder": 1
+      },
+      {
+        "id": "deep",
+        "title": "Deep knowledge (helix-foundry)",
+        "build": {
+          "context": ".",
+          "dockerfile": "services/deep/Dockerfile"
+        },
+        "port": 3150,
+        "resources": {
+          "cpu": 2,
+          "memoryMb": 6144
+        },
+        "volumes": [
+          {
+            "id": "deep_data",
+            "mountPath": "/data",
+            "sizeGb": 20,
+            "purpose": "data"
+          }
+        ],
+        "health": {
+          "kind": "http",
+          "path": "/health"
+        },
+        "env": [
+          {
+            "name": "DEEP_ACCESS_TOKEN",
+            "generate": "secret"
+          },
+          {
+            "name": "ENCRYPTION_KEY",
+            "generate": "secret"
+          },
+          {
+            "name": "INTERNAL_KEY",
+            "generate": "secret"
+          }
+        ],
+        "when": {
+          "deep": true
+        },
+        "startOrder": 0
       }
     ]
   },
@@ -2837,6 +2892,14 @@
             "type": "boolean",
             "label": "Add research notebooks (Open Notebook)",
             "help": "Adds a research service and its database to your project.",
+            "default": false,
+            "mutable": false
+          },
+          {
+            "key": "deep",
+            "type": "boolean",
+            "label": "Add deep knowledge (company data: databases and APIs)",
+            "help": "Adds a data service (helix-foundry) to your project. Agents query company data you share from Connect; they see only the datasets you allow.",
             "default": false,
             "mutable": false
           }
