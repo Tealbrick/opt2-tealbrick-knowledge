@@ -1,7 +1,7 @@
 # GBrain memory engine: upstream source at a pinned commit, unmodified, + tb-exec wrapper + C6 source helper
 # + C69 boot supervisor (crash-safe migrations: advisory lock + stale-lease takeover + status /health).
 # Build context: repository root.
-FROM node:24.21.0-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20 AS tb
+FROM node:24.22.1-bookworm-slim@sha256:55fb5f5a527ea2c5c4a95f963e48ef90aa38c7b346054fdc8ee9957a2b55d205 AS tb
 # C62/BSD-10: tb-exec from the integrity-pinned lock (services/tb-exec), no install scripts.
 COPY services/tb-exec/package.json services/tb-exec/package-lock.json /opt/tb/
 RUN npm ci --prefix /opt/tb --omit=dev --ignore-scripts --no-audit --no-fund && npm cache clean --force
