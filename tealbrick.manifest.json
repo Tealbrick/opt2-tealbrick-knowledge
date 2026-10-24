@@ -5,7 +5,7 @@
   "name": "Knowledge",
   "summary": "Memory and documents for your agents: a private memory area per agent, a shared company area, research notebooks.",
   "description": "Knowledge gives every connected agent its own memory area and a shared company area. Agents remember and recall through memory tools; documents keep revisions, comments and links. Memory runs on GBrain, research on Open Notebook, both inside your own deployment.",
-  "version": "0.1.25",
+  "version": "0.1.26",
   "sdkMajor": 1,
   "publisher": {
     "name": "Tealbrick"
@@ -652,7 +652,7 @@
     {
       "id": "get",
       "title": "Open a memory",
-      "description": "Open the full text of one result by its `ref` (from recall, search or context): a document {kind: document, id} or an engine page {kind: page, area, slug}. Returns the text and its `source` (the citation).",
+      "description": "Open the full text of one result by its `ref` (from recall, search or context): a document {kind: document, id}, an engine page {kind: page, area, slug} or a saved fact {kind: fact, area, id, lookup}. Returns the text and its `source` (the citation).",
       "input": {
         "type": "object",
         "additionalProperties": false,
@@ -671,7 +671,8 @@
                 "type": "string",
                 "enum": [
                   "document",
-                  "page"
+                  "page",
+                  "fact"
                 ]
               },
               "id": {
@@ -687,6 +688,23 @@
                 "type": "string",
                 "minLength": 1,
                 "maxLength": 500
+              },
+              "lookup": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "For a fact: the lookup recall returned with it.",
+                "properties": {
+                  "entity": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  "grep": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  }
+                }
               }
             }
           }

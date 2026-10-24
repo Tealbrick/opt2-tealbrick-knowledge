@@ -28,6 +28,20 @@ export interface RecallRow {
   title: string;
   text: string;
   score: number | null;
+  /** QA-KNOW17-1: a saved fact the engine adds to a query answer (`result_type: "fact"`, upstream ≥ 0.60.164) */
+  factId?: string;
+  /** how to read that fact again: the engine's own `follow_up` recall arguments (`entity` or `grep`, never a source) */
+  factLookup?: { entity?: string; grep?: string };
+}
+
+/** The fact part of an engine row, or null: id and the recall arguments that read it again (source arguments dropped). */
+export function factOfRow(row: Record<string, unknown>): { factId: string; factLookup: { entity?: string; grep?: string } } | null {
+  if (row.result_type !== "fact" || (typeof row.fact_id !== "string" && typeof row.fact_id !== "number")) return null;
+  const args = (row.follow_up && typeof row.follow_up === "object" ? (row.follow_up as { args?: unknown }).args : null) as Record<string, unknown> | null;
+  const factLookup: { entity?: string; grep?: string } = {};
+  if (args && typeof args.entity === "string" && args.entity) factLookup.entity = args.entity.slice(0, 200);
+  else if (args && typeof args.grep === "string" && args.grep) factLookup.grep = args.grep.slice(0, 200);
+  return { factId: String(row.fact_id).slice(0, 64), factLookup };
 }
 
 export class EngineCallError extends Error {
@@ -157,13 +171,15 @@ export class GBrainEngine {
       .slice(0, limit)
       .map((row) => {
         const slug = typeof row.slug === "string" ? row.slug : "";
+        const fact = factOfRow(row);
         return {
           area,
-          documentId: documentIdFromSlug(slug),
-          slug,
+          documentId: fact ? null : documentIdFromSlug(slug),
+          slug: fact ? "" : slug,
           title: typeof row.title === "string" ? row.title : slug,
           text: String(row.chunk_text ?? row.text ?? row.snippet ?? "").slice(0, 4000),
           score: typeof row.score === "number" ? row.score : null,
+          ...(fact ?? {}),
         };
       });
     return { rows, degraded: [...new Set(degraded)] };
