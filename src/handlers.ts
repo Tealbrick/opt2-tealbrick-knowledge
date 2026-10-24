@@ -14,7 +14,7 @@ import type { AppSecrets, Knowledge, Services } from "./knowledge.ts";
 import { createLibraryHandlers } from "./library.ts";
 import { fanOut, mergeRanked } from "./merge.ts";
 import { NARROWING_UNSUPPORTED, NARROWING_VIOLATION, type Narrowing, NarrowingError, readNarrowing, type TagFilter, tagsPass, untaggedPass } from "./narrowing.ts";
-import { cleanTags, StoreError } from "./store/documents.ts";
+import { type Citation, cleanTags, StoreError } from "./store/documents.ts";
 
 /** The SDK's error class (CORE §8 envelope); injected so this module only depends on frozen types. */
 export type ErrorFactory = new (code: string, message: string, httpStatus?: number) => Error;
@@ -217,26 +217,40 @@ export function createHandlers(knowledge: Knowledge, TbError: ErrorFactory) {
       if (!engine || !area?.sourceReady) throw Object.assign(new Error("not ready"), { code: engine ? "area_not_ready" : "no_engine" });
       return engine.recall(id, area.sourceId, query, engineLimit, ctx.caller.id);
     });
-    type TaggedRow = RecallRow & { tags: string[] };
+    // C336 M1: every hit carries `ref` (what to open with get) and `source` (the citation). A canonical document cites its
+    // imported source or itself; an engine page cites its area and slug. An engine row with neither cannot be cited: it is
+    // left out and counted per area (`uncited`), never returned without a source.
+    type Ref = { kind: "document"; id: string } | { kind: "page"; area: string; slug: string };
+    type TaggedRow = RecallRow & { tags: string[]; ref: Ref; source: Citation | { ref: string } };
     const lists: { area: string; rows: TaggedRow[] }[] = [];
-    const statuses: { area: string; ok: boolean; via: "engine" | "keyword"; error?: string; degraded?: string[] }[] = [];
+    const statuses: { area: string; ok: boolean; via: "engine" | "keyword"; error?: string; degraded?: string[]; uncited?: number }[] = [];
     const keyword = (area: string): TaggedRow[] =>
-      s.store.search({ areas: [area], query, limit, tags: filter }).map((hit) => ({ area: hit.area, documentId: hit.id, slug: "", title: hit.title, text: hit.excerpt, score: null, tags: hit.tags }));
+      s.store
+        .search({ areas: [area], query, limit, tags: filter })
+        .map((hit) => ({ area: hit.area, documentId: hit.id, slug: "", title: hit.title, text: hit.excerpt, score: null, tags: hit.tags, ref: { kind: "document", id: hit.id }, source: hit.citation }));
     for (const outcome of outcomes) {
       if (outcome.ok && outcome.value) {
         const { rows, degraded } = outcome.value;
-        const known = s.store.tagsOf(rows.flatMap((row) => (row.documentId ? [row.documentId] : [])));
+        const known = s.store.citationsOf(rows.flatMap((row) => (row.documentId ? [row.documentId] : [])));
+        let uncited = 0;
         const tagged = rows.flatMap((row): TaggedRow[] => {
-          const tags = row.documentId ? known.get(row.documentId) : undefined;
-          if (filter && (!tags || !tagsPass(tags, filter))) return [];
-          return [{ ...row, tags: tags ?? [] }];
+          const doc = row.documentId ? known.get(row.documentId) : undefined;
+          if (filter && (!doc || !tagsPass(doc.tags, filter))) return [];
+          if (doc && row.documentId) return [{ ...row, tags: doc.tags, ref: { kind: "document", id: row.documentId }, source: doc.citation }];
+          // A page that mirrors a deleted canonical document is stale: its document is gone, so it is not cited either.
+          if (row.documentId || !row.slug) {
+            uncited++;
+            return [];
+          }
+          return [{ ...row, tags: [], ref: { kind: "page", area: row.area, slug: row.slug }, source: { ref: `knowledge:page/${row.area}/${row.slug}` } }];
         });
         lists.push({ area: outcome.area, rows: tagged });
+        const cited = uncited ? { uncited } : {};
         if (degraded.length) {
           // The engine ran without part of its pipeline: add the keyword search so a degraded engine never hides a memory.
           lists.push({ area: outcome.area, rows: keyword(outcome.area) });
-          statuses.push({ area: outcome.area, ok: true, via: "engine", degraded });
-        } else statuses.push({ area: outcome.area, ok: true, via: "engine" });
+          statuses.push({ area: outcome.area, ok: true, via: "engine", degraded, ...cited });
+        } else statuses.push({ area: outcome.area, ok: true, via: "engine", ...cited });
       } else {
         lists.push({ area: outcome.area, rows: keyword(outcome.area) });
         statuses.push({ area: outcome.area, ok: true, via: "keyword", ...(outcome.error ? { error: outcome.error } : {}) });
@@ -257,6 +271,8 @@ export function createHandlers(knowledge: Knowledge, TbError: ErrorFactory) {
       text: row.text,
       tags: row.tags,
       areas: row.areas,
+      ref: row.ref,
+      source: row.source,
     }));
     return { results, areas: statuses, partial: false, degraded: fallbacks.length > 0 || engineDegraded.length > 0 };
   }

@@ -1,6 +1,6 @@
 // Test doubles for what the Miniapp SDK provides at run time (DB handle, scope store, OpContext)
 // and for the upstream engine services. Not product code.
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { DatabaseSync } from "node:sqlite";
@@ -11,7 +11,9 @@ import { memorySecrets } from "../src/knowledge.ts";
 export function memoryDb(): Db {
   const raw = new DatabaseSync(":memory:");
   raw.exec("PRAGMA foreign_keys = ON");
-  raw.exec(readFileSync(new URL("../migrations/0001_init.sql", import.meta.url), "utf8"));
+  // Every migration in order, as the SDK applies them at boot.
+  const dir = new URL("../migrations/", import.meta.url);
+  for (const file of readdirSync(dir).filter((name) => name.endsWith(".sql")).sort()) raw.exec(readFileSync(new URL(file, dir), "utf8"));
   return {
     exec: (sql) => raw.exec(sql),
     prepare: (sql) => {

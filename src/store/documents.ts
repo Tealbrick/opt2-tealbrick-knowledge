@@ -35,6 +35,17 @@ export interface Document {
   updatedBy: string;
   createdAt: number;
   updatedAt: number;
+  /** where the memory came from (C336 M1); null = written in Knowledge itself */
+  sourceRef: string | null;
+  sourceUrl: string | null;
+}
+
+/** The citation of a canonical document (C336 M1): every recall hit carries one. */
+export interface Citation {
+  ref: string;
+  url?: string;
+  author: string;
+  at: number;
 }
 
 export interface TreeNode {
@@ -91,7 +102,16 @@ function toDocument(row: Row): Document {
     updatedBy: String(row.updated_by),
     createdAt: num(row.created_at),
     updatedAt: num(row.updated_at),
+    sourceRef: str(row.source_ref),
+    sourceUrl: str(row.source_url),
   };
+}
+
+/** A document cites its imported source when it has one, else itself (it was written in Knowledge). */
+export function citationOf(row: Row): Citation {
+  const ref = str(row.source_ref) ?? `knowledge:document/${String(row.id)}`;
+  const url = str(row.source_url);
+  return { ref, ...(url ? { url } : {}), author: String(row.created_by), at: num(row.updated_at) };
 }
 
 /** THE stored tag list of a write (normalised, unique, ≤ 20): G5 write checks (§18.4 b) predict the result with it. */
@@ -163,6 +183,7 @@ export interface SearchHit {
   tags: string[];
   updatedAt: number;
   rank: number;
+  citation: Citation;
 }
 
 export class DocumentStore {
@@ -289,6 +310,11 @@ export class DocumentStore {
     status?: DocumentStatus;
     tags?: string[];
     actor: string;
+    /** provenance of an imported or saved memory (C336 M1) */
+    sourceRef?: string;
+    sourceUrl?: string;
+    /** per-area dedupe key (C336 M3); a second live document with the same key in the area is refused */
+    contentDigest?: string;
     /** G5 (SDK-API §18.4 a): a parent the caller's narrowing hides answers exactly like a missing one */
     hidden?: (doc: Document) => boolean;
   }): Document {
@@ -310,10 +336,10 @@ export class DocumentStore {
       const status = input.status ?? "draft";
       this.db
         .prepare(
-          `INSERT INTO kn_documents (id, area_id, collection_id, parent_id, title, slug, summary, body, status, tags, version, created_by, updated_by, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)`,
+          `INSERT INTO kn_documents (id, area_id, collection_id, parent_id, title, slug, summary, body, status, tags, version, created_by, updated_by, created_at, updated_at, source_ref, source_url, content_digest)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)`,
         )
-        .run(id, input.area, collection.id, input.parentId ?? null, title, slugify(title), summary, body, status, tags, input.actor, input.actor, at, at);
+        .run(id, input.area, collection.id, input.parentId ?? null, title, slugify(title), summary, body, status, tags, input.actor, input.actor, at, at, input.sourceRef ?? null, input.sourceUrl ?? null, input.contentDigest ?? null);
       this.writeRevision(id, 1, title, summary, body, status, tags, input.actor, at);
       this.db.prepare("UPDATE kn_collections SET updated_at = ? WHERE id = ?").run(at, collection.id);
       const doc = this.getDocument(id) as Document;
@@ -484,6 +510,26 @@ export class DocumentStore {
     return out;
   }
 
+  /** Tags and citation of each live canonical document (C336 M1). Missing ids are absent from the map. */
+  citationsOf(ids: readonly string[]): Map<string, { tags: string[]; citation: Citation }> {
+    const out = new Map<string, { tags: string[]; citation: Citation }>();
+    const unique = [...new Set(ids)];
+    for (let i = 0; i < unique.length; i += 200) {
+      const chunk = unique.slice(i, i + 200);
+      const rows = this.db
+        .prepare(`SELECT id, tags, source_ref, source_url, created_by, updated_at FROM kn_documents WHERE deleted_at IS NULL AND id IN (${chunk.map(() => "?").join(", ")})`)
+        .all(...chunk);
+      for (const row of rows) out.set(String(row.id), { tags: JSON.parse(String(row.tags)) as string[], citation: citationOf(row) });
+    }
+    return out;
+  }
+
+  /** The live document of an area with this dedupe key, or null (C336 M3). */
+  findByDigest(area: string, digest: string): Document | null {
+    const row = this.db.prepare("SELECT * FROM kn_documents WHERE area_id = ? AND content_digest = ? AND deleted_at IS NULL").get(area, digest);
+    return row ? toDocument(row) : null;
+  }
+
   // ── search ──
 
   /** Ranked (or newest-first) hits in the listed areas; with `tags` only documents that pass (G5 narrowing). */
@@ -506,6 +552,7 @@ export class DocumentStore {
       tags: JSON.parse(String(row.tags)) as string[],
       updatedAt: num(row.updated_at),
       rank: num(row.rank),
+      citation: citationOf(row),
     });
     if (!match) {
       return this.db

@@ -90,6 +90,39 @@ test("J1: an agent remembers, the memory is projected to GBrain and recalled", a
   assert.equal(state?.state, "ready");
 });
 
+test("C336 M1: every recall hit cites its source: a document itself, an engine page by area and slug; a stale page is left out and counted", async () => {
+  const { ctx, run, knowledge } = await setup();
+  const saved = await run("remember", { text: "Acme kettle colour is teal.\nNoted at the office." }, ctx(ADA));
+  await run("recall", { query: "anything" }, ctx(ADA));
+  await knowledge.current()?.projector?.drain();
+  const page = "notes/acme-kettle-m1";
+  const stale = "knowledge-docs/kdoc_01zzzzzzzzzzzzzzzzzzzzzzzz";
+  const sourcePages = gbrain.pages.get(areaSourceId(ADA_AREA));
+  assert.ok(sourcePages, "Ada's engine source exists after the first recall");
+  sourcePages.set(page, { content: "acme kettle m1 engine page", revision: "r-m1" });
+  sourcePages.set(stale, { content: "acme kettle m1 stale mirror", revision: "r-m1s" });
+  try {
+    const out = await run("recall", { query: "kettle", area: ADA_AREA }, ctx(ADA));
+    const doc = out.results.find((row: { documentId: string | null }) => row.documentId === saved.documentId);
+    assert.deepEqual(doc.ref, { kind: "document", id: saved.documentId });
+    assert.equal(doc.source.ref, `knowledge:document/${saved.documentId}`);
+    assert.equal(doc.source.author, ADA);
+    assert.equal(typeof doc.source.at, "number");
+    const enginePage = out.results.find((row: { ref: { slug?: string } }) => row.ref.slug === page);
+    assert.deepEqual(enginePage.ref, { kind: "page", area: ADA_AREA, slug: page });
+    assert.deepEqual(enginePage.source, { ref: `knowledge:page/${ADA_AREA}/${page}` });
+    assert.ok(!out.results.some((row: { text: string }) => row.text.includes("stale mirror")), "a page of a missing document is not returned");
+    assert.ok((out.areas[0].uncited ?? 0) >= 1, JSON.stringify(out.areas));
+    assert.ok(out.results.every((row: { source?: { ref?: unknown } }) => typeof row.source?.ref === "string"));
+  } finally {
+    sourcePages.delete(page);
+    sourcePages.delete(stale);
+  }
+  // keyword path (no engine answer) cites too
+  const keyword = await run("documents_search", { query: "kettle" }, ctx(ADA));
+  assert.ok(keyword.hits.length >= 1);
+});
+
 test("walled areas: another agent can neither recall nor read nor target the area", async () => {
   const { ctx, run, knowledge } = await setup();
   const saved = await run("remember", { text: "Ada's private plan: zebra project" }, ctx(ADA));
@@ -523,7 +556,12 @@ test("F88 (real upstream framing): recall reads the result item of a degraded GB
     // 0.1.15 read 0 rows here (2 text items → raw result) and said ok / degraded:false
     assert.ok(out.results.length >= 4, JSON.stringify(out));
     assert.equal(out.degraded, true);
-    assert.deepEqual(out.areas, [{ area: ADA_AREA, ok: true, via: "engine", degraded: ["embed_unavailable:no_provider"] }]);
+    // `uncited` counts stale pages the shared fake keeps from earlier tests (C336 M1); its value depends on test order
+    assert.deepEqual(
+      out.areas.map(({ uncited: _uncited, ...rest }: Record<string, unknown>) => rest),
+      [{ area: ADA_AREA, ok: true, via: "engine", degraded: ["embed_unavailable:no_provider"] }],
+    );
+    assert.ok(out.results.every((row: { source?: { ref?: unknown } }) => typeof row.source?.ref === "string"), "every hit is cited");
     assert.equal(knowledge.engineStatus().state, "degraded");
     assert.match(knowledge.attention()?.reason ?? "", /without embeddings \(embed_unavailable:no_provider\)/u);
     // the engine tools return the result item too (never the raw MCP envelope with notice text)
