@@ -156,6 +156,82 @@ test("C336 M3: remember items[] saves a batch once per area, cites its source, a
   await assert.rejects(run("remember", { tags: ["x"] }, ctx(ADA)), rejects("invalid_input"));
 });
 
+test("C336 M4: search finds words in documents and engine pages, cited; get opens a document, a mirror page and an engine page", async () => {
+  const { ctx, run, knowledge } = await setup();
+  const saved = await run("remember", { text: "Zephyr contract signed by Acme.", tags: ["work"] }, ctx(ADA));
+  await run("recall", { query: "warm" }, ctx(ADA));
+  await knowledge.current()?.projector?.drain();
+  const sourcePages = gbrain.pages.get(areaSourceId(ADA_AREA));
+  assert.ok(sourcePages);
+  sourcePages.set("notes/zephyr-m4", { content: "zephyr engine-only note", revision: "r-m4" });
+  try {
+    const found = await run("search", { query: "zephyr" }, ctx(ADA));
+    assert.equal(found.degraded, false);
+    assert.ok(found.results.some((row: { ref: { kind: string; id?: string } }) => row.ref.kind === "document" && row.ref.id === saved.documentId));
+    assert.ok(found.results.some((row: { ref: { slug?: string } }) => row.ref.slug === "notes/zephyr-m4"));
+    assert.ok(found.results.every((row: { source?: { ref?: unknown } }) => typeof row.source?.ref === "string"));
+    // get: the document, by ref and by its mirror page slug
+    const doc = await run("get", { ref: { kind: "document", id: saved.documentId } }, ctx(ADA));
+    assert.equal(doc.text, "Zephyr contract signed by Acme.");
+    assert.equal(doc.source.ref, `knowledge:document/${saved.documentId}`);
+    const mirror = await run("get", { ref: { kind: "page", area: ADA_AREA, slug: `knowledge-docs/${saved.documentId.toLowerCase()}` } }, ctx(ADA));
+    assert.deepEqual(mirror.ref, { kind: "document", id: saved.documentId });
+    const page = await run("get", { ref: { kind: "page", area: ADA_AREA, slug: "notes/zephyr-m4" } }, ctx(ADA));
+    assert.equal(page.text, "zephyr engine-only note");
+    assert.deepEqual(page.source, { ref: `knowledge:page/${ADA_AREA}/notes/zephyr-m4` });
+    // walls: Bo cannot open Ada's document or page; a tag narrowing hides engine pages and non-matching documents
+    await assert.rejects(run("get", { ref: { kind: "document", id: saved.documentId } }, ctx(BO)), rejects("not_found"));
+    await assert.rejects(run("get", { ref: { kind: "page", area: ADA_AREA, slug: "notes/zephyr-m4" } }, ctx(BO)), rejects("not_found"));
+    await assert.rejects(run("get", { ref: { kind: "page", area: ADA_AREA, slug: "notes/zephyr-m4" } }, ctx(ADA, { context: narrowing({ anyOf: ["work"] }) })), rejects("not_found"));
+    await assert.rejects(run("get", { ref: { kind: "document", id: saved.documentId } }, ctx(ADA, { context: narrowing({ anyOf: ["personal"] }) })), rejects("not_found"));
+    const narrowed = await run("search", { query: "zephyr" }, ctx(ADA, { context: narrowing({ anyOf: ["work"] }) }));
+    assert.ok(narrowed.results.length >= 1 && narrowed.results.every((row: { ref: { kind: string } }) => row.ref.kind === "document"));
+  } finally {
+    sourcePages.delete("notes/zephyr-m4");
+  }
+});
+
+test("C336 M4: context packs entities through the engine, adds cited matches, caps the size; ask runs think in the own area; engine tools are searchable", async () => {
+  const { ctx, run, knowledge, definition } = await setup();
+  await run("remember", { text: "Acme wants SSO next quarter." }, ctx(ADA));
+  await run("recall", { query: "warm" }, ctx(ADA));
+  await knowledge.current()?.projector?.drain();
+  const pack = await run("context", { purpose: "session_start", entities: ["Acme"], maxChars: 4000 }, ctx(ADA));
+  assert.equal(pack.via, "context_pack");
+  assert.match(pack.text, /Acme renews in March/u);
+  assert.match(pack.text, /Acme wants SSO/u);
+  assert.match(pack.text, /\[knowledge:document\//u);
+  assert.equal(pack.truncated, false);
+  const contextCall = gbrain.calls.findLast((c: { name?: string }) => c.name === "context_pack") as { args?: Record<string, unknown> } | undefined;
+  assert.equal(contextCall?.args?.entities, "Acme", "upstream takes a comma-separated string");
+  const small = await run("context", { purpose: "prompt", query: "Acme SSO", maxChars: 200 }, ctx(ADA));
+  assert.equal(small.via, "recall");
+  assert.ok(small.text.length <= 200);
+  const recent = await run("context", { purpose: "after_compact" }, ctx(ADA));
+  assert.equal(recent.via, "recent");
+  assert.ok(recent.refs.length >= 1);
+  // a tag narrowing skips the engine pack (its tags cannot be matched) and keeps only allowed memories
+  const narrowedPack = await run("context", { purpose: "session_start", entities: ["Acme"] }, ctx(ADA, { context: narrowing({ anyOf: ["work"] }) }));
+  assert.notEqual(narrowedPack.via, "context_pack");
+  assert.doesNotMatch(narrowedPack.text, /Acme renews in March/u);
+  // ask: engine think in the caller's own area; a tag narrowing refuses (fail closed)
+  const asked = await run("ask", { question: "When does Acme renew?" }, ctx(ADA));
+  assert.equal(asked.area, ADA_AREA);
+  assert.match(JSON.stringify(asked.answer), /answer to When does Acme renew/u);
+  await assert.rejects(run("ask", { question: "x" }, ctx(ADA, { context: narrowing({ noneOf: ["personal"] }) })), rejects("narrowing_unsupported"));
+  await assert.rejects(run("ask", { question: "x", area: BO_AREA }, ctx(ADA)), rejects("not_found"));
+  // engine tools in search mode: the bridge asks the catalog with the agent's words
+  const hookCtx = ctx(ADA) as never;
+  // (the fake engine lists query, remember, forget, get_page, entity, think; sources_list is excluded by policy)
+  const found = await definition.dynamic?.engine?.catalog({ query: "forget a memory", limit: 5 } as never, hookCtx);
+  assert.equal(found?.[0]?.name, "gb_forget", JSON.stringify(found?.map((e) => e.name)));
+  assert.ok(!found?.some((entry) => entry.name === "gb_sources_list"));
+  const none = await definition.dynamic?.engine?.catalog({ query: "zzzz", limit: 5 } as never, hookCtx);
+  assert.deepEqual(none, []);
+  const all = await definition.dynamic?.engine?.catalog(null as never, hookCtx);
+  assert.equal(all?.length, 6);
+});
+
 test("walled areas: another agent can neither recall nor read nor target the area", async () => {
   const { ctx, run, knowledge } = await setup();
   const saved = await run("remember", { text: "Ada's private plan: zebra project" }, ctx(ADA));

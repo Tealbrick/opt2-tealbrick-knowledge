@@ -4,6 +4,7 @@ import { documentIdFromSlug } from "../src/engines/gbrain/engine.ts";
 import { gbrainExposure } from "../src/engines/gbrain/exposure.ts";
 import { argumentRefusal } from "../src/engines/gbrain/guard.ts";
 import { neutralizeFenceMarkers, sanitizeResult, stripPrivacyFences } from "../src/engines/gbrain/privacy.ts";
+import { searchCatalog } from "../src/handlers.ts";
 
 test("privacy fences are stripped, nested and unclosed fences drop their contents (A7)", () => {
   const open = "<!--- gbrain:facts:begin -->";
@@ -90,4 +91,18 @@ test("QA R4 S3: engine slugs come back lower case (upstream validateSlug); the c
   assert.equal(documentIdFromSlug("notes/kdoc_01m4s13txsdybf72tx2yrb8e40"), null, "not a canonical page");
   assert.equal(documentIdFromSlug("knowledge-docs/kdoc_01m4s13txsdybf72tx2yrb8e4"), null, "25 chars is not a ULID");
   assert.equal(documentIdFromSlug("knowledge-docs/kdoc_01m4s13txsdybf72tx2yrb8eil"), null, "I and L are not Crockford base32");
+});
+
+test("C336 M4: engine tool search ranks the name first, then title and description; no match lists nothing; empty query lists the first tools", () => {
+  const entry = (name: string, title: string, description: string) => ({ name, title, description, inputSchema: { type: "object" }, crud: ["read"], effect: "read" }) as never;
+  const catalog = [
+    entry("gb_get_links", "get links", "Outbound links of a page"),
+    entry("gb_chronicle_day", "chronicle day", "What happened on a day, read from the timeline"),
+    entry("gb_get_timeline", "get timeline", "Dated entries of a page"),
+  ];
+  // a name match outranks a description-only match
+  assert.deepEqual(searchCatalog(catalog, "timeline", 10).map((e: { name: string }) => e.name), ["gb_get_timeline", "gb_chronicle_day"]);
+  assert.deepEqual(searchCatalog(catalog, "links of a page", 1).map((e: { name: string }) => e.name), ["gb_get_links"]);
+  assert.deepEqual(searchCatalog(catalog, "zzz", 10), []);
+  assert.equal(searchCatalog(catalog, "", 2).length, 2);
 });

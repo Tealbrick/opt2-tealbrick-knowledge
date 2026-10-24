@@ -22,8 +22,9 @@ Knowledge is a normalization wrapper over engines. Canonical documents stay in K
 
 ## Operations (from `tealbrick.manifest.json`)
 
-48 operations.
-- Read (agent, per area): `recall`, `areas_list`, `collections_list`, `collection_get`, `collection_tree`, `documents_search`, `document_get`, `document_revisions`, `comments_list`, `links_list`, research reads, `engine` (dynamic list of upstream `gb_*` tools, ceiling destructive).
+53 operations.
+- Hot (agent, C336 M4): `recall` (meaning), `search` (words), `get` (open a `ref`), `context` (size-capped block for hooks), `ask` (engine think, model cost), `remember` (`text` or `items[]` with `source`, deduped per area). Every recall/search hit carries `ref` and `source` (citation; migration 0002 adds `source_ref`, `source_url`, `content_digest`).
+- Read (agent, per area): `recall`, `areas_list`, `collections_list`, `collection_get`, `collection_tree`, `documents_search`, `document_get`, `document_revisions`, `comments_list`, `links_list`, research reads, `engine` (dynamic, search mode since 0.1.25: agents see `knowledge__engine_search` / `knowledge__engine_call` instead of ~100 `gb_*` tools; ceiling destructive).
 - Write (agent): `remember`, `collection_create`, `document_create`, `document_update`, `comment_add`, `link_add`, `research_source_add`, `research_chat_start`, `research_ask`.
 - Destructive, hold `destructive`: `document_delete`, `collection_delete`, `link_delete`, `research_source_delete`.
 - Person: 10 library reads, 4 writes, 4 destructive (held).
@@ -63,7 +64,7 @@ App port 5310, 0.5 cpu, 768 MB, data 5 GB plus backup 20 GB. Engine only: about 
 
 ## Pinned packages
 
-Stable 0.1.21 and main (0.1.24): miniapp-sdk 0.1.25, spec 0.1.39. Both: manifest 0.1.18, conformance 0.1.18, ui 0.2.4. The `tb-exec` service package pins miniapp-sdk 0.1.12.
+Stable 0.1.21 and main (0.1.25): miniapp-sdk 0.1.25, spec 0.1.39. Both: manifest 0.1.18, conformance 0.1.18, ui 0.2.4. The `tb-exec` service package pins miniapp-sdk 0.1.12.
 
 All `@opt2-tealbrick/*` pins use dist-host tarball URLs. Upgrade safety (SDK 0.1.25: pre-update snapshot, migration lock, failed mode) is in this app only where the pin above says 0.1.25 (the plain version 0.1.21 is on the dev channel; its qa1 soak is the gate for stable, C221, PROMOTE-STABLE §7). All RS-3 apps pin SDK 0.1.25 (dev channel; stable after the qa1 soak of the plain version). Core restores the snapshot on an automatic rollback (portal-core#1, E3). This Core is live since 2026-10-16 22:37:58Z (Core 29ae2fe).
 

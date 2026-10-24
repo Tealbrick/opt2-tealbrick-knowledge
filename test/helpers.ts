@@ -248,7 +248,13 @@ export async function fakeGBrain(): Promise<FakeGBrain> {
         pages.delete(slug);
         return reply({ content: [{ type: "text", text: JSON.stringify({ ok: true }) }] });
       }
-      if (name === "query") {
+      if (name === "context_pack") {
+        // MEMORY_VERBS v1 shape (cards, facts, open threads); `entities` is a comma-separated string upstream
+        const names = String(args.entities ?? "").split(",").map((n) => n.trim()).filter(Boolean);
+        return reply({ content: [{ type: "text", text: JSON.stringify({ protocol_version: 1, entities: names, cards: names.map((n) => ({ slug: `companies/${n.toLowerCase()}`, title: n, summary: `${n} card` })), facts: names.map((n) => ({ fact: `${n} renews in March`, entity_slug: n.toLowerCase() })), open_threads: [] }) }] });
+      }
+      if (name === "think") return reply({ content: [{ type: "text", text: JSON.stringify({ answer: `answer to ${String(args.question)}`, citations: [{ slug: "notes/x" }] }) }] });
+      if (name === "query" || name === "search") {
         const words = String(args.query).toLowerCase().split(/\s+/u);
         const results = [...pages.entries()]
           .filter(([, page]) => words.some((word) => page.content.toLowerCase().includes(word)))

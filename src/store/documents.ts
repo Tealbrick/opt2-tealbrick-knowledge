@@ -124,6 +124,11 @@ export function citationOf(row: Row): Citation {
   return { ref, ...(url ? { url } : {}), author: String(row.created_by), at: num(row.updated_at) };
 }
 
+/** The citation of a loaded document (same rule as `citationOf`). */
+export function documentCitation(doc: Document): Citation {
+  return { ref: doc.sourceRef ?? `knowledge:document/${doc.id}`, ...(doc.sourceUrl ? { url: doc.sourceUrl } : {}), author: doc.createdBy, at: doc.updatedAt };
+}
+
 /** THE stored tag list of a write (normalised, unique, ≤ 20): G5 write checks (§18.4 b) predict the result with it. */
 export function cleanTags(tags: readonly string[] | undefined): string[] {
   if (!tags) return [];

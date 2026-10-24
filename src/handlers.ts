@@ -6,7 +6,7 @@ import type { CrudAction, DynamicCatalogEntry, DynamicResolution } from "@opt2-t
 import type { AppEvents, Caller, DynamicHandlers, HandlerSpec, HookContext, Json, OpContext } from "@opt2-tealbrick/spec/sdk";
 import { AREA_SCOPE, type Area } from "./areas.ts";
 import { deterministicRequestId } from "./engines/gbrain/client.ts";
-import { EngineCallError, engineError, type RecallRow } from "./engines/gbrain/engine.ts";
+import { documentIdFromSlug, EngineCallError, engineError, type RecallRow } from "./engines/gbrain/engine.ts";
 import { resolveEntry as engineResolve } from "./engines/gbrain/exposure.ts";
 import { NotebookError } from "./engines/notebook/client.ts";
 import { agentAreaId } from "./ids.ts";
@@ -14,7 +14,7 @@ import type { AppSecrets, Knowledge, Services } from "./knowledge.ts";
 import { createLibraryHandlers } from "./library.ts";
 import { fanOut, mergeRanked } from "./merge.ts";
 import { NARROWING_UNSUPPORTED, NARROWING_VIOLATION, type Narrowing, NarrowingError, readNarrowing, type TagFilter, tagsPass, untaggedPass } from "./narrowing.ts";
-import { type Citation, cleanTags, memoryDigest, StoreError } from "./store/documents.ts";
+import { type Citation, cleanTags, documentCitation, memoryDigest, StoreError } from "./store/documents.ts";
 
 /** The SDK's error class (CORE §8 envelope); injected so this module only depends on frozen types. */
 export type ErrorFactory = new (code: string, message: string, httpStatus?: number) => Error;
@@ -39,9 +39,14 @@ const FAN_OUT_LIMIT = 4;
  * collection-wide deletes, engine tools, any future op) refuses a tag narrowing with `narrowing_unsupported` (fail
  * closed): a new op is narrowed only once someone decides how.
  */
-export const NARROWING_POLICY: Readonly<Record<string, "items" | "untagged" | "none">> = {
+export const NARROWING_POLICY: Readonly<Record<string, "items" | "untagged" | "none" | "unsupported">> = {
   // reads
   recall: "items",
+  search: "items",
+  get: "items",
+  context: "items",
+  // decided (C336 M4): the engine composes the answer from pages whose tags Knowledge cannot match, so any tag narrowing refuses
+  ask: "unsupported",
   documents_search: "items",
   document_get: "items",
   document_revisions: "items",
@@ -75,6 +80,35 @@ export const NARROWING_POLICY: Readonly<Record<string, "items" | "untagged" | "n
   research_source_delete: "untagged",
   // §18.4 c/e (not listed → unsupported): collection_delete (would remove hidden documents), library_* writes, engine tools
 };
+
+/**
+ * Rank engine tools for a search (C336 M4): words of the query against the tool name (strongest), title and description.
+ * Tools without any matching word are left out; ties keep catalog order. An empty query lists the first `limit` tools.
+ */
+export function searchCatalog(entries: readonly DynamicCatalogEntry[], query: string, limit: number): DynamicCatalogEntry[] {
+  const words = query.toLowerCase().split(/[^a-z0-9]+/u).filter((w) => w.length > 1);
+  const max = Math.min(Math.max(limit, 1), 50);
+  if (!words.length) return entries.slice(0, max);
+  const scored = entries.map((entry, index) => {
+    const name = entry.name.toLowerCase().replace(/^gb_/u, "");
+    const title = (entry.title ?? "").toLowerCase();
+    const description = (entry.description ?? "").toLowerCase();
+    let score = 0;
+    for (const word of words) {
+      if (name === word) score += 10;
+      else if (name.split("_").includes(word)) score += 6;
+      else if (name.includes(word)) score += 4;
+      if (title.includes(word)) score += 2;
+      if (description.includes(word)) score += 1;
+    }
+    return { entry, index, score };
+  });
+  return scored
+    .filter((row) => row.score > 0)
+    .sort((a, b) => b.score - a.score || a.index - b.index)
+    .slice(0, max)
+    .map((row) => row.entry);
+}
 
 export function createHandlers(knowledge: Knowledge, TbError: ErrorFactory) {
   const fail = (code: string, message: string, status: number) => new TbError(code, message, status);
@@ -206,7 +240,7 @@ export function createHandlers(knowledge: Knowledge, TbError: ErrorFactory) {
    * degraded (e.g. keyword-only without embeddings) is reported per area and merged with the keyword search; either way
    * `degraded: true`. The engine state also feeds the app status (F89).
    */
-  async function recallAcross(s: Services, ctx: OpContext, areas: string[], query: string, limit: number) {
+  async function recallAcross(s: Services, ctx: OpContext, areas: string[], query: string, limit: number, opts: { tool?: "query" | "search"; withKeyword?: boolean } = {}) {
     const engine = s.engine;
     const filter = tagFilter(ctx);
     // A narrowing drops rows after the engine ranked them: ask for more so a narrowed answer is not needlessly short.
@@ -215,7 +249,7 @@ export function createHandlers(knowledge: Knowledge, TbError: ErrorFactory) {
     const outcomes = await fanOut(areas, FAN_OUT_LIMIT, async (id) => {
       const area = s.areas.get(id);
       if (!engine || !area?.sourceReady) throw Object.assign(new Error("not ready"), { code: engine ? "area_not_ready" : "no_engine" });
-      return engine.recall(id, area.sourceId, query, engineLimit, ctx.caller.id);
+      return engine.recall(id, area.sourceId, query, engineLimit, ctx.caller.id, opts.tool ?? "query");
     });
     // C336 M1: every hit carries `ref` (what to open with get) and `source` (the citation). A canonical document cites its
     // imported source or itself; an engine page cites its area and slug. An engine row with neither cannot be cited: it is
@@ -245,6 +279,8 @@ export function createHandlers(knowledge: Knowledge, TbError: ErrorFactory) {
           return [{ ...row, tags: [], ref: { kind: "page", area: row.area, slug: row.slug }, source: { ref: `knowledge:page/${row.area}/${row.slug}` } }];
         });
         lists.push({ area: outcome.area, rows: tagged });
+        // `search` (C336 M4) also ranks Knowledge's own word index of the area's documents next to the engine's answer.
+        if (opts.withKeyword && !degraded.length) lists.push({ area: outcome.area, rows: keyword(outcome.area) });
         const cited = uncited ? { uncited } : {};
         if (degraded.length) {
           // The engine ran without part of its pipeline: add the keyword search so a degraded engine never hides a memory.
@@ -342,6 +378,132 @@ export function createHandlers(knowledge: Knowledge, TbError: ErrorFactory) {
             ? { area, items: results.map((r) => ({ documentId: r.doc.id, created: r.created })) }
             : { documentId: first.doc.id, area, version: first.doc.version, created: first.created };
           return out;
+        }),
+    },
+
+    // ── C336 M4: hot tools (search, get, context, ask); the engine's own tools are found with engine_search ──
+
+    search: {
+      scope: readScope,
+      redact: (input) => `search (${String(input.query).length} chars)`,
+      run: (input, ctx) =>
+        wrap(async () => {
+          const s = services(ctx);
+          const areas = await targetAreas(ctx, input.area);
+          const limit = Math.min(Number(input.limit ?? 10), 50);
+          return (await recallAcross(s, ctx, areas, String(input.query), limit, { tool: "search", withKeyword: true })) as Json;
+        }),
+    },
+
+    get: {
+      scope: anyScope,
+      run: (input, ctx) =>
+        wrap(async () => {
+          const s = services(ctx);
+          const ref = input.ref as In;
+          let documentId = ref.kind === "document" && typeof ref.id === "string" ? ref.id : null;
+          if (ref.kind === "page") {
+            if (typeof ref.area !== "string" || typeof ref.slug !== "string") throw fail("invalid_input", "a page ref needs area and slug", 400);
+            // a mirror page of a canonical document opens the document (its tags and citation are Knowledge's)
+            documentId = documentIdFromSlug(ref.slug);
+            if (!documentId) {
+              await readable(ctx, ref.area);
+              // engine pages carry no tags Knowledge can match: under a tag narrowing they answer like missing ones (§18.4 a)
+              if (tagFilter(ctx)) throw notFound();
+              const engine = s.engine;
+              if (!engine) throw notFound();
+              const area = await readyArea(ctx, s, ref.area, "source");
+              let page: In;
+              try {
+                page = (await engine.call(area.sourceId, "gb_get_page", { slug: ref.slug }, ctx.caller.id)) as In;
+              } catch (error) {
+                const failure = engineError(error);
+                if ((failure as { code?: string }).code === "engine_page_not_found") throw notFound();
+                throw failure;
+              }
+              const text = String(page?.compiled_truth ?? page?.content ?? page?.body ?? "");
+              return { ref: { kind: "page", area: ref.area, slug: ref.slug }, area: ref.area, title: String(page?.title ?? ref.slug), text, source: { ref: `knowledge:page/${ref.area}/${ref.slug}` } } as unknown as Json;
+            }
+          }
+          if (!documentId) throw fail("invalid_input", "a document ref needs id", 400);
+          const doc = documentFor(s, documentId);
+          await readable(ctx, doc.area);
+          visible(ctx, doc);
+          return { ref: { kind: "document", id: doc.id }, area: doc.area, title: doc.title, text: doc.body, tags: doc.tags, version: doc.version, source: documentCitation(doc) } as unknown as Json;
+        }),
+    },
+
+    context: {
+      scope: readScope,
+      redact: (input) => `context ${String(input.purpose)}`,
+      run: (input, ctx) =>
+        wrap(async () => {
+          const s = services(ctx);
+          const maxChars = Math.min(Math.max(Number(input.maxChars ?? 4000), 200), 20_000);
+          const areas = await targetAreas(ctx, input.area);
+          const entities = Array.isArray(input.entities) ? (input.entities as string[]).map((e) => e.replace(/,/gu, " ").trim()).filter(Boolean).slice(0, 8) : [];
+          const query = typeof input.query === "string" ? input.query : entities.join(" ");
+          const lines: string[] = [];
+          const refs: Json[] = [];
+          let via = "recent";
+          let degraded = false;
+          // Entities and no tag narrowing: the engine's zero-LLM context pack (core memory, entity cards, hot facts) for the
+          // caller's own area (or the one named); then memories that match, cited.
+          if (entities.length && s.engine && !tagFilter(ctx)) {
+            const own = typeof input.area === "string" ? input.area : ownArea(ctx.caller);
+            if (own && areas.includes(own)) {
+              try {
+                const area = await readyArea(ctx, s, own, "source");
+                const pack = (await s.engine.call(area.sourceId, "gb_context_pack", { entities: entities.join(","), budget_tokens: Math.floor(maxChars / 4) }, ctx.caller.id)) as In;
+                via = "context_pack";
+                for (const card of Array.isArray(pack?.cards) ? (pack.cards as In[]) : []) lines.push(`- ${String(card.title ?? card.slug ?? "")}: ${String(card.summary ?? card.text ?? card.compiled_truth ?? "").replace(/\s+/gu, " ").slice(0, 400)}`);
+                for (const fact of Array.isArray(pack?.facts) ? (pack.facts as In[]) : []) lines.push(`- ${String(fact.fact ?? "")}${fact.entity_slug ? ` (${String(fact.entity_slug)})` : ""}`);
+                for (const thread of Array.isArray(pack?.open_threads) ? (pack.open_threads as In[]) : []) lines.push(`- open: ${String(thread.title ?? thread.text ?? thread.slug ?? "")}`);
+              } catch (error) {
+                // a context block never blocks the session: the word and meaning search below still answer
+                degraded = true;
+                ctx.log.warn("context pack failed", { code: String((engineError(error) as { code?: unknown }).code ?? "engine_error").slice(0, 64) });
+              }
+            }
+          }
+          if (query) {
+            const found = await recallAcross(s, ctx, areas, query.slice(0, 500), 8);
+            if (via === "recent") via = "recall";
+            degraded ||= found.degraded;
+            for (const row of found.results) {
+              lines.push(`- ${row.title}: ${row.text.replace(/\s+/gu, " ").slice(0, 400)} [${row.source.ref}]`);
+              refs.push(row.ref as unknown as Json);
+            }
+          } else if (!lines.length) {
+            for (const hit of s.store.search({ areas, limit: 8, tags: tagFilter(ctx) })) {
+              lines.push(`- ${hit.title}: ${hit.excerpt.replace(/\s+/gu, " ").slice(0, 300)} [${hit.citation.ref}]`);
+              refs.push({ kind: "document", id: hit.id });
+            }
+          }
+          const full = lines.join("\n");
+          const truncated = full.length > maxChars;
+          return { text: truncated ? `${full.slice(0, maxChars - 1)}…` : full, refs, via, truncated, degraded };
+        }),
+    },
+
+    ask: {
+      scope: writeScope,
+      redact: (input) => `ask (${String(input.question).length} chars)`,
+      run: (input, ctx) =>
+        wrap(async () => {
+          const s = services(ctx);
+          const engine = s.engine;
+          if (!engine) throw fail("engine_capability_unavailable", "no memory engine in this deployment", 404);
+          const id = defaultArea(ctx, input.area);
+          // model cost runs only in an area the caller may write (as the engine's own think)
+          await writable(ctx, id, "read");
+          const area = await readyArea(ctx, s, id, "source");
+          try {
+            const answer = await engine.call(area.sourceId, "gb_think", { question: String(input.question) }, ctx.caller.id);
+            return { area: id, answer: answer as Json };
+          } catch (error) {
+            throw engineError(error);
+          }
         }),
     },
 
@@ -755,14 +917,15 @@ export function createHandlers(knowledge: Knowledge, TbError: ErrorFactory) {
   };
 
   const engineDynamic: DynamicHandlers = {
-    async catalog(_query, ctx: HookContext): Promise<DynamicCatalogEntry[]> {
+    async catalog(query, ctx: HookContext): Promise<DynamicCatalogEntry[]> {
       const s = knowledge.bind(ctx.db, secretsOf(ctx));
       if (!s.engine) return [];
       try {
         const entries = await s.engine.catalog();
         // An engine that answers but matches none of the exposed tools (an upstream surface change) is never silent either.
         if (!entries.length) ctx.log.warn("engine catalog empty", { engine: "gbrain" });
-        return entries;
+        // C336 M4: `engine` is listed in search mode (engine_search / engine_call); a search ranks the tools by its words.
+        return query ? searchCatalog(entries, query.query ?? "", query.limit ?? 20) : entries;
       } catch (error) {
         // C296 (prod): an empty answer was cached by the bridge as "no tools" and nobody was told. Fail instead: the bridge
         // marks the op catalog_failed (status toolsOmitted → Core) and asks again on the next tools/list.

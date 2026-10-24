@@ -141,11 +141,12 @@ export class GBrainEngine {
   }
 
   /**
-   * Hybrid search in one area's source; rows normalized and sanitized, with what upstream reported as degraded. An
+   * Hybrid (or word) search in one area's source; rows normalized and sanitized, with what upstream reported as degraded. An
    * answer without a readable row list throws `engine_unparsable` (the caller falls back, never a silent empty list).
    */
-  async recall(area: string, sourceId: string, query: string, limit: number, principalId?: string): Promise<RecallAnswer> {
-    const answer = await this.client.callAnswer(sourceId, "query", { query, limit }, { ...(principalId ? { principalId } : {}), timeoutMs: 120_000 });
+  async recall(area: string, sourceId: string, query: string, limit: number, principalId?: string, tool: "query" | "search" = "query"): Promise<RecallAnswer> {
+    // `query` = hybrid search by meaning (recall); `search` = the engine's ranked word search (C336 M4 `search`).
+    const answer = await this.client.callAnswer(sourceId, tool, { query, limit }, { ...(principalId ? { principalId } : {}), timeoutMs: 120_000 });
     const found = findRows(sanitizeResult(answer.data, sourceId));
     if (!found) throw new EngineCallError("engine_unparsable", "the memory engine answer could not be read", 502);
     const degraded = [

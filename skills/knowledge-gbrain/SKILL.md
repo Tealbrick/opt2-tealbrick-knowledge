@@ -5,7 +5,11 @@ description: Native memory engine tools (GBrain) in Knowledge: facts, entities, 
 
 # Memory engine tools (GBrain)
 
-Besides `knowledge__recall` and `knowledge__remember`, Knowledge lists the memory engine's own tools. Their names start with `knowledge__gb_` (for example `knowledge__gb_entity`, `knowledge__gb_get_timeline`, `knowledge__gb_remember`).
+Besides the everyday tools (`knowledge__recall`, `knowledge__remember`, `knowledge__search`, `knowledge__get`, `knowledge__context`, `knowledge__ask`), the memory engine has about 100 tools of its own (facts, entities, pages, graph, timeline, takes). They are not listed one by one:
+
+1. Find one with `knowledge__engine_search` and a few words of what you want to do (for example "timeline of a person", "links of a page", "forget a fact").
+2. Call it with `knowledge__engine_call` and `{tool, arguments}`; the tool names start with `gb_` (for example `gb_entity`, `gb_get_timeline`).
+
 
 - Every engine tool has an optional `area` argument. Writes go to your own area ({{scope.area.own}}) unless you name another area you may write to.
 - Lookups such as entity, search, links and timeline search every area you can read when you omit `area`. The answer lists the results per area.

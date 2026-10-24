@@ -15,6 +15,9 @@ Call `knowledge__areas_list` if you are unsure what you can read or write.
 ## When to recall
 
 - Before you answer a question about past work, people, customers, decisions or preferences, call `knowledge__recall` with a short, specific query.
+- `knowledge__recall` searches by meaning; `knowledge__search` finds exact words and names. Open a result in full with `knowledge__get` and its `ref`.
+- `knowledge__context` gives a short block about named entities or a query (harness hooks call it at session start and after a compaction).
+- `knowledge__ask` composes an answer from several memories with citations; it costs model budget, so use it when recall is not enough.
 - Use the distinctive words (names, product names, dates), not a whole sentence.
 - Each result names the area it came from and carries `source` (where the memory came from) and `ref` (what to open for the full text). Cite the `source` of each fact you use.
 - If the result says `degraded: true`, the memory engine was not available and you got keyword matches only. Treat the answer as incomplete.

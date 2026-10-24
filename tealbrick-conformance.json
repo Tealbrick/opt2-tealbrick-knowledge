@@ -32,6 +32,11 @@
       }
     }
   ],
+  "inputs": {
+    "remember": {
+      "text": "conformance memory (remember needs text or items since 0.1.25)"
+    }
+  },
   "inputsAs": {
     "app": {
       "remember": {
