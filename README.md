@@ -2,7 +2,7 @@
 
 Agent memory and documents inside the customer's own deployment: a canonical document store projected into unmodified upstream engines (GBrain for memory, Open Notebook for research). Built on the Miniapp SDK.
 
-**Status:** stable 0.1.21; `main` is 0.1.25 (dev channel only). Visibility: public, Apache-2.0. Published as five public GHCR images: the app (`ghcr.io/tealbrick/opt2-tealbrick-knowledge`) and four companion services (each image has its plain version tag and a `sha-` tag).
+**Status:** stable 0.1.21; `main` is 0.1.26 (dev channel only). Visibility: public, Apache-2.0. Published as five public GHCR images: the app (`ghcr.io/tealbrick/opt2-tealbrick-knowledge`) and four companion services (each image has its plain version tag and a `sha-` tag).
 
 - Repository: `Tealbrick/opt2-tealbrick-knowledge` (GitHub organisation `Tealbrick`)
 - Licence: Apache-2.0 for the app code (`LICENSE`, `NOTICE`); upstream licences are in `THIRD_PARTY_NOTICES.md`. The Tealbrick brand mark and app art are Tealbrick artwork and are not covered by the Apache-2.0 licence.
