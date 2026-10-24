@@ -15,15 +15,19 @@ Call `knowledge__areas_list` if you are unsure what you can read or write.
 ## When to recall
 
 - Before you answer a question about past work, people, customers, decisions or preferences, call `knowledge__recall` with a short, specific query.
+- `knowledge__recall` searches by meaning; `knowledge__search` finds exact words and names. Open a result in full with `knowledge__get` and its `ref`.
+- `knowledge__context` gives a short block about named entities or a query (harness hooks call it at session start and after a compaction).
+- `knowledge__ask` composes an answer from several memories with citations; it costs model budget, so use it when recall is not enough.
 - Use the distinctive words (names, product names, dates), not a whole sentence.
-- Each result names the area it came from. Say which area a fact came from when it matters.
+- Each result names the area it came from and carries `source` (where the memory came from) and `ref` (what to open for the full text). Cite the `source` of each fact you use.
 - If the result says `degraded: true`, the memory engine was not available and you got keyword matches only. Treat the answer as incomplete.
 - If nothing supports an answer, say so. Do not invent a memory.
 
 ## When to remember
 
 - Save durable facts with `knowledge__remember`: decisions, preferences, commitments, names and roles, outcomes of tasks.
-- One fact or one short note per call. Put the key words in the first line; it becomes the title.
+- One fact or one short note per memory. Put the key words in the first line; it becomes the title. To save several at once, send `items` (each with `text`, optional `kind` and `tags`) instead of `text`.
+- The same text is stored once per area: saving it again returns the stored memory (`created: false`).
 - Add a few lower-case `tags` (for example `customer`, `decision`). Tag what kind of memory it is: `work` or `personal`. The owner's rules can limit recall to some tags; an untagged memory is then not returned.
 - Do not save secrets, passwords, API keys or payment details.
 - Every write needs a stable idempotency key. If a call fails with an unclear result, retry with the SAME key; never invent a new key for the same memory.
