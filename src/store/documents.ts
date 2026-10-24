@@ -2,6 +2,7 @@
 // Authorization happens in the handlers (SDK scope access per area); this module enforces data integrity:
 // parents in the same collection without cycles, links inside one area, optimistic concurrency, soft delete.
 // Every change to a document writes its projection outbox row in the same transaction.
+import { createHash } from "node:crypto";
 import { opaqueDigest } from "@opt2-tealbrick/manifest";
 import type { Db } from "@opt2-tealbrick/spec/sdk";
 import { newId, slugify } from "../ids.ts";
@@ -105,6 +106,15 @@ function toDocument(row: Row): Document {
     sourceRef: str(row.source_ref),
     sourceUrl: str(row.source_url),
   };
+}
+
+/**
+ * Per-area dedupe key of a saved memory (C336 M3): sha256 of the normalised text (NFC, lower case, runs of white space
+ * as one space, trimmed) and the area. The harness hooks compute the same key for their batch idempotency key.
+ */
+export function memoryDigest(text: string, area: string): string {
+  const normalised = text.normalize("NFC").toLowerCase().replace(/\s+/gu, " ").trim();
+  return createHash("sha256").update(`${normalised}\n${area}`).digest("hex");
 }
 
 /** A document cites its imported source when it has one, else itself (it was written in Knowledge). */
@@ -522,6 +532,11 @@ export class DocumentStore {
       for (const row of rows) out.set(String(row.id), { tags: JSON.parse(String(row.tags)) as string[], citation: citationOf(row) });
     }
     return out;
+  }
+
+  /** Run `fn` in one store transaction (a batch of writes is all or nothing). */
+  transaction<T>(fn: () => T): T {
+    return this.db.transaction(fn);
   }
 
   /** The live document of an area with this dedupe key, or null (C336 M3). */

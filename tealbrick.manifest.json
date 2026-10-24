@@ -338,7 +338,7 @@
     {
       "id": "recall",
       "title": "Recall memories",
-      "description": "Search your memory: every area you can read (your own area and the company area), or one area. Returns ranked passages with the area and the tags of each. The owner's rules may limit results to memories with certain tags.",
+      "description": "Search your memory: every area you can read (your own area and the company area), or one area. Returns ranked passages; each has `ref` (open it with document_get or the engine tools), `source` (the citation), the area and its tags. The owner's rules may limit results to memories with certain tags.",
       "input": {
         "type": "object",
         "additionalProperties": false,
@@ -393,13 +393,10 @@
     {
       "id": "remember",
       "title": "Remember",
-      "description": "Save a memory as a document in an area you can write to (default: your own area). It becomes searchable by recall. Add tags (for example work or personal): the owner's rules can limit recall to some tags.",
+      "description": "Save a memory in an area you can write to (default: your own area): `text` for one memory, or `items` for several. Each memory is stored once per area (the same text again returns the stored one). It becomes searchable by recall and is cited with its `source` when you give one. Add tags (for example work or personal): the owner's rules can limit recall to some tags.",
       "input": {
         "type": "object",
         "additionalProperties": false,
-        "required": [
-          "text"
-        ],
         "properties": {
           "text": {
             "type": "string",
@@ -424,6 +421,72 @@
               "minLength": 1,
               "maxLength": 40
             }
+          },
+          "items": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 50,
+            "description": "Several memories in one call (hooks save a batch). Each item is stored once per area: the same text again returns the stored memory.",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "text"
+              ],
+              "properties": {
+                "text": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 20000
+                },
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "fact",
+                    "decision",
+                    "preference",
+                    "task",
+                    "note"
+                  ],
+                  "description": "Stored as a tag."
+                },
+                "tags": {
+                  "type": "array",
+                  "maxItems": 20,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 40
+                  }
+                }
+              }
+            }
+          },
+          "source": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "harness",
+              "session"
+            ],
+            "description": "Where the memory came from; becomes the citation of each item.",
+            "properties": {
+              "harness": {
+                "type": "string",
+                "pattern": "^[a-z0-9][a-z0-9-]{0,39}$"
+              },
+              "session": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^[A-Za-z0-9._:-]+$"
+              },
+              "url": {
+                "type": "string",
+                "maxLength": 2000,
+                "pattern": "^https://"
+              }
+            }
           }
         }
       },
@@ -443,6 +506,26 @@
           },
           "version": {
             "type": "integer"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "documentId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64
+                },
+                "created": {
+                  "type": "boolean"
+                }
+              }
+            }
+          },
+          "created": {
+            "type": "boolean"
           }
         }
       },

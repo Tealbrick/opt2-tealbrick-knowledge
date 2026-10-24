@@ -14,7 +14,7 @@ import type { AppSecrets, Knowledge, Services } from "./knowledge.ts";
 import { createLibraryHandlers } from "./library.ts";
 import { fanOut, mergeRanked } from "./merge.ts";
 import { NARROWING_UNSUPPORTED, NARROWING_VIOLATION, type Narrowing, NarrowingError, readNarrowing, type TagFilter, tagsPass, untaggedPass } from "./narrowing.ts";
-import { type Citation, cleanTags, StoreError } from "./store/documents.ts";
+import { type Citation, cleanTags, memoryDigest, StoreError } from "./store/documents.ts";
 
 /** The SDK's error class (CORE §8 envelope); injected so this module only depends on frozen types. */
 export type ErrorFactory = new (code: string, message: string, httpStatus?: number) => Error;
@@ -292,27 +292,56 @@ export function createHandlers(knowledge: Knowledge, TbError: ErrorFactory) {
 
     remember: {
       scope: writeScope,
-      redact: (input, output) => `remembered ${String(input.text).length} chars in ${(output as In | undefined)?.area ?? input.area ?? "own area"}`,
+      redact: (input, output) => {
+        const size = Array.isArray(input.items) ? `${input.items.length} items` : `${String(input.text ?? "").length} chars`;
+        return `remembered ${size} in ${(output as In | undefined)?.area ?? input.area ?? "own area"}`;
+      },
       run: (input, ctx) =>
         wrap(async () => {
           const s = services(ctx);
+          const batch = Array.isArray(input.items);
+          if (batch === (typeof input.text === "string")) throw fail("invalid_input", "send either text or items", 400);
           const area = defaultArea(ctx, input.area);
           await writable(ctx, area, "create");
           if (!s.areas.get(area)) throw notFound();
-          resultVisible(ctx, cleanTags(input.tags));
-          const text = String(input.text);
-          const firstLine = text.split(/\r?\n/u).find((line) => line.trim())?.trim() ?? "Memory";
-          const doc = s.store.createDocument({
-            area,
-            title: (typeof input.title === "string" ? input.title : firstLine).slice(0, 200),
-            body: text,
-            status: "published",
-            tags: input.tags,
-            actor: actor(ctx),
-          });
-          await knowledge.provision(s, ctx).catch(() => undefined);
-          knowledge.kick(s);
-          return { documentId: doc.id, area, version: doc.version };
+          // C336 M3: one memory per item; each is stored once per area (dedupe by its normalised text), so a hook that
+          // sends an overlapping batch again does not store twice. `source` becomes the citation of every item (M1).
+          const items: { text: string; title?: string; tags: string[] }[] = batch
+            ? (input.items as In[]).map((item) => ({ text: String(item.text), tags: cleanTags([...(Array.isArray(item.tags) ? item.tags.map(String) : []), ...(typeof item.kind === "string" ? [item.kind] : [])]) }))
+            : [{ text: String(input.text), ...(typeof input.title === "string" ? { title: input.title } : {}), tags: cleanTags(input.tags as string[] | undefined) }];
+          for (const item of items) resultVisible(ctx, item.tags);
+          const source = input.source as In | undefined;
+          const sourceRef = source ? `${String(source.harness)}:session/${String(source.session)}` : undefined;
+          const sourceUrl = typeof source?.url === "string" ? source.url : undefined;
+          const results = s.store.transaction(() =>
+            items.map((item) => {
+              const digest = memoryDigest(item.text, area);
+              const known = s.store.findByDigest(area, digest);
+              if (known) return { doc: known, created: false };
+              const firstLine = item.text.split(/\r?\n/u).find((line) => line.trim())?.trim() ?? "Memory";
+              const doc = s.store.createDocument({
+                area,
+                title: (item.title ?? firstLine).slice(0, 200),
+                body: item.text,
+                status: "published",
+                tags: item.tags,
+                actor: actor(ctx),
+                contentDigest: digest,
+                ...(sourceRef ? { sourceRef } : {}),
+                ...(sourceUrl ? { sourceUrl } : {}),
+              });
+              return { doc, created: true };
+            }),
+          );
+          if (results.some((r) => r.created)) {
+            await knowledge.provision(s, ctx).catch(() => undefined);
+            knowledge.kick(s);
+          }
+          const first = results[0] as { doc: { id: string; version: number }; created: boolean };
+          const out: Json = batch
+            ? { area, items: results.map((r) => ({ documentId: r.doc.id, created: r.created })) }
+            : { documentId: first.doc.id, area, version: first.doc.version, created: first.created };
+          return out;
         }),
     },
 

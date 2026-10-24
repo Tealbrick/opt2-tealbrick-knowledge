@@ -123,6 +123,39 @@ test("C336 M1: every recall hit cites its source: a document itself, an engine p
   assert.ok(keyword.hits.length >= 1);
 });
 
+test("C336 M3: remember items[] saves a batch once per area, cites its source, and stores kind as a tag", async () => {
+  const { ctx, run, db, knowledge } = await setup();
+  const source = { harness: "claude-code", session: "sess-m3-01", url: "https://example.invalid/sessions/sess-m3-01" };
+  const first = await run("remember", { items: [{ text: "Acme renews in March.", kind: "fact", tags: ["work"] }, { text: "We chose  annual\nbilling for Acme." , kind: "decision" }], source }, ctx(ADA));
+  assert.equal(first.area, ADA_AREA);
+  assert.deepEqual(first.items.map((i: { created: boolean }) => i.created), [true, true]);
+  // the hook sends an overlapping batch again: same texts (case and white space differ) are not stored twice
+  const again = await run("remember", { items: [{ text: "acme renews in march." }, { text: "We chose annual billing for Acme." }, { text: "Acme wants SSO." }], source }, ctx(ADA));
+  assert.deepEqual(again.items.map((i: { created: boolean }) => i.created), [false, false, true]);
+  assert.equal(again.items[0].documentId, first.items[0].documentId);
+  assert.equal(again.items[1].documentId, first.items[1].documentId);
+  const stored = db.prepare("SELECT source_ref, source_url, tags FROM kn_documents WHERE id = ?").get(first.items[1].documentId);
+  assert.equal(stored?.source_ref, "claude-code:session/sess-m3-01");
+  assert.equal(stored?.source_url, source.url);
+  assert.deepEqual(JSON.parse(String(stored?.tags)), ["decision"]);
+  // the citation reaches recall
+  await run("recall", { query: "x" }, ctx(ADA));
+  await knowledge.current()?.projector?.drain();
+  const out = await run("recall", { query: "renews", area: ADA_AREA }, ctx(ADA));
+  const hit = out.results.find((row: { documentId: string }) => row.documentId === first.items[0].documentId);
+  assert.deepEqual(hit.source, { ref: "claude-code:session/sess-m3-01", url: source.url, author: ADA, at: hit.source.at });
+  // the single-text form dedupes the same way and says so
+  const single = await run("remember", { text: "Acme wants SSO." }, ctx(ADA));
+  assert.equal(single.created, false);
+  assert.equal(single.documentId, again.items[2].documentId);
+  // the same text in another area is another memory
+  const shared = await run("remember", { text: "Acme wants SSO." }, ctx(BO));
+  assert.equal(shared.created, true);
+  // exactly one of text and items
+  await assert.rejects(run("remember", { text: "a", items: [{ text: "b" }] }, ctx(ADA)), rejects("invalid_input"));
+  await assert.rejects(run("remember", { tags: ["x"] }, ctx(ADA)), rejects("invalid_input"));
+});
+
 test("walled areas: another agent can neither recall nor read nor target the area", async () => {
   const { ctx, run, knowledge } = await setup();
   const saved = await run("remember", { text: "Ada's private plan: zebra project" }, ctx(ADA));
