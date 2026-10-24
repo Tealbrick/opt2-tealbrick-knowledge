@@ -1,4 +1,6 @@
 // Library page: area -> collection -> document. Navigation state lives in App so Recall and Research can open a document here.
+
+import { useSession } from "@opt2-tealbrick/miniapp-sdk/client";
 import { Button, Card, Dialog, Field, Notice, SearchIcon, Section, Segmented, Select, Table, Tag, Textarea, TextInput } from "@opt2-tealbrick/ui";
 import { type CSSProperties, useCallback, useEffect, useState } from "react";
 import { ConfirmDelete, ErrorNotice, errText, isConflict, Loading, run, type Status, statusTag, TextBlock, useDebounced, useOverview, when, whenShort } from "./common.tsx";
@@ -428,7 +430,23 @@ function Outline({ nodes, onOpen }: { nodes: TreeNode[]; onOpen: (id: string) =>
   );
 }
 
+/**
+ * C331 (demo gap 10): documents, revisions and comments store the writer's caller id (an agent id, or the person's id). The page
+ * names agents as `tb.agents_list` does, the signed-in person as "you"; any other id (an app, a removed agent) stays as stored.
+ */
+function useAuthorName(): (id: string) => string {
+  const { principal } = useSession();
+  const [agents, setAgents] = useState<Record<string, string>>({});
+  useEffect(() => {
+    run<{ agents: { id: string; name: string }[] }>("tb.agents_list")
+      .then((r) => setAgents(Object.fromEntries(r.agents.filter((a) => a.name).map((a) => [a.id, a.name]))))
+      .catch(() => setAgents({}));
+  }, []);
+  return useCallback((id: string) => agents[id] ?? (principal && id === principal.id ? "you" : id), [agents, principal]);
+}
+
 function DocumentView({ id, nav, setNav }: { id: string; nav: LibraryNav; setNav: SetNav }) {
+  const authorName = useAuthorName();
   const [data, setData] = useState<DocResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -546,7 +564,7 @@ function DocumentView({ id, nav, setNav }: { id: string; nav: LibraryNav; setNav
           <Tag key={tag}>{tag}</Tag>
         ))}
         <span className="tb-hint">
-          Version {doc.version}, updated {when(doc.updatedAt)} by {doc.updatedBy}
+          Version {doc.version}, updated {when(doc.updatedAt)} by {authorName(doc.updatedBy)}
         </span>
       </div>
       {doc.summary ? <p className="tb-soft">{doc.summary}</p> : null}
@@ -572,7 +590,7 @@ function DocumentView({ id, nav, setNav }: { id: string; nav: LibraryNav; setNav
                     </button>
                   </td>
                   <td>{rev.title || "Untitled"}</td>
-                  <td>{rev.createdBy}</td>
+                  <td>{authorName(rev.createdBy)}</td>
                   <td className="num">{when(rev.createdAt)}</td>
                 </tr>
               ))}
@@ -607,7 +625,7 @@ function DocumentView({ id, nav, setNav }: { id: string; nav: LibraryNav; setNav
         </div>
       </Section>
 
-      <Comments documentId={id} comments={data.comments} onChanged={load} onError={setError} />
+      <Comments documentId={id} comments={data.comments} authorName={authorName} onChanged={load} onError={setError} />
 
       <EditDialog open={editing} doc={doc} busy={busy} onClose={() => setEditing(false)} onSave={save} />
       <ConfirmDelete
@@ -663,7 +681,13 @@ function LinkList({ heading, links, onOpen, onDelete }: { heading: string; links
   );
 }
 
-function Comments({ documentId, comments, onChanged, onError }: { documentId: string; comments: Comment[]; onChanged: () => Promise<void>; onError: (message: string | null) => void }) {
+function Comments({
+  documentId,
+  comments,
+  authorName,
+  onChanged,
+  onError,
+}: { documentId: string; comments: Comment[]; authorName: (id: string) => string; onChanged: () => Promise<void>; onError: (message: string | null) => void }) {
   const [body, setBody] = useState("");
   const [replyTo, setReplyTo] = useState<Comment | null>(null);
   const [busy, setBusy] = useState(false);
@@ -689,7 +713,7 @@ function Comments({ documentId, comments, onChanged, onError }: { documentId: st
     childrenOf(parent).map((c) => (
       <li key={c.id} className="kn-comment" style={{ "--depth": Math.min(depth, 4) } as CSSProperties}>
         <div className="tb-hint">
-          {c.createdBy}, {when(c.createdAt)}
+          {authorName(c.createdBy)}, {when(c.createdAt)}
         </div>
         <p className="kn-wrap">{c.body}</p>
         <div>
@@ -705,7 +729,7 @@ function Comments({ documentId, comments, onChanged, onError }: { documentId: st
     <Section title="Comments">
       <section className="tb-stack" aria-label="Comments">
         {comments.length ? <ul className="kn-rows">{render(null, 0)}</ul> : <p className="tb-soft">No comments yet.</p>}
-        <Field label={replyTo ? `Reply to ${replyTo.createdBy}` : "Add a comment"}>
+        <Field label={replyTo ? `Reply to ${authorName(replyTo.createdBy)}` : "Add a comment"}>
           <Textarea rows={3} value={body} onChange={(event) => setBody(event.target.value)} />
         </Field>
         <div className="tb-ctas">

@@ -2,6 +2,7 @@
 // Authorization happens in the handlers (SDK scope access per area); this module enforces data integrity:
 // parents in the same collection without cycles, links inside one area, optimistic concurrency, soft delete.
 // Every change to a document writes its projection outbox row in the same transaction.
+import { createHash } from "node:crypto";
 import { opaqueDigest } from "@opt2-tealbrick/manifest";
 import type { Db } from "@opt2-tealbrick/spec/sdk";
 import { newId, slugify } from "../ids.ts";
@@ -35,6 +36,17 @@ export interface Document {
   updatedBy: string;
   createdAt: number;
   updatedAt: number;
+  /** where the memory came from (C336 M1); null = written in Knowledge itself */
+  sourceRef: string | null;
+  sourceUrl: string | null;
+}
+
+/** The citation of a canonical document (C336 M1): every recall hit carries one. */
+export interface Citation {
+  ref: string;
+  url?: string;
+  author: string;
+  at: number;
 }
 
 export interface TreeNode {
@@ -91,7 +103,30 @@ function toDocument(row: Row): Document {
     updatedBy: String(row.updated_by),
     createdAt: num(row.created_at),
     updatedAt: num(row.updated_at),
+    sourceRef: str(row.source_ref),
+    sourceUrl: str(row.source_url),
   };
+}
+
+/**
+ * Per-area dedupe key of a saved memory (C336 M3): sha256 of the normalised text (NFC, lower case, runs of white space
+ * as one space, trimmed) and the area. The harness hooks compute the same key for their batch idempotency key.
+ */
+export function memoryDigest(text: string, area: string): string {
+  const normalised = text.normalize("NFC").toLowerCase().replace(/\s+/gu, " ").trim();
+  return createHash("sha256").update(`${normalised}\n${area}`).digest("hex");
+}
+
+/** A document cites its imported source when it has one, else itself (it was written in Knowledge). */
+export function citationOf(row: Row): Citation {
+  const ref = str(row.source_ref) ?? `knowledge:document/${String(row.id)}`;
+  const url = str(row.source_url);
+  return { ref, ...(url ? { url } : {}), author: String(row.created_by), at: num(row.updated_at) };
+}
+
+/** The citation of a loaded document (same rule as `citationOf`). */
+export function documentCitation(doc: Document): Citation {
+  return { ref: doc.sourceRef ?? `knowledge:document/${doc.id}`, ...(doc.sourceUrl ? { url: doc.sourceUrl } : {}), author: doc.createdBy, at: doc.updatedAt };
 }
 
 /** THE stored tag list of a write (normalised, unique, ≤ 20): G5 write checks (§18.4 b) predict the result with it. */
@@ -163,6 +198,7 @@ export interface SearchHit {
   tags: string[];
   updatedAt: number;
   rank: number;
+  citation: Citation;
 }
 
 export class DocumentStore {
@@ -289,6 +325,11 @@ export class DocumentStore {
     status?: DocumentStatus;
     tags?: string[];
     actor: string;
+    /** provenance of an imported or saved memory (C336 M1) */
+    sourceRef?: string;
+    sourceUrl?: string;
+    /** per-area dedupe key (C336 M3); a second live document with the same key in the area is refused */
+    contentDigest?: string;
     /** G5 (SDK-API §18.4 a): a parent the caller's narrowing hides answers exactly like a missing one */
     hidden?: (doc: Document) => boolean;
   }): Document {
@@ -310,10 +351,10 @@ export class DocumentStore {
       const status = input.status ?? "draft";
       this.db
         .prepare(
-          `INSERT INTO kn_documents (id, area_id, collection_id, parent_id, title, slug, summary, body, status, tags, version, created_by, updated_by, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)`,
+          `INSERT INTO kn_documents (id, area_id, collection_id, parent_id, title, slug, summary, body, status, tags, version, created_by, updated_by, created_at, updated_at, source_ref, source_url, content_digest)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)`,
         )
-        .run(id, input.area, collection.id, input.parentId ?? null, title, slugify(title), summary, body, status, tags, input.actor, input.actor, at, at);
+        .run(id, input.area, collection.id, input.parentId ?? null, title, slugify(title), summary, body, status, tags, input.actor, input.actor, at, at, input.sourceRef ?? null, input.sourceUrl ?? null, input.contentDigest ?? null);
       this.writeRevision(id, 1, title, summary, body, status, tags, input.actor, at);
       this.db.prepare("UPDATE kn_collections SET updated_at = ? WHERE id = ?").run(at, collection.id);
       const doc = this.getDocument(id) as Document;
@@ -345,9 +386,18 @@ export class DocumentStore {
       const at = this.now();
       const version = current.version + 1;
       const tags = JSON.stringify(tagList);
+      // QA-KNOW17-3: a memory with a dedupe key keeps it in step with its body; when another live memory of the area already
+      // has the new key, this one gives its key up (a later remember of that text finds the other one)
+      const row = this.db.prepare("SELECT content_digest FROM kn_documents WHERE id = ?").get(id);
+      let digest = row?.content_digest === null || row?.content_digest === undefined ? null : String(row.content_digest);
+      if (digest !== null && body !== current.body) {
+        const next = memoryDigest(body, current.area);
+        const taken = this.db.prepare("SELECT 1 FROM kn_documents WHERE area_id = ? AND content_digest = ? AND id <> ? AND deleted_at IS NULL").get(current.area, next, id);
+        digest = taken ? null : next;
+      }
       this.db
-        .prepare("UPDATE kn_documents SET title = ?, slug = ?, summary = ?, body = ?, status = ?, tags = ?, version = ?, updated_by = ?, updated_at = ? WHERE id = ? AND version = ?")
-        .run(title, slugify(title), summary, body, status, tags, version, actor, at, id, current.version);
+        .prepare("UPDATE kn_documents SET title = ?, slug = ?, summary = ?, body = ?, status = ?, tags = ?, version = ?, updated_by = ?, updated_at = ?, content_digest = ? WHERE id = ? AND version = ?")
+        .run(title, slugify(title), summary, body, status, tags, version, actor, at, digest, id, current.version);
       this.writeRevision(id, version, title, summary, body, status, tags, actor, at);
       const doc = this.getDocument(id) as Document;
       this.enqueue(doc.area, doc.id, "upsert");
@@ -484,6 +534,31 @@ export class DocumentStore {
     return out;
   }
 
+  /** Tags and citation of each live canonical document (C336 M1). Missing ids are absent from the map. */
+  citationsOf(ids: readonly string[]): Map<string, { tags: string[]; citation: Citation }> {
+    const out = new Map<string, { tags: string[]; citation: Citation }>();
+    const unique = [...new Set(ids)];
+    for (let i = 0; i < unique.length; i += 200) {
+      const chunk = unique.slice(i, i + 200);
+      const rows = this.db
+        .prepare(`SELECT id, tags, source_ref, source_url, created_by, updated_at FROM kn_documents WHERE deleted_at IS NULL AND id IN (${chunk.map(() => "?").join(", ")})`)
+        .all(...chunk);
+      for (const row of rows) out.set(String(row.id), { tags: JSON.parse(String(row.tags)) as string[], citation: citationOf(row) });
+    }
+    return out;
+  }
+
+  /** Run `fn` in one store transaction (a batch of writes is all or nothing). */
+  transaction<T>(fn: () => T): T {
+    return this.db.transaction(fn);
+  }
+
+  /** The live document of an area with this dedupe key, or null (C336 M3). */
+  findByDigest(area: string, digest: string): Document | null {
+    const row = this.db.prepare("SELECT * FROM kn_documents WHERE area_id = ? AND content_digest = ? AND deleted_at IS NULL").get(area, digest);
+    return row ? toDocument(row) : null;
+  }
+
   // ── search ──
 
   /** Ranked (or newest-first) hits in the listed areas; with `tags` only documents that pass (G5 narrowing). */
@@ -506,6 +581,7 @@ export class DocumentStore {
       tags: JSON.parse(String(row.tags)) as string[],
       updatedAt: num(row.updated_at),
       rank: num(row.rank),
+      citation: citationOf(row),
     });
     if (!match) {
       return this.db
