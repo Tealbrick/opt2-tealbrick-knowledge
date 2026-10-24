@@ -10,6 +10,7 @@ starts the C6 helper). No upstream file is changed or vendored.
 | `gbrain` | garrytan/gbrain at commit 36121271 (v0.60.424.0), built on `oven/bun` | `entrypoint.sh` (env), `boot.ts` (C69: init + migrations under a crash-safe lock, status `/health`, then serve), `helper.ts` (C6: `POST /sources` runs upstream's trusted `gbrain sources add`) |
 | `gbrain-db` | `pgvector/pgvector:0.8.1-pg17` | dump/restore scripts for the SDK backup runner |
 | `notebook` | `lfnovo/open_notebook:1.14.0` | `entrypoint.sh` (composes `SURREAL_URL` from the private host) |
+| `deep` | helixdb/helix-foundry at commit 52cfaa3 + HelixDB server v0.0.12 (binary from the pinned image digest) on node:24-bookworm-slim | `supervisor.ts`: HelixDB, foundry's executor and API (inline worker) on loopback only; one token proxy on `$PORT` (the only private-network listener; `x-deep-token` → foundry workspace token); `/health`. Setting `deep` (off by default). HelixDB storage upgrades are one-way: moving its pin is a migration |
 | `notebook-db` | `surrealdb/surrealdb:v2.6.5` (binary copied onto node:24-slim so `tb-exec` can run) | nothing else |
 
 `tb-exec` (`dist/exec/cli.js`) comes from the `@opt2-tealbrick/miniapp-sdk` release tarball, installed with `npm ci --ignore-scripts`

@@ -42,6 +42,10 @@ Settings (all `mutable:false`, set at deploy): `engine` (gbrain; hindsight is di
 
 Companion services (built from `services/<id>/Dockerfile`, started with the SDK `tb-exec` wrapper, which fetches declared keys and runs backup dump and restore): `gbrain-db` (pgvector on Postgres 17), `gbrain` (upstream commit pinned, a Tealbrick boot wrapper with a crash-safe migration lock and a helper), and, when research is on, `notebook-db` (SurrealDB under the Business Source License 1.1, C155) and `notebook` (Open Notebook). Upstream stays unmodified.
 
+## Deep knowledge (C336 F4, 0.1.27)
+
+Setting `deep` (default off, set at deploy) adds the companion service `deep` (helix-foundry at a pinned commit, unmodified, plus the HelixDB server from its pinned image). `services/deep/supervisor.ts` starts HelixDB, foundry's executor and API with its worker inline, all on loopback; the only private-network listener is a token proxy that needs `Authorization: Bearer <DEEP_ACCESS_TOKEN>` (generated secret), forwards only `/api/`, drops Host/Origin/cookies, and passes a foundry workspace token from `x-deep-token`. No model endpoint is reachable until a provider is configured. The app's `DeepClient` probes `/health` (attention `deep_missing` / `deep_unreachable`, retried every minute while unhealthy). Data tools (`deep_space` scope, dataset narrowing v2) and the Connect lease path follow in F5/F6. Backup and restore of the deep volume are not built yet (before stable).
+
 ## Data
 
 - **Stored:** Migration 0001: `kn_areas`, `kn_collections`, `kn_documents` (title, slug, summary, body, status), `kn_revisions`, `kn_comments`, `kn_links`, `kn_documents_fts` (FTS5), `kn_projection` (outbox to the engine), `kn_state`. Sealed: registered engine client credentials. Engine data lives on the service volumes.
@@ -64,7 +68,7 @@ App port 5310, 0.5 cpu, 768 MB, data 5 GB plus backup 20 GB. Engine only: about 
 
 ## Pinned packages
 
-Stable 0.1.21 and main (0.1.26): miniapp-sdk 0.1.25, spec 0.1.39. Both: manifest 0.1.18, conformance 0.1.18, ui 0.2.4. The `tb-exec` service package pins miniapp-sdk 0.1.12.
+Stable 0.1.21 and main (0.1.27): miniapp-sdk 0.1.25, spec 0.1.39. Both: manifest 0.1.18, conformance 0.1.18, ui 0.2.4. The `tb-exec` service package pins miniapp-sdk 0.1.12.
 
 All `@opt2-tealbrick/*` pins use dist-host tarball URLs. Upgrade safety (SDK 0.1.25: pre-update snapshot, migration lock, failed mode) is in this app only where the pin above says 0.1.25 (the plain version 0.1.21 is on the dev channel; its qa1 soak is the gate for stable, C221, PROMOTE-STABLE §7). All RS-3 apps pin SDK 0.1.25 (dev channel; stable after the qa1 soak of the plain version). Core restores the snapshot on an automatic rollback (portal-core#1, E3). This Core is live since 2026-10-16 22:37:58Z (Core 29ae2fe).
 
