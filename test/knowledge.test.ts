@@ -693,7 +693,8 @@ test("QA-KN027-1: a probe that meets GBrain's boot supervisor (503 starting) is 
     assert.equal(knowledge.current()?.areas.get("company")?.sourceReady, true);
     await new Promise((resolve) => setTimeout(resolve, 60));
     assert.notEqual(knowledge.attention()?.code, "memory_engine_failing", "a booting engine is not reported as failing");
-    assert.equal(knowledge.engineStatus().state, "unknown");
+    assert.equal(knowledge.engineStatus().state, "starting");
+    assert.equal(knowledge.attention()?.code, "memory_engine_starting");
     gbrain.booting = false; // GBrain serves
     for (let i = 0; i < 300 && knowledge.engineStatus().state !== "ok"; i++) await new Promise((resolve) => setTimeout(resolve, 10));
     assert.equal(knowledge.engineStatus().state, "ok", "the quick re-probe sees the engine once it serves (no 10 min wait)");
@@ -702,6 +703,47 @@ test("QA-KN027-1: a probe that meets GBrain's boot supervisor (503 starting) is 
   } finally {
     gbrain.booting = false;
     knowledge.stop();
+  }
+});
+
+test("QA-KN027-1: GBrain answers 503 for the first N calls (any path) → the engine ends ready; past the start window it shows failing", async () => {
+  const db = memoryDb();
+  const scopes = new FakeScopes();
+  const env = { KNOWLEDGE_ENGINE: "gbrain", KNOWLEDGE_GBRAIN_URL: gbrain.url, KNOWLEDGE_GBRAIN_ADMIN_TOKEN: gbrain.adminToken };
+  const { definition, knowledge } = knowledgeDefinition(env, TestError, { drainIntervalMs: 0, engineProbeMs: 600_000, engineReprobeMs: 5, engineReprobeMaxMs: 40, provisionRetryMs: 5 });
+  const callServiceHelper = (async (_service: string, _path: string, body: Json) => {
+    gbrain.sources.add(String((body as Record<string, unknown>).id));
+    return {};
+  }) as OpContext["callServiceHelper"];
+  const log = { debug() {}, info() {}, warn() {}, error() {} };
+  const seen: (string | null)[] = [];
+  gbrain.fail503 = 6;
+  try {
+    await definition.onStart({ db, secrets: memorySecrets(), log: log as never, scopes: scopes.asStore(), getKey: async () => "sk-test-provider-key", callServiceHelper, statusChanged() { seen.push(knowledge.attention()?.code ?? null); } });
+    for (let i = 0; i < 400 && knowledge.engineStatus().state !== "ok"; i++) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(gbrain.fail503, 0, "all N 503s were consumed");
+    assert.equal(knowledge.engineStatus().state, "ok", "the engine ends ready");
+    assert.equal(knowledge.attention(), null);
+    assert.ok(!seen.includes("memory_engine_failing"), `never reported failing: ${JSON.stringify(seen)}`);
+  } finally {
+    gbrain.fail503 = 0;
+    knowledge.stop();
+  }
+  // an engine that never comes up is "starting" only for the start window, then failing (and still re-probed)
+  const late = knowledgeDefinition(env, TestError, { drainIntervalMs: 0, engineProbeMs: 600_000, engineReprobeMs: 5, engineReprobeMaxMs: 20, engineStartingMaxMs: 60, provisionRetryMs: 5 });
+  const db2 = memoryDb();
+  gbrain.booting = true;
+  try {
+    await late.definition.onStart({ db: db2, secrets: memorySecrets(), log: log as never, scopes: scopes.asStore(), getKey: async () => "sk-test-provider-key", callServiceHelper, statusChanged() {} });
+    for (let i = 0; i < 400 && late.knowledge.attention()?.code !== "memory_engine_failing"; i++) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(late.knowledge.attention()?.code, "memory_engine_failing");
+    assert.deepEqual(late.knowledge.engineStatus().detail, ["gbrain_not_started"]);
+    gbrain.booting = false;
+    for (let i = 0; i < 400 && late.knowledge.engineStatus().state !== "ok"; i++) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(late.knowledge.engineStatus().state, "ok", "a sticky failure clears itself when GBrain comes back");
+  } finally {
+    gbrain.booting = false;
+    late.knowledge.stop();
   }
 });
 

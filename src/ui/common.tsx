@@ -144,7 +144,7 @@ export interface AreaOption {
 
 /** QA F89: the memory engine's last known state; `attention` is set while the owner should act. */
 export interface EngineState {
-  state: "unknown" | "ok" | "degraded" | "failing";
+  state: "unknown" | "starting" | "ok" | "degraded" | "failing";
   attention: { code: string; reason: string } | null;
 }
 
