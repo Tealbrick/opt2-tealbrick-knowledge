@@ -1,6 +1,6 @@
 {
   "name": "opt2-tealbrick-knowledge",
-  "version": "0.1.28",
+  "version": "0.1.28-dev.1",
   "private": true,
   "description": "Teal Brick Knowledge miniapp (opt2): canonical documents and walled memory areas over pinned upstream engines.",
   "license": "Apache-2.0",
