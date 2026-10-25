@@ -21,6 +21,21 @@ test("failureCause: error name plus the cause code, sanitized and short", () => 
   assert.equal(failureCause("x"), "string");
 });
 
+test("QA-KN027-1: 502/503 answers, refused or reset connections and timeouts read as gbrain_starting; other failures do not", async () => {
+  const { transientError, transientResponse } = await import("../src/engines/gbrain/client.ts");
+  assert.ok(transientResponse(new Response("{}", { status: 503 })) && transientResponse(new Response("", { status: 502 })));
+  assert.ok(!transientResponse(new Response("", { status: 401 })) && !transientResponse(new Response("", { status: 500 })));
+  const net = (code: string) => new TypeError("fetch failed", { cause: Object.assign(new Error("x"), { code }) });
+  for (const code of ["ECONNREFUSED", "ECONNRESET", "UND_ERR_SOCKET"]) assert.ok(transientError(net(code)), code);
+  assert.ok(transientError(new DOMException("t", "TimeoutError")));
+  assert.ok(!transientError(net("ENOTFOUND")) && !transientError(new Error("x")));
+  let n = 0;
+  const flaky = (async () => (n++ < 1 ? new Response("{}", { status: 502 }) : Response.json({ page_count: 1 }, { headers: { "set-cookie": "gbrain_admin=a; Path=/admin" } }))) as typeof fetch;
+  const client = new GBrainClient({ baseUrl: "http://gbrain:3131", adminToken: TOKEN, store: memoryStore() as never, fetch: flaky });
+  await assert.rejects(client.fullStats(), (e: unknown) => e instanceof GBrainServiceError && e.code === "gbrain_starting");
+  assert.equal((await client.fullStats()).page_count, 1);
+});
+
 test("admin login failures are reported once per distinct failure; the body and the token never reach the log", async () => {
   const seen: GBrainFailure[] = [];
   let mode: "refused" | "401" | "no_cookie" | "ok" = "refused";
@@ -32,9 +47,10 @@ test("admin login failures are reported once per distinct failure; the body and 
   }) as typeof fetch;
   const client = new GBrainClient({ baseUrl: "http://gbrain:3131", adminToken: TOKEN, store: memoryStore() as never, fetch: fetcher });
   client.onFailure = (f) => seen.push(f);
-  for (let i = 0; i < 2; i++) await assert.rejects(client.fullStats(), (e: unknown) => e instanceof GBrainServiceError && e.code === "gbrain_admin_unavailable");
+  // a refused connection means "not up yet" (QA-KN027-1), logged once for two attempts
+  for (let i = 0; i < 2; i++) await assert.rejects(client.fullStats(), (e: unknown) => e instanceof GBrainServiceError && e.code === "gbrain_starting");
   mode = "401";
-  await assert.rejects(client.fullStats());
+  await assert.rejects(client.fullStats(), (e: unknown) => e instanceof GBrainServiceError && e.code === "gbrain_admin_unavailable");
   mode = "no_cookie";
   await assert.rejects(client.fullStats());
   mode = "ok";
