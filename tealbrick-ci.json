@@ -10,7 +10,7 @@
       "product": "knowledge",
       "kind": "app",
       "manifest": "tealbrick.manifest.json",
-      "upgradeFrom": "<=0.1.24"
+      "upgradeFrom": "<=0.1.24 || 0.1.27"
     },
     {
       "name": "opt2-tealbrick-knowledge-gbrain-db",

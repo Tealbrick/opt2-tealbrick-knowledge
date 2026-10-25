@@ -46,6 +46,7 @@ export function knowledgeDefinition(env: Record<string, string | undefined>, TbE
       },
       // After boot (and the claim): the company area exists, engine resources are provisioned, the outbox drains.
       async onStart(ctx) {
+        knowledge.engineLog = (msg, fields) => ctx.log.warn(msg, fields);
         const services = knowledge.bind(ctx.db, ctx.secrets);
         await services.areas.ensureShared(ctx.scopes);
         await knowledge.provision(services, ctx as never);
