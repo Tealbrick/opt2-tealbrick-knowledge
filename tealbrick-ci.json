@@ -1,5 +1,5 @@
 {
-  "$schema": "https://raw.githubusercontent.com/Tealbrick/opt2-tealbrick-platform/ci-v9.9/ci/tealbrick-ci.schema.json",
+  "$schema": "https://raw.githubusercontent.com/Tealbrick/opt2-tealbrick-platform/ci-v9.21/ci/tealbrick-ci.schema.json",
   "kind": "miniapp",
   "paths": [
     "."
@@ -9,7 +9,8 @@
       "name": "opt2-tealbrick-knowledge",
       "product": "knowledge",
       "kind": "app",
-      "manifest": "tealbrick.manifest.json"
+      "manifest": "tealbrick.manifest.json",
+      "upgradeFrom": "<=0.1.24"
     },
     {
       "name": "opt2-tealbrick-knowledge-gbrain-db",
