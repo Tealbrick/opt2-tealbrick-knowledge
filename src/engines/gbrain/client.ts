@@ -24,7 +24,7 @@ export interface ClientStore {
 }
 
 export class GBrainServiceError extends Error {
-  readonly code: "area_binding_required" | "gbrain_admin_unavailable" | "gbrain_client_registration_failed" | "gbrain_token_unavailable";
+  readonly code: "area_binding_required" | "gbrain_admin_unavailable" | "gbrain_client_registration_failed" | "gbrain_starting" | "gbrain_token_unavailable";
   constructor(code: GBrainServiceError["code"], message?: string) {
     super(message ?? code);
     this.code = code;
@@ -78,6 +78,16 @@ export function failureCause(error: unknown): string {
   return links.join(" <- ").slice(0, 400);
 }
 
+/**
+ * QA-KN027-1: until GBrain serves, the companion's boot supervisor answers EVERY path with 503 {"status":"starting"}
+ * (services/gbrain/boot.ts). Such an answer means "not up yet", not "broken": callers retry instead of failing.
+ */
+async function bootStarting(response: Response): Promise<boolean> {
+  if (response.status !== 503) return false;
+  const body = (await response.clone().json().catch(() => null)) as { status?: unknown } | null;
+  return body?.status === "starting";
+}
+
 export class GBrainClient {
   readonly baseUrl: string;
   private readonly adminToken: string;
@@ -126,6 +136,11 @@ export class GBrainClient {
       this.failed({ stage: "admin_login", cause: failureCause(error) });
       throw new GBrainServiceError("gbrain_admin_unavailable");
     }
+    if (await bootStarting(response)) {
+      await response.body?.cancel();
+      this.failed({ stage: "admin_login", status: 503, cause: "engine_starting" });
+      throw new GBrainServiceError("gbrain_starting");
+    }
     const cookie = response.headers.get("set-cookie")?.split(";")[0];
     await response.body?.cancel();
     if (!response.ok || !cookie?.startsWith("gbrain_admin=")) {
@@ -153,6 +168,10 @@ export class GBrainClient {
       if (error instanceof GBrainServiceError) throw error;
       this.failed({ stage: "register_client", cause: failureCause(error) });
       throw new GBrainServiceError("gbrain_client_registration_failed");
+    }
+    if (await bootStarting(response)) {
+      await response.body?.cancel();
+      throw new GBrainServiceError("gbrain_starting");
     }
     const body = (await response.json().catch(() => null)) as Record<string, unknown> | null;
     if (response.status === 401) this.adminCookie = null;
@@ -185,6 +204,10 @@ export class GBrainClient {
     } catch (error) {
       this.failed({ stage: "token", cause: failureCause(error) });
       throw new GBrainServiceError("gbrain_token_unavailable");
+    }
+    if (await bootStarting(response)) {
+      await response.body?.cancel();
+      throw new GBrainServiceError("gbrain_starting");
     }
     const body = (await response.json().catch(() => null)) as Record<string, unknown> | null;
     if (response.status === 400 || response.status === 401) return null; // revoked or unknown client: re-register once

@@ -72,6 +72,8 @@ export interface Attention {
 
 /** Engine probe interval: one cheap one-row query on the company area (embeds a 4-word query when embeddings work). */
 export const ENGINE_PROBE_MS = 10 * 60_000;
+/** QA-KN027-1: after a probe that did not reach the engine, re-probe after this (doubling, capped at ENGINE_PROBE_MS). */
+export const ENGINE_REPROBE_MS = 5_000;
 /** QA R-2: attention code when the provider refuses the engine's embedding calls (the key is set but rejected). */
 export const KEY_REJECTED = "memory_engine_key_rejected";
 /** C296: background provisioning retry while an area lacks its engine source (the engine service may start after Knowledge). */
@@ -93,6 +95,8 @@ export interface KnowledgeOptions {
   drainIntervalMs?: number;
   /** engine probe interval (default ENGINE_PROBE_MS); 0 probes once at start only */
   engineProbeMs?: number;
+  /** first quick re-probe after a probe that did not reach the engine (default ENGINE_REPROBE_MS; tests) */
+  engineReprobeMs?: number;
   /** first background provisioning retry delay (default PROVISION_RETRY_MS, doubles up to PROVISION_RETRY_MAX_MS) */
   provisionRetryMs?: number;
 }
@@ -107,6 +111,8 @@ export class Knowledge {
   private engineHealth: EngineHealth = { state: "unknown", detail: [], at: 0 };
   private statusChanged: (() => void) | null = null;
   private probeTimer: ReturnType<typeof setInterval> | null = null;
+  private reprobeTimer: ReturnType<typeof setTimeout> | null = null;
+  private reprobeDelay = 0;
   private pendingRequeue = false;
   private provisionTimer: ReturnType<typeof setTimeout> | null = null;
   private provisionAttempt = 0;
@@ -165,6 +171,8 @@ export class Knowledge {
     this.timer = null;
     if (this.probeTimer) clearInterval(this.probeTimer);
     this.probeTimer = null;
+    if (this.reprobeTimer) clearTimeout(this.reprobeTimer);
+    this.reprobeTimer = null;
     if (this.provisionTimer) clearTimeout(this.provisionTimer);
     this.provisionTimer = null;
     this.stopped = true;
@@ -180,6 +188,11 @@ export class Knowledge {
     const changed = next.state !== this.engineHealth.state || detail.join(",") !== this.engineHealth.detail.join(",");
     this.engineHealth = { state: next.state, detail, at: (this.opts.now ?? Date.now)() };
     if (changed) this.statusChanged?.();
+    if (next.state === "ok" || next.state === "degraded") {
+      this.reprobeDelay = 0;
+      if (this.reprobeTimer) clearTimeout(this.reprobeTimer);
+      this.reprobeTimer = null;
+    } else this.armReprobe();
   }
 
   engineStatus(): EngineHealth {
@@ -245,8 +258,27 @@ export class Knowledge {
       this.noteEngine(degraded.length ? { state: "degraded", detail: degraded } : { state: "ok", detail: [] });
     } catch (error) {
       const code = error && typeof error === "object" && "code" in error ? String((error as { code: unknown }).code).slice(0, 64) : "engine_error";
-      this.noteEngine({ state: "failing", detail: [code] });
+      // An engine that is still starting is not failing: no owner attention while it boots (the re-probe follows it up).
+      this.noteEngine(code === "gbrain_starting" ? { state: "unknown", detail: [] } : { state: "failing", detail: [code] });
     }
+  }
+
+  /**
+   * QA-KN027-1: a probe or recall that did not reach the engine (failing, or still starting) is re-probed soon, doubling
+   * from ENGINE_REPROBE_MS up to ENGINE_PROBE_MS, until the engine answers (ok/degraded). Before 0.1.28 the next look was
+   * the 10 min probe, so one 503 from GBrain's boot supervisor kept "memory engine failing" for up to 10 min.
+   */
+  private armReprobe(): void {
+    if (this.stopped || this.reprobeTimer || !this.services?.engine) return;
+    const interval = this.opts.engineProbeMs ?? ENGINE_PROBE_MS;
+    if (interval <= 0) return;
+    this.reprobeDelay = Math.min(this.reprobeDelay ? this.reprobeDelay * 2 : (this.opts.engineReprobeMs ?? ENGINE_REPROBE_MS), interval);
+    this.reprobeTimer = setTimeout(() => {
+      this.reprobeTimer = null;
+      const services = this.services;
+      if (!this.stopped && services) void this.probeEngine(services).catch(() => undefined);
+    }, this.reprobeDelay);
+    this.reprobeTimer.unref();
   }
 
   /** Probe now and every ENGINE_PROBE_MS; `statusChanged` pushes the app status when the engine state changes. */
