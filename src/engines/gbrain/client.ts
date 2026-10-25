@@ -55,12 +55,27 @@ export interface GBrainFailure {
   cause?: string;
 }
 
-/** The error name and the code of its cause chain (e.g. `TypeError/ECONNREFUSED`, `TimeoutError`); at most 80 characters. */
+/**
+ * The error chain for the log, outermost first, at most 5 links: name, code, errno, syscall, address, port of each
+ * (undici puts the network error in `cause`, e.g. `TypeError` <- `Error code=ECONNREFUSED syscall=connect address=fd12::1 port=3131`).
+ * Never the message: it can carry a URL or an upstream body. Each field is sanitized and short; the whole string at most 400.
+ */
 export function failureCause(error: unknown): string {
-  const name = error instanceof Error ? error.name : typeof error;
-  const cause = error instanceof Error ? (error.cause as { code?: unknown; name?: unknown } | undefined) : undefined;
-  const code = cause && typeof cause === "object" ? String(cause.code ?? cause.name ?? "") : "";
-  return (code ? `${name}/${code}` : name).replace(/[^A-Za-z0-9_./:-]/gu, "").slice(0, 80);
+  const clean = (v: unknown, n: number) => String(v).replace(/[^A-Za-z0-9_.:/[\]-]/gu, "").slice(0, n);
+  const links: string[] = [];
+  let current: unknown = error;
+  for (let i = 0; current !== undefined && current !== null && i < 5; i++) {
+    if (typeof current !== "object") {
+      links.push(clean(typeof current, 16));
+      break;
+    }
+    const c = current as { name?: unknown; code?: unknown; errno?: unknown; syscall?: unknown; address?: unknown; port?: unknown; cause?: unknown; constructor?: { name?: unknown } };
+    const parts = [clean(c.name ?? c.constructor?.name ?? "object", 40)];
+    for (const key of ["code", "errno", "syscall", "address", "port"] as const) if (c[key] !== undefined && c[key] !== null) parts.push(`${key}=${clean(c[key], key === "address" ? 64 : 32)}`);
+    links.push(parts.join(" "));
+    current = c.cause;
+  }
+  return links.join(" <- ").slice(0, 400);
 }
 
 export class GBrainClient {

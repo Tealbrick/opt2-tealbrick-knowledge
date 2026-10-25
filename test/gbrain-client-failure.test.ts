@@ -11,8 +11,13 @@ const memoryStore = () => {
 
 test("failureCause: error name plus the cause code, sanitized and short", () => {
   const e = new TypeError("fetch failed", { cause: Object.assign(new Error("connect ECONNREFUSED fd12::1:3131"), { code: "ECONNREFUSED" }) });
-  assert.equal(failureCause(e), "TypeError/ECONNREFUSED");
-  assert.equal(failureCause(new DOMException("timed out", "TimeoutError")), "TimeoutError");
+  assert.equal(failureCause(e), "TypeError <- Error code=ECONNREFUSED");
+  const net = Object.assign(new Error("connect ECONNREFUSED fd12::1:3131 secret-body"), { code: "ECONNREFUSED", errno: -111, syscall: "connect", address: "fd12::1", port: 3131 });
+  const undiciLike = Object.assign(new Error("other side closed"), { name: "SocketError", code: "UND_ERR_SOCKET", cause: net });
+  const wrapped = new TypeError("fetch failed http://gbrain/admin/login", { cause: undiciLike });
+  assert.equal(failureCause(wrapped), "TypeError <- SocketError code=UND_ERR_SOCKET <- Error code=ECONNREFUSED errno=-111 syscall=connect address=fd12::1 port=3131");
+  assert.ok(!failureCause(wrapped).includes("secret") && !failureCause(wrapped).includes("http"));
+  assert.equal(failureCause(new DOMException("timed out", "TimeoutError")), "TimeoutError code=23");
   assert.equal(failureCause("x"), "string");
 });
 
@@ -35,7 +40,7 @@ test("admin login failures are reported once per distinct failure; the body and 
   mode = "ok";
   assert.equal((await client.fullStats()).page_count, 3);
   assert.deepEqual(seen, [
-    { stage: "admin_login", cause: "TypeError/ECONNREFUSED" },
+    { stage: "admin_login", cause: "TypeError <- Error code=ECONNREFUSED" },
     { stage: "admin_login", status: 401, cause: "http_status" },
     { stage: "admin_login", status: 200, cause: "no_admin_cookie" },
   ]);
