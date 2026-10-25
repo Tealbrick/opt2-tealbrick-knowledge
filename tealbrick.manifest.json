@@ -5,7 +5,7 @@
   "name": "Knowledge",
   "summary": "Memory and documents for your agents: a private memory area per agent, a shared company area, research notebooks.",
   "description": "Knowledge gives every connected agent its own memory area and a shared company area. Agents remember and recall through memory tools; documents keep revisions, comments and links. Memory runs on GBrain, research on Open Notebook, both inside your own deployment.",
-  "version": "0.1.27",
+  "version": "0.1.28",
   "sdkMajor": 1,
   "publisher": {
     "name": "Tealbrick"
