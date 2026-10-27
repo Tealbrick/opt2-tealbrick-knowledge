@@ -2013,6 +2013,184 @@
       "audience": "agent"
     },
     {
+      "id": "deep_search",
+      "title": "Search company data (Foundry)",
+      "description": "Find rows of company tables (for example orders, invoices, customers) and company documents that Foundry holds, by words: names, ids, statuses. No model is used. Only data from documents you may read. Each result has `ref` (open the source document with get) and `source` (the citation).",
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "query"
+        ],
+        "properties": {
+          "query": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 300
+          },
+          "area": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]{1,63}$",
+            "description": "Area id. Omit to search every Foundry area you can read."
+          },
+          "table": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "description": "Only this table (its name as deep_status lists it)."
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 50
+          }
+        }
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "results": {
+            "type": "array"
+          },
+          "areas": {
+            "type": "array"
+          },
+          "partial": {
+            "type": "boolean"
+          }
+        }
+      },
+      "crud": [
+        "read"
+      ],
+      "effect": "read",
+      "scopeType": "area",
+      "idempotency": "none",
+      "receipt": false,
+      "audience": "agent"
+    },
+    {
+      "id": "deep_ask",
+      "title": "Ask company data (Foundry)",
+      "description": "Ask a question about company data (sums, counts, lists: \"MRR last month\", \"who is past due\"). Foundry's analyst writes and runs a read-only SQL query over the area's tables and documents with the deployment's reasoning model, and answers with the rows, the SQL and citations to Knowledge documents. Without a reasoning model it says so: use deep_search. A long question may still be running: call again with the runId.",
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "question": {
+            "type": "string",
+            "minLength": 5,
+            "maxLength": 2000
+          },
+          "area": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]{1,63}$",
+            "description": "Area id. Omit for the company area."
+          },
+          "runId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9-]{8,100}$",
+            "description": "Continue waiting for an earlier deep_ask that was still running."
+          }
+        }
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "area": {
+            "type": "string"
+          },
+          "answered": {
+            "type": "boolean"
+          },
+          "status": {
+            "type": "string"
+          },
+          "runId": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          },
+          "sql": {
+            "type": "string"
+          },
+          "rows": {
+            "type": "array"
+          },
+          "total": {
+            "type": "integer"
+          },
+          "assumptions": {
+            "type": "array"
+          },
+          "citations": {
+            "type": "array"
+          },
+          "model": {
+            "type": "object"
+          }
+        }
+      },
+      "crud": [
+        "read"
+      ],
+      "effect": "read",
+      "scopeType": "area",
+      "idempotency": "none",
+      "receipt": false,
+      "audience": "agent"
+    },
+    {
+      "id": "deep_status",
+      "title": "Foundry status",
+      "description": "What Foundry holds for you: per area you can read, its tables (name, rows, state) and documents, the last sync, and whether Foundry chat (deep_ask) has a reasoning model.",
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "area": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]{1,63}$"
+          }
+        }
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "health": {
+            "type": "object"
+          },
+          "model": {
+            "type": "object"
+          },
+          "areas": {
+            "type": "array"
+          }
+        }
+      },
+      "crud": [
+        "read"
+      ],
+      "effect": "read",
+      "scopeType": "area",
+      "idempotency": "none",
+      "receipt": false,
+      "audience": "agent"
+    },
+    {
       "id": "engine",
       "title": "Memory engine tools",
       "description": "The memory engine's own tools (GBrain: facts, entities, pages, graph, timeline, takes and more), bound to your areas. Search them by what you want to do, then call one with its arguments.",
@@ -2839,6 +3017,47 @@
       "idempotency": "supported",
       "receipt": true,
       "audience": "person"
+    },
+    {
+      "id": "deep_settings_set",
+      "title": "Choose Foundry areas",
+      "description": "Owner: the memory areas whose documents Foundry reads (default: the company area). A removed area stops syncing; what Foundry already holds stays until a dataset delete exists.",
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "areas"
+        ],
+        "properties": {
+          "areas": {
+            "type": "array",
+            "maxItems": 50,
+            "items": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9-]{1,63}$"
+            }
+          },
+          "syncNow": {
+            "type": "boolean"
+          }
+        }
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "areas": {
+            "type": "array"
+          }
+        }
+      },
+      "crud": [
+        "update"
+      ],
+      "effect": "write",
+      "idempotency": "none",
+      "receipt": true,
+      "audience": "person"
     }
   ],
   "scopes": [
@@ -2917,8 +3136,8 @@
           {
             "key": "deep",
             "type": "boolean",
-            "label": "Add deep knowledge (company data: databases and APIs)",
-            "help": "Adds a data service (helix-foundry) to your project. Agents query company data you share from Connect; they see only the datasets you allow.",
+            "label": "Add Foundry (deep knowledge of company data)",
+            "help": "Adds a data service (helix-foundry) to your project. It reads the documents of the company area (tables as tables, text as documents) so agents can search and ask company data. Foundry chat uses the reasoning model. Choose it now: it cannot be added later without a new install.",
             "default": false,
             "mutable": false
           }
@@ -3032,7 +3251,8 @@
         "required": false,
         "minPolicy": "standard",
         "usedBy": [
-          "gbrain"
+          "gbrain",
+          "deep"
         ],
         "env": {
           "provider": "KN_REASONING_PROVIDER",
@@ -3040,7 +3260,7 @@
           "baseUrl": "KN_REASONING_BASE_URL",
           "key": "KN_REASONING_KEY"
         },
-        "help": "Answers questions over memory (ask). Without it ask answers that a reasoning model is needed."
+        "help": "Answers questions over memory (ask) and over company data in Foundry (deep_ask). Without it both answer that a reasoning model is needed."
       }
     ]
   },
@@ -3064,6 +3284,14 @@
       "file": "skills/knowledge-research/SKILL.md",
       "when": {
         "research": true
+      }
+    },
+    {
+      "id": "knowledge-deep",
+      "title": "Company data in Foundry",
+      "file": "skills/knowledge-deep/SKILL.md",
+      "when": {
+        "deep": true
       }
     }
   ],
