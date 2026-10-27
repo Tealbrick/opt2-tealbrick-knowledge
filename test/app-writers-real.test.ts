@@ -189,7 +189,7 @@ test("C373 contribute level (read, create, update; no delete): an agent set to i
     const made = await ok("document_create", { title: "Contribute probe", area: a }, { agent: agentA });
     await ok("document_update", { id: made.id, body: "edited", expectedVersion: made.version }, { agent: agentA });
     assert.equal((await call("document_delete", { id: made.id }, { agent: agentA })).code, "scope_denied");
-    assert.equal(((await ok("areas_list", {}, { agent: agentA })).areas as { id: string; access: string }[]).find((x) => x.id === a)?.access, "read_write");
+    assert.equal(((await ok("areas_list", {}, { agent: agentA })).areas as { id: string; access: string }[]).find((x) => x.id === a)?.access, "contribute", "QA-KN24-10: areas_list names the real level");
   } finally {
     await personOp("tb.scopes_set", { agent: agentA, type: "area", id: a, access: "read_write" });
   }

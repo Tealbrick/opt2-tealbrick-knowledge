@@ -57,17 +57,22 @@ export interface BuiltBrain {
   dims: number | null;
   /** built with `--no-embedding` (deferred setup) */
   disabled: boolean;
+  /**
+   * The brain exists but what it was built with cannot be told: `unknown` (config.json has no `embedding_model` and does not say
+   * `embedding_disabled`) or `unreadable` (the file is not valid JSON). Such a brain is kept as it is: never `init`, never `embeddings enable`.
+   */
+  keep?: "unknown" | "unreadable";
 }
 
 /** `failed`: GBrain refused the init or the in-place enable with this model (wrong size, unknown model): keyword recall. */
-export type EmbeddingsState = "ok" | "unset" | "changed" | "enabled" | "unsupported" | "dims_missing" | "failed";
+export type EmbeddingsState = "ok" | "unset" | "changed" | "enabled" | "unsupported" | "dims_missing" | "failed" | "unreadable";
 export type ReasoningState = "ok" | "unset" | "unsupported" | "conflict";
 
 /** Labels only (never a key or a base URL): GBrain `provider:model` strings and sizes, the source of each. */
 export interface ModelStatus {
   v: 1;
-  embeddings: { state: EmbeddingsState; source: "role" | "legacy" | null; active: { model: string; dims: number | null } | null; wanted: { model: string; dims: number | null } | null };
-  reasoning: { state: ReasoningState; source: "role" | "legacy" | null; model: string | null };
+  embeddings: { state: EmbeddingsState; source: "role" | "legacy" | null; active: { model: string; dims: number | null } | null; wanted: { model: string; dims: number | null } | null; addressIgnored?: true };
+  reasoning: { state: ReasoningState; source: "role" | "legacy" | null; model: string | null; addressIgnored?: true };
 }
 
 export interface ModelPlan {
@@ -98,6 +103,9 @@ function binding(env: Record<string, string | undefined>, names: { provider: str
   const dims = names.dims ? Number(text(env[names.dims]) ?? Number.NaN) : Number.NaN;
   return { provider: GBRAIN_PROVIDERS[providerId] ?? null, providerId, model, baseUrl: text(env[names.baseUrl]), key: text(env[names.key]), dims: Number.isInteger(dims) && dims > 0 ? dims : null };
 }
+
+/** A base URL is bound for a provider whose address GBrain reads from its own config only (QA-KN24-7): it cannot be applied. */
+const addressIgnored = (b: Binding | null): { addressIgnored: true } | Record<string, never> => (b?.provider && b.provider.baseUrlEnv === null && b.baseUrl ? { addressIgnored: true } : {});
 
 const gbrainModel = (b: Binding): string => `${(b.provider as GBrainProvider).recipe}:${b.model}`;
 
@@ -149,6 +157,9 @@ export function planModels(env: Record<string, string | undefined>, built: Built
   if (!built) {
     init = wanted ? sizeArgs(wanted) : ["--no-embedding"];
     active = wanted;
+  } else if (built.keep) {
+    // QA-KN24: a brain whose build cannot be told is left as it is (it may well hold vectors): no init, no enable
+    active = null;
   } else if (built.disabled || !built.embeddingModel) {
     if (wanted) {
       enable = sizeArgs(wanted);
@@ -159,8 +170,11 @@ export function planModels(env: Record<string, string | undefined>, built: Built
   }
   if (wanted && active) state = sameModel(wanted, active) ? (enable ? "enabled" : "ok") : "changed";
   else if (!wanted && active) state = source === null ? "ok" : state; // built brain, nothing bound: it keeps its model
+  if (built?.keep === "unreadable") state = "unreadable";
+  else if (built?.keep && (wanted || state === "unset")) state = "ok";
   // the credentials the ACTIVE model needs: from the embeddings binding when it is that model, else the legacy key in env
-  if (wantedBinding && active && sameModel(wanted as { model: string; dims: number | null }, active)) apply(wantedBinding);
+  if (wantedBinding && built?.keep) apply(wantedBinding); // the kept brain most likely runs the bound model: give it its credentials
+  else if (wantedBinding && active && sameModel(wanted as { model: string; dims: number | null }, active)) apply(wantedBinding);
   else if (active) {
     // the active model runs on credentials already in env (legacy keys): a reasoning binding must not replace them
     const p = Object.values(GBRAIN_PROVIDERS).find((x) => active.model.startsWith(`${x.recipe}:`));
@@ -186,18 +200,24 @@ export function planModels(env: Record<string, string | undefined>, built: Built
   out.GBRAIN_EMBEDDING_DIMENSIONS = null;
   for (const names of Object.values(ROLE_ENV)) for (const name of Object.values(names)) out[name] = null;
 
-  return { env: out, init, enable, status: { v: 1, embeddings: { state, source, active, wanted }, reasoning: chat } };
+  return { env: out, init, enable, status: { v: 1, embeddings: { state, source, active, wanted, ...addressIgnored(embRole) }, reasoning: { ...chat, ...addressIgnored(chatRole) } } };
 }
 
 function sameModel(a: { model: string; dims: number | null }, b: { model: string; dims: number | null }): boolean {
   return a.model === b.model && (a.dims === null || b.dims === null || a.dims === b.dims);
 }
 
-/** GBrain config.json → what the brain was built with (unknown shapes read as "built without embeddings"). */
+/**
+ * GBrain config.json → what the brain was built with. Only an explicit `embedding_disabled: true` means "built without
+ * embeddings"; a file that names no model and does not say so (an older GBrain, a shape we do not know) is `keep: "unknown"`,
+ * and a file that is not an object (corrupt) is `keep: "unreadable"`: neither is ever enabled or re-initialised.
+ */
 export function builtFrom(config: unknown): BuiltBrain {
-  const c = (config && typeof config === "object" ? config : {}) as Record<string, unknown>;
+  if (!config || typeof config !== "object" || Array.isArray(config)) return { embeddingModel: null, dims: null, disabled: false, keep: "unreadable" };
+  const c = config as Record<string, unknown>;
   const model = typeof c.embedding_model === "string" && c.embedding_model.trim() ? c.embedding_model.trim() : null;
   const dims = typeof c.embedding_dimensions === "number" && c.embedding_dimensions > 0 ? c.embedding_dimensions : null;
+  if (model === null && c.embedding_disabled !== true) return { embeddingModel: null, dims: null, disabled: false, keep: "unknown" };
   return { embeddingModel: model, dims, disabled: c.embedding_disabled === true || model === null };
 }
 

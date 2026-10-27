@@ -5,7 +5,7 @@
   "name": "Knowledge",
   "summary": "Memory and documents for your agents: a private memory area per agent, a shared company area, research notebooks.",
   "description": "Knowledge gives every connected agent its own memory area and a shared company area. With Governance, the agents of one person share that person's memory and team members' agents read their team's memory; the owner decides which team may read whose memory. Agents remember and recall through memory tools; documents keep revisions, comments and links. Memory runs on GBrain, research on Open Notebook, both inside your own deployment.",
-  "version": "0.1.26",
+  "version": "0.1.29",
   "sdkMajor": 1,
   "publisher": {
     "name": "Tealbrick"
@@ -898,7 +898,7 @@
     {
       "id": "areas_list",
       "title": "List areas",
-      "description": "List the memory areas you can read: your own agent area, your owner's personal memory, your teams' memory, the company area and any person's memory the owner shared with one of your teams (`onlyTags` when only some tags are shared). Shows your access (read or read and write) and `defaultArea`, where a write without `area` goes.",
+      "description": "List the memory areas you can read: your own agent area, your owner's personal memory, your teams' memory, the company area and any person's memory the owner shared with one of your teams (`onlyTags` when only some tags are shared). Shows your access (read; contribute = read, add and edit; or read and write) and `defaultArea`, where a write without `area` goes.",
       "input": {
         "type": "object",
         "additionalProperties": false,
