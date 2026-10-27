@@ -151,6 +151,10 @@ export interface FakeGBrain {
   facts: Map<string, { id: number; fact: string; entity_slug: string; provenance: string }[]>;
   /** the next admin API call answers 401 once (an engine restart forgot the admin session) */
   adminSessionsLost?: boolean;
+  /** QA-KN027-1: the companion's boot supervisor runs (GBrain not serving yet): EVERY path answers 503 {"status":"starting"} */
+  booting?: boolean;
+  /** QA-KN027-1: the next N calls (any path) answer a bare 503, as a restarting or not yet listening engine does */
+  fail503?: number;
   close(): Promise<void>;
 }
 
@@ -170,6 +174,11 @@ export async function fakeGBrain(): Promise<FakeGBrain> {
       res.writeHead(status, { "content-type": "application/json", ...headers });
       res.end(JSON.stringify(value));
     };
+    if (state.booting) return json(503, { status: "starting", phase: "migrations" }, { "retry-after": "10" });
+    if (state.fail503 && state.fail503 > 0) {
+      state.fail503--;
+      return json(503, {});
+    }
     if (req.url === "/health") return json(200, { status: "ok", version: "0.60.424.0", engine: "postgres" });
     if (req.url === "/admin/login") return JSON.parse(text).token === adminToken ? json(200, { ok: true }, { "set-cookie": "gbrain_admin=s1; Path=/" }) : json(401, {});
     if (req.url === "/admin/api/register-client") {

@@ -24,7 +24,7 @@ export interface ClientStore {
 }
 
 export class GBrainServiceError extends Error {
-  readonly code: "area_binding_required" | "gbrain_admin_unavailable" | "gbrain_client_registration_failed" | "gbrain_token_unavailable";
+  readonly code: "area_binding_required" | "gbrain_admin_unavailable" | "gbrain_client_registration_failed" | "gbrain_starting" | "gbrain_token_unavailable";
   constructor(code: GBrainServiceError["code"], message?: string) {
     super(message ?? code);
     this.code = code;
@@ -78,6 +78,24 @@ export function failureCause(error: unknown): string {
   return links.join(" <- ").slice(0, 400);
 }
 
+/**
+ * QA-KN027-1: answers that mean "GBrain is not up yet" rather than "GBrain is broken". Until GBrain serves, its boot
+ * supervisor (services/gbrain/boot.ts) answers EVERY path with 503 {"status":"starting"}; a restarting or not yet listening
+ * engine gives 502/503, a refused or reset connection, or a timeout. Callers treat these as `gbrain_starting` and retry.
+ */
+const TRANSIENT_STATUS = new Set([502, 503]);
+const TRANSIENT_CODES = new Set(["ECONNREFUSED", "ECONNRESET", "EPIPE", "UND_ERR_SOCKET", "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_HEADERS_TIMEOUT"]);
+export function transientResponse(response: Response): boolean {
+  return TRANSIENT_STATUS.has(response.status);
+}
+export function transientError(error: unknown): boolean {
+  for (let c: unknown = error, i = 0; c && typeof c === "object" && i < 5; c = (c as { cause?: unknown }).cause, i++) {
+    const { name, code } = c as { name?: unknown; code?: unknown };
+    if (name === "TimeoutError" || name === "AbortError" || (typeof code === "string" && TRANSIENT_CODES.has(code))) return true;
+  }
+  return false;
+}
+
 export class GBrainClient {
   readonly baseUrl: string;
   private readonly adminToken: string;
@@ -124,7 +142,12 @@ export class GBrainClient {
       });
     } catch (error) {
       this.failed({ stage: "admin_login", cause: failureCause(error) });
-      throw new GBrainServiceError("gbrain_admin_unavailable");
+      throw new GBrainServiceError(transientError(error) ? "gbrain_starting" : "gbrain_admin_unavailable");
+    }
+    if (transientResponse(response)) {
+      await response.body?.cancel();
+      this.failed({ stage: "admin_login", status: response.status, cause: "engine_starting" });
+      throw new GBrainServiceError("gbrain_starting");
     }
     const cookie = response.headers.get("set-cookie")?.split(";")[0];
     await response.body?.cancel();
@@ -152,7 +175,12 @@ export class GBrainClient {
     } catch (error) {
       if (error instanceof GBrainServiceError) throw error;
       this.failed({ stage: "register_client", cause: failureCause(error) });
-      throw new GBrainServiceError("gbrain_client_registration_failed");
+      throw new GBrainServiceError(transientError(error) ? "gbrain_starting" : "gbrain_client_registration_failed");
+    }
+    if (transientResponse(response)) {
+      await response.body?.cancel();
+      this.failed({ stage: "register_client", status: response.status, cause: "engine_starting" });
+      throw new GBrainServiceError("gbrain_starting");
     }
     const body = (await response.json().catch(() => null)) as Record<string, unknown> | null;
     if (response.status === 401) this.adminCookie = null;
@@ -184,7 +212,12 @@ export class GBrainClient {
       });
     } catch (error) {
       this.failed({ stage: "token", cause: failureCause(error) });
-      throw new GBrainServiceError("gbrain_token_unavailable");
+      throw new GBrainServiceError(transientError(error) ? "gbrain_starting" : "gbrain_token_unavailable");
+    }
+    if (transientResponse(response)) {
+      await response.body?.cancel();
+      this.failed({ stage: "token", status: response.status, cause: "engine_starting" });
+      throw new GBrainServiceError("gbrain_starting");
     }
     const body = (await response.json().catch(() => null)) as Record<string, unknown> | null;
     if (response.status === 400 || response.status === 401) return null; // revoked or unknown client: re-register once
@@ -281,13 +314,18 @@ export class GBrainClient {
       } catch (error) {
         if (error instanceof GBrainServiceError) throw error;
         this.failed({ stage: "full_stats", cause: failureCause(error) });
-        throw new GBrainServiceError("gbrain_admin_unavailable");
+        throw new GBrainServiceError(transientError(error) ? "gbrain_starting" : "gbrain_admin_unavailable");
       }
       // Admin sessions live in the engine's memory: after an engine restart the cookie is unknown; log in again once.
       if (response.status === 401 && attempt === 0) {
         await response.body?.cancel();
         this.adminCookie = null;
         continue;
+      }
+      if (transientResponse(response)) {
+        await response.body?.cancel();
+        this.failed({ stage: "full_stats", status: response.status, cause: "engine_starting" });
+        throw new GBrainServiceError("gbrain_starting");
       }
       const body = (await response.json().catch(() => null)) as Record<string, unknown> | null;
       // An unhealthy engine answers 503 {error, error_description}: no counts → unavailable.
