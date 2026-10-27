@@ -120,6 +120,7 @@ export function context(db: Db, scopes: FakeScopes, agentId: string, extra: Part
     secrets: memorySecrets(),
     statusChanged: noop,
     ownerLink: () => null,
+    modelRole: async () => null,
     ...extra,
   };
 }

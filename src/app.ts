@@ -5,7 +5,7 @@ import type { Manifest } from "@opt2-tealbrick/spec/manifest";
 import type { AppDefinition, Db, Json, Logger, ScopeStore } from "@opt2-tealbrick/spec/sdk";
 import { readConfig } from "./config.ts";
 import { createHandlers, type ErrorFactory } from "./handlers.ts";
-import { type AppSecrets, ENGINE_KEY_MISSING, Knowledge, type KnowledgeOptions } from "./knowledge.ts";
+import { type AppSecrets, Knowledge, type KnowledgeOptions } from "./knowledge.ts";
 
 export const manifest = JSON.parse(readFileSync(new URL("../tealbrick.manifest.json", import.meta.url), "utf8")) as Manifest;
 export const migrationsDir = new URL("../migrations", import.meta.url).pathname;
@@ -61,13 +61,13 @@ export function knowledgeDefinition(env: Record<string, string | undefined>, TbE
         knowledge.kick(services);
         // C373: the Governance directory copy (who owns which agent, teams) is read now and every 60 s, outside calls.
         knowledge.watchDirectory(ctx.db, ctx.callApp);
+        // C373: which models the engine runs with (model roles or the legacy provider keys), named at once in the status.
+        await knowledge.checkModels(ctx).catch(() => undefined);
         // F89: probe the engine now (and every 10 min) so a degraded engine shows before the first recall.
         await knowledge.watchEngine(services, ctx.statusChanged ? () => ctx.statusChanged?.() : null, opts.engineProbeMs).catch(() => undefined);
-        // C296 INFO-2: a missing provider key is named at once (the engine waits for it).
-        await knowledge.checkProviderKeys(ctx).catch(() => undefined);
-        // a keysChanged during boot may have recorded it before the status push was wired: push once now (review)
-        if (knowledge.attention()?.code === ENGINE_KEY_MISSING) ctx.statusChanged?.();
-        ctx.log.info("knowledge started", { engine: services.engine ? "gbrain" : "none", configured: knowledge.config.engine, attention: knowledge.attention()?.code ?? "none", engineState: knowledge.engineStatus().state, research: services.notebook !== null, areas: services.areas.list().length });
+        // a model answer during boot may have arrived before the status push was wired: push once now (review)
+        if (knowledge.attention()) ctx.statusChanged?.();
+        ctx.log.info("knowledge started", { engine: services.engine ? "gbrain" : "none", configured: knowledge.config.engine, attention: knowledge.attention()?.code ?? "none", embeddings: knowledge.engineModels()?.embeddings.state ?? "unknown", reasoning: knowledge.engineModels()?.reasoning.state ?? "unknown", engineState: knowledge.engineStatus().state, research: services.notebook !== null, areas: services.areas.list().length });
       },
     },
   };

@@ -311,11 +311,14 @@ test("C373 never in a call: agent ops read only the local copy (no Governance ca
   await assert.rejects(run("access_grant_set", { team: "team_sales", person: "ct_bot" }, owner()), rejects("person_unknown"), "an outside agent has no memory to share");
 });
 
-test("C373: a companion app caller gets no person or team area", async () => {
+test("C373: a companion app caller gets no person or team area (not listed, not writable)", async () => {
   const { run, ctx } = await setup();
   await run("remember", { text: "Anna's secret Acme LLC memo" }, ctx(ADA));
   const app = ctx(ADA, { caller: { type: "app", id: "ins_01APPAPPAPPAPPAPPAPPAPPAPP" as `ins_${string}`, name: "Observer", mode: null, product: "observer" as never } });
-  await assert.rejects(run("recall", { query: "memo", area: ANNA }, app), rejects("not_found"));
+  const listed = await run("areas_list", {}, app);
+  assert.ok(!listed.areas.some((a: Record<string, unknown>) => String(a.id).startsWith("person-") || String(a.id).startsWith("team-")));
+  await assert.rejects(run("document_create", { title: "intrusion", area: ANNA }, app), rejects("not_found"));
+  await assert.rejects(run("document_create", { title: "intrusion", area: SALES }, app), rejects("not_found"));
 });
 
 test("C373 migration 0003: existing areas, documents and foreign keys survive; person and team kinds are stored and constrained", () => {
