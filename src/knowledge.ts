@@ -116,6 +116,63 @@ export function readEngineModels(raw: unknown): EngineModels | null {
     reasoning: { state: String(r.state), source: sourceOf(r.source), model: label(r.model) },
   };
 }
+export type RoleState = "bound" | "not_bound" | "degraded" | "unknown";
+
+/** C373: one row of the Settings page per model role, in plain words (no key, no address). */
+export interface RoleRow {
+  role: "embeddings" | "reasoning";
+  label: string;
+  state: RoleState;
+  /** the GBrain `provider:model` label the role runs with, when bound */
+  model: string | null;
+  /** plain-words sentence for the owner; null when nothing needs saying */
+  notice: string | null;
+}
+
+/** C373: the two model roles as the owner reads them: bound / not bound / degraded (+ a notice), or unknown while the engine has not answered. */
+export function roleRows(m: EngineModels | null): RoleRow[] {
+  if (!m) {
+    const none = "The memory engine has not reported its models yet.";
+    return [
+      { role: "embeddings", label: "Embeddings (search by meaning)", state: "unknown", model: null, notice: none },
+      { role: "reasoning", label: "Reasoning (ask and explain)", state: "unknown", model: null, notice: none },
+    ];
+  }
+  const e = m.embeddings;
+  const via = (src: "role" | "legacy" | null) => (src === "legacy" ? " It comes from the older provider keys." : "");
+  const emb: RoleRow = { role: "embeddings", label: "Embeddings (search by meaning)", state: "bound", model: e.active?.model ?? e.wanted?.model ?? null, notice: null };
+  switch (e.state) {
+    case "ok":
+      emb.notice = via(e.source).trim() || null;
+      break;
+    case "enabled":
+      emb.model = e.wanted?.model ?? emb.model;
+      emb.notice = `The memory engine is adding embeddings to the documents it already holds. This runs in the background.${via(e.source)}`;
+      break;
+    case "changed":
+      emb.state = "degraded";
+      emb.notice = `The model is now ${e.wanted?.model ?? "another model"}, but the memory index was built with ${e.active?.model ?? "its first model"}. The index keeps its model until it is re-indexed (not automatic yet).`;
+      break;
+    case "unset":
+      Object.assign(emb, { state: "not_bound", model: null, notice: "No embeddings model is set. Search uses keywords only. Set one on the Keys and models page (open it from Portal)." });
+      break;
+    case "unsupported":
+      Object.assign(emb, { state: "degraded", notice: "The memory engine does not support this embeddings provider, so search uses keywords only." });
+      break;
+    case "dims_missing":
+      Object.assign(emb, { state: "degraded", notice: "This embeddings model needs its vector size. Set it on the Keys and models page. Until then search uses keywords only." });
+      break;
+    default:
+      Object.assign(emb, { state: "degraded", notice: "The memory engine refused this embeddings model, so search uses keywords only." });
+  }
+  const r = m.reasoning;
+  const rsn: RoleRow = { role: "reasoning", label: "Reasoning (ask and explain)", state: "bound", model: r.model, notice: r.source === "legacy" ? "It comes from the older provider keys." : null };
+  if (r.state === "unset") Object.assign(rsn, { state: "not_bound", model: null, notice: "No reasoning model is set, so ask cannot answer. Memory and search still work." });
+  else if (r.state === "unsupported") Object.assign(rsn, { state: "degraded", notice: "The memory engine does not support this reasoning provider, so ask cannot answer." });
+  else if (r.state === "conflict") Object.assign(rsn, { state: "degraded", notice: "The reasoning model needs the same provider key as embeddings. Use one provider for both, or the same key." });
+  return [emb, rsn];
+}
+
 /** C296: attention code when no memory engine runs at all (a setting that is not available, or no engine service). */
 export const ENGINE_MISSING = "engine_missing";
 

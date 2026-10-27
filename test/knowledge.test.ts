@@ -8,7 +8,7 @@ import type { Json, OpContext } from "@opt2-tealbrick/spec/sdk";
 import { knowledgeDefinition } from "../src/app.ts";
 import { NARROWING_POLICY } from "../src/handlers.ts";
 import { areaSourceId } from "../src/ids.ts";
-import { EMBEDDINGS_CHANGED, ENGINE_MISSING, ENGINE_UNREACHABLE, KEY_REJECTED, MODEL_ROLE_OPTIONAL, memorySecrets, readEngineModels, SECRET_NAME } from "../src/knowledge.ts";
+import { EMBEDDINGS_CHANGED, ENGINE_MISSING, ENGINE_UNREACHABLE, KEY_REJECTED, MODEL_ROLE_OPTIONAL, memorySecrets, readEngineModels, roleRows, SECRET_NAME } from "../src/knowledge.ts";
 import { DocumentStore } from "../src/store/documents.ts";
 import { context, type FakeGBrain, FakeScopes, fakeGBrain, memoryDb, TestError } from "./helpers.ts";
 
@@ -1000,6 +1000,8 @@ test("C296 Settings: engine (GBrain, Hindsight greyed soon), models and key name
   assert.equal(out.engine.running, true);
   assert.deepEqual(out.engine.choices, [{ value: "gbrain", label: "GBrain", note: "Sourced pages and facts, hybrid search, a typed graph of people and companies." }, { value: "hindsight", label: "Hindsight", note: "soon", disabled: true }]);
   assert.deepEqual(out.models.keys, ["OPENAI_API_KEY"]);
+  // C373: this engine fake answers no /models (an old image): both roles read "unknown", never invented
+  assert.deepEqual(out.roles.map((r: Record<string, unknown>) => [r.role, r.state, r.model]), [["embeddings", "unknown", null], ["reasoning", "unknown", null]]);
   assert.equal(out.documents.total, 1);
   assert.ok(Array.isArray(out.areas) && out.areas.some((a: Record<string, unknown>) => a.id === ADA_AREA && a.engineReady === true));
   assert.equal(out.tools.error, null);
@@ -1176,5 +1178,35 @@ test("C296 INFO-2 review (C373): once keys or roles change the owner never reads
     assert.equal(knowledge.attention()?.code, MODEL_ROLE_OPTIONAL, "each retry re-reads the models");
   } finally {
     knowledge.stop();
+  }
+});
+
+test("C373 Settings roles: bound / not bound / degraded / unknown in plain words, from the engine's own answer", async () => {
+  const states = (answer: unknown) => roleRows(readEngineModels(answer)).map((r) => [r.role, r.state]);
+  assert.deepEqual(states(null), [["embeddings", "unknown"], ["reasoning", "unknown"]]);
+  assert.deepEqual(states(KEYLESS), [["embeddings", "not_bound"], ["reasoning", "not_bound"]]);
+  const bound = roleRows(readEngineModels(BOUND));
+  assert.deepEqual(bound.map((r) => [r.state, r.model, r.notice]), [["bound", "openai:text-embedding-3-small", null], ["bound", "openrouter:openai/gpt-5.2-chat", null]]);
+  const changed = roleRows(readEngineModels(modelsAnswer({ state: "changed", active: { model: "openai:text-embedding-3-small", dims: 1536 }, wanted: { model: "ollama:nomic-embed-text", dims: 768 } }, { state: "conflict" })));
+  assert.equal(changed[0]?.state, "degraded");
+  assert.match(changed[0]?.notice ?? "", /now ollama:nomic-embed-text, but the memory index was built with openai:text-embedding-3-small/u);
+  assert.equal(changed[1]?.state, "degraded");
+  assert.match(changed[1]?.notice ?? "", /same provider key as embeddings/u);
+  for (const state of ["unsupported", "dims_missing", "failed"]) assert.equal(roleRows(readEngineModels(modelsAnswer({ state }, { state: "ok" })))[0]?.state, "degraded", state);
+  assert.equal(roleRows(readEngineModels(modelsAnswer({ state: "ok", source: "legacy", active: { model: "openai:text-embedding-3-small", dims: 1536 } }, { state: "ok", source: "legacy", model: "openai:gpt-5.2" })))[1]?.notice, "It comes from the older provider keys.");
+});
+
+test("C373 Settings page op: settings_overview carries the roles the engine reports (never a key or an address)", async () => {
+  const m = await modelSetup(() => BOUND);
+  try {
+    await m.definition.events?.agentAdded?.({ id: ADA, name: "Ada", mode: "free", status: "active" }, m.eventCtx);
+    m.scopes.applyDefaults(ADA);
+    const owner = context(m.db, m.scopes, ADA, { callServiceHelper: m.callServiceHelper, caller: { type: "person", id: "per_01OWNER000000000000000000" as `per_${string}`, name: "Owner", mode: null } });
+    const spec = m.definition.handlers.settings_overview as { run: (input: Json, ctx: OpContext) => Promise<Record<string, any>> };
+    const out = await spec.run({}, owner);
+    assert.deepEqual(out.roles.map((r: Record<string, unknown>) => [r.role, r.state, r.model]), [["embeddings", "bound", "openai:text-embedding-3-small"], ["reasoning", "bound", "openrouter:openai/gpt-5.2-chat"]]);
+    assert.ok(!JSON.stringify(out.roles).includes("http"));
+  } finally {
+    m.knowledge.stop();
   }
 });

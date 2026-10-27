@@ -1,4 +1,4 @@
-// Settings page (C296, Martin): the memory engine and its health, the model provider and whether its keys are set (never
+// Settings page (C296, Martin): the memory engine and its health, the two model roles (embeddings, reasoning) and the older provider keys (set or not, never
 // a value), embedding status, the engine capabilities and the memory areas. Read-only: the engine is fixed at install and
 // changed in Portal; keys are entered only on the bridge key page.
 import { callOp } from "@opt2-tealbrick/miniapp-sdk/client";
@@ -16,6 +16,7 @@ interface Choice {
 interface SettingsOverview {
   engine: { configured: string; running: boolean; choices: Choice[]; state: string; detail: string[]; attention: { code: string; reason: string } | null; version: string | null };
   research: boolean;
+  roles: { role: "embeddings" | "reasoning"; label: string; state: "bound" | "not_bound" | "degraded" | "unknown"; model: string | null; notice: string | null }[];
   models: { provider: string; chatModel: string; embeddingProvider: string; embeddingModel: string; keys: string[] };
   documents: { total: number; inEngine: number; waiting: number; failed: number };
   embeddings: { chunks: number | null; embedded: number | null; pages: number | null; readiness: { state: string; reason: string | null } | null; error: string | null };
@@ -43,6 +44,9 @@ function engineTag(o: SettingsOverview["engine"]) {
   if (o.state === "ok") return <Tag status="live">working</Tag>;
   return <Tag status="busy">starting</Tag>;
 }
+
+const roleTag = (state: SettingsOverview["roles"][number]["state"]) =>
+  state === "bound" ? <Tag status="live">bound</Tag> : state === "degraded" ? <Tag status="needs-you">degraded</Tag> : state === "not_bound" ? <Tag>not bound</Tag> : <Tag status="busy">unknown</Tag>;
 
 const onOff = (state: "on" | "off" | "unknown") => (state === "on" ? <Tag status="live">on</Tag> : state === "off" ? <Tag>off</Tag> : <Tag status="busy">unknown</Tag>);
 
@@ -121,8 +125,25 @@ export function Settings() {
             <p className="tb-soft kn-measure">The engine is fixed when the app is installed. Only a choice that is not available yet can be changed, in Portal, in the app settings.</p>
           </section>
 
-          <section className="tb-stack" aria-label="Model provider">
-            <h2>Model provider</h2>
+          <section className="tb-stack" aria-label="Model roles">
+            <h2>Models</h2>
+            <Table>
+              <tbody>
+                {data.roles.map((r) => (
+                  <tr key={r.role}>
+                    <td className="strong">{r.label}</td>
+                    <td>{roleTag(r.state)}</td>
+                    <td className="mono">{r.model ?? ""}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </Table>
+            {data.roles.map((r) => (r.notice ? <Notice key={r.role} tone={r.state === "degraded" || r.state === "not_bound" ? "needs-you" : "neutral"}>{r.notice}</Notice> : null))}
+            <p className="tb-soft kn-measure">Models and their keys are set on the Keys and models page (open it from Portal). Knowledge never shows a key value.</p>
+          </section>
+
+          <section className="tb-stack" aria-label="Older provider keys">
+            <h2>Older provider keys</h2>
             <Table>
               <tbody>
                 <tr>
@@ -143,7 +164,7 @@ export function Settings() {
                 ))}
               </tbody>
             </Table>
-            <p className="tb-soft kn-measure">Keys are entered only on the bridge key page (open it from Portal). Knowledge never shows a key value.</p>
+            <p className="tb-soft kn-measure">These keys are only a fallback. The memory engine uses them for a model role that has no model of its own.</p>
           </section>
 
           <section className="tb-stack" aria-label="Embeddings">
