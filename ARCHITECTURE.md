@@ -32,13 +32,14 @@ Knowledge is a normalization wrapper over engines. Canonical documents stay in K
 
 ## Scopes, hooks and companions
 
-- **Scopes:** `area` (access `read`, `read_write`). Default grants: own area read_write, shared area read. The shared company area is read for every connected agent; write is off until the owner turns it on per agent (C1). Events `agentAdded` (creates the company area and that agent's area) and `keysChanged`.
+- **App callers (C373):** Observer writes through `areas_list`, `document_create`, `document_update` (`APP_CALLER_OPS`); any other op from an app is `scope_denied`. An app sees and writes only `kind: shared` areas. Its write right is the SDK `own` default row of its instance (the SDK 0.1.41 default grants give an app only `read` on the shared area; spec and manifest need two disjoint `shared` entries to fix this cleanly). The owner switches it off with `tb.scopes_set` on that row. `kn_state` key `caller/<ins>` keeps the display name. Tags are stored as sent (lower-case, at most 20, 40 characters each); Knowledge derives none.
+- **Scopes:** `area` (access `read`, `contribute` = read, create, update, `read_write`). Default grants: own area read_write, shared area read. The shared company area is read for every connected agent; write is off until the owner turns it on per agent (C1). Events `agentAdded` (creates the company area and that agent's area) and `keysChanged`.
 - **Hooks:** None.
 - **Companion grants it asks for:** None asked. It calls GBrain at `/mcp` (stateless JSON-RPC POST, no redirects, 2 MB response cap) and Open Notebook REST (4 MB cap).
 
 ## Settings, keys and environment
 
-Settings (all `mutable:false`, set at deploy): `engine` (gbrain; hindsight is disabled), `research` (default false), `model_provider` (openai default, google, anthropic). Keys, from the bridge key store (account default): `OPENAI_API_KEY` (required for openai and for anthropic embeddings), `ANTHROPIC_API_KEY`, `GOOGLE_GENERATIVE_AI_API_KEY`. Env passed to the app: `KNOWLEDGE_ENGINE`, `KNOWLEDGE_RESEARCH`, `KNOWLEDGE_MODEL_PROVIDER`, `KNOWLEDGE_GBRAIN_URL`, `KNOWLEDGE_GBRAIN_ADMIN_TOKEN`, `KNOWLEDGE_NOTEBOOK_URL`, `KNOWLEDGE_NOTEBOOK_PASSWORD` (wired by the deploy recipe). Service knobs: `KNOWLEDGE_MIGRATION_{WAIT_S,LOCK_STALE_S,POLL_S,RETRY_MIN_S,RETRY_MAX_S}`. Default model names live in `src/config.ts` and must become customer-editable (C186, open). The Dockerfile does not set `TB_DATA_DIR` or `TB_BACKUP_DIR`; the deploy recipe sets them (SDK-API section 13; `tb-gen railway` sets both).
+Settings (all `mutable:false`, set at deploy): `engine` (gbrain; hindsight is disabled), `research` (default false), `model_provider` (openai default, google, anthropic). Model roles (C373, `settings.modelRoles`): `embeddings` and `reasoning`, both `required:false`, `minPolicy:standard`, `usedBy:["gbrain"]`. `tb-exec` fills the bound role into the `gbrain` service as `KN_EMBEDDINGS_*` and `KN_REASONING_*`. `services/gbrain/models.ts` plans each boot: a role binding, else the legacy `model_provider` defaults when their key is in env, else no model. A fresh brain starts with `init --embedding-model …` or `--no-embedding`. A built brain keeps the model it was built with: a different binding is reported as `embeddings_changed` and is not applied (re-index is not automatic yet). The wrapper writes labels only to `knowledge-models.json` and answers them at helper path `/models`; the app reads them strictly (`readEngineModels`) and raises attention `model_role_optional` or `embeddings_changed`. Legacy keys, from the bridge key store (account default): `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_GENERATIVE_AI_API_KEY`; they are optional fallbacks and do not hold the engine. Env passed to the app: `KNOWLEDGE_ENGINE`, `KNOWLEDGE_RESEARCH`, `KNOWLEDGE_MODEL_PROVIDER`, `KNOWLEDGE_GBRAIN_URL`, `KNOWLEDGE_GBRAIN_ADMIN_TOKEN`, `KNOWLEDGE_NOTEBOOK_URL`, `KNOWLEDGE_NOTEBOOK_PASSWORD` (wired by the deploy recipe). Service knobs: `KNOWLEDGE_MIGRATION_{WAIT_S,LOCK_STALE_S,POLL_S,RETRY_MIN_S,RETRY_MAX_S}`. Default model names live in `src/config.ts` and must become customer-editable (C186, open). The Dockerfile does not set `TB_DATA_DIR` or `TB_BACKUP_DIR`; the deploy recipe sets them (SDK-API section 13; `tb-gen railway` sets both).
 
 Companion services (built from `services/<id>/Dockerfile`, started with the SDK `tb-exec` wrapper, which fetches declared keys and runs backup dump and restore): `gbrain-db` (pgvector on Postgres 17), `gbrain` (upstream commit pinned, a Tealbrick boot wrapper with a crash-safe migration lock and a helper), and, when research is on, `notebook-db` (SurrealDB under the Business Source License 1.1, C155) and `notebook` (Open Notebook). Upstream stays unmodified.
 
@@ -58,18 +59,19 @@ Memory (Library, Recall, Memory status), Research, Holds, Receipts, Agents and s
 
 ## Requirements and runtime hints
 
-A model-provider key (OpenAI by default; Anthropic mode still needs an OpenAI key for embeddings). Engine and database services must be healthy for engine-backed ops. SurrealDB is BSL 1.1: self-hosting inside Knowledge on the customer's Railway is expected to be fine, but legal confirmation is open (C155).
+A model for the embeddings role and one for the reasoning role (both optional; without them recall is keyword-only and ask is unavailable). The legacy provider keys still work as a fallback (OpenAI by default; Anthropic mode still needs an OpenAI key for embeddings). Engine and database services must be healthy for engine-backed ops. SurrealDB is BSL 1.1: self-hosting inside Knowledge on the customer's Railway is expected to be fine, but legal confirmation is open (C155).
 
 App port 5310, 0.5 cpu, 768 MB, data 5 GB plus backup 20 GB. Engine only: about 2.0 cpu, 3.3 GB RAM, 37 GB volume. With research: about 3.5 cpu, 5.4 GB RAM, 47 GB (computed from the manifest; UNVERIFIED against a deployed template). Backup cron `23 2 * * *`, retain 14; each service with a dump is dumped by `tb-exec`.
 
 ## Pinned packages
 
-Stable 0.1.21 and main (0.1.26): miniapp-sdk 0.1.25, spec 0.1.39. Both: manifest 0.1.18, conformance 0.1.18, ui 0.2.4. The `tb-exec` service package pins miniapp-sdk 0.1.12.
+Stable 0.1.21: miniapp-sdk 0.1.25, spec 0.1.39, manifest 0.1.18, conformance 0.1.18, ui 0.2.4. This branch (C373): miniapp-sdk 0.1.41, manifest 0.1.32, spec 0.1.78 (what both pin), conformance 0.1.30, ui 0.2.4. The `tb-exec` service package pins miniapp-sdk 0.1.41.
 
 All `@opt2-tealbrick/*` pins use dist-host tarball URLs. Upgrade safety (SDK 0.1.25: pre-update snapshot, migration lock, failed mode) is in this app only where the pin above says 0.1.25 (the plain version 0.1.21 is on the dev channel; its qa1 soak is the gate for stable, C221, PROMOTE-STABLE §7). All RS-3 apps pin SDK 0.1.25 (dev channel; stable after the qa1 soak of the plain version). Core restores the snapshot on an automatic rollback (portal-core#1, E3). This Core is live since 2026-10-16 22:37:58Z (Core 29ae2fe).
 
 ## Known gaps
 
 - Stable 0.1.20 pins SDK 0.1.22; the dev build already pins 0.1.25.
-- Model name defaults are not yet editable by the customer (C186).
+- Model names are set by the model roles (C373); the legacy defaults in `src/config.ts` stay only as a fallback.
+- Changing the embeddings model of a built index needs a re-index; it is reported (`embeddings_changed`), not applied.
 - No service Dockerfile sets `USER` and no manifest service sets `dropPrivileges`, so the four service images run as their upstream image's default user (root-capable).

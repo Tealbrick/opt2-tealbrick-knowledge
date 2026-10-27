@@ -139,3 +139,58 @@ test("C373 governance: agent A cannot read agent B's area (scope_denied); the co
   await personOp("tb.scopes_set", { agent: agentA, type: "area", id: "company", access: "read" });
   assert.ok(a !== b);
 });
+
+test("C373 Observer replay (observer#11): areas_list {}, document_create / document_update with every field and tag Observer sends, archived, 409 on a stale expectedVersion, idempotency keys", async () => {
+  await ownAreas();
+  assert.deepEqual((await ok("areas_list", {}, { app: true })).areas, [{ id: "company", label: "Company", kind: "shared", own: false, access: "read_write" }]);
+  const tags = ["observer", "untrusted", "source:mail-messages", "pii:email", "kind:message"];
+  const create = { area: "company", title: "Re: Acme LLC renewal", body: "Acme LLC renews in March. Contact: jo@example.com", summary: "Acme LLC renewal thread", tags, status: "published" };
+  // the same idempotency key twice → one document (Observer retries a delivery)
+  const opts = { caller: OBSERVER, prd: "observer", wf: OBSERVER_OPS, crud: ["read", "create", "update"] as never, idempotencyKey: "c373-observer-replay-0001" };
+  const first = await client.callOp("document_create", create as Json, opts);
+  assert.equal(first.status, 200, first.code ?? "");
+  const created = (first.body as { output: { id: string; area: string; version: number } }).output;
+  assert.equal(created.area, "company");
+  const again = await client.callOp("document_create", create as Json, opts);
+  assert.equal(again.status, 200);
+  assert.equal((again.body as { output: { id: string } }).output.id, created.id, "an idempotent retry returns the first answer");
+  const found = ((await personOp("library_documents", { area: "company", query: "Acme LLC renewal" })).hits as { id: string }[]).filter((h) => h.id === created.id);
+  assert.equal(found.length, 1, "one document, not two");
+  const page = await personOp("library_document", { id: created.id });
+  assert.deepEqual([...page.document.tags].sort(), [...tags].sort(), "every Observer tag is kept as sent");
+  assert.equal(page.document.status, "published");
+  assert.equal(page.document.summary, create.summary);
+  assert.deepEqual(page.authors, { [OBSERVER]: "Observer" }, "the writer shows as Observer");
+  // update with every field + expectedVersion; a second writer with the old version gets a clear 409
+  const edit = { id: created.id, title: "Re: Acme LLC renewal (2)", body: "Acme LLC renews on 1 March.", summary: "Acme LLC renewal, dated", tags: [...tags, "kind:table"], status: "published", expectedVersion: created.version };
+  const updated = await ok("document_update", edit as Json, { app: true });
+  assert.equal(updated.version, created.version + 1);
+  const stale = await call("document_update", edit as Json, { app: true });
+  assert.equal(stale.status, 409);
+  assert.equal(stale.code, "version_conflict");
+  // the source row was deleted: archived + source-deleted, with the current version
+  const archived = await ok("document_update", { id: created.id, tags: [...tags, "source-deleted"], status: "archived", expectedVersion: updated.version } as Json, { app: true });
+  assert.equal(archived.version, updated.version + 1);
+  const after = await personOp("library_document", { id: created.id });
+  assert.equal(after.document.status, "archived");
+  assert.ok(after.document.tags.includes("source-deleted") && after.document.tags.includes("untrusted"));
+  // Foundry's table pages: Knowledge stores the tags it is sent and derives nothing (`table:<name>` must come from the sender)
+  const table = await ok("document_create", { title: "Table: orders", tags: ["observer", "kind:table"] }, { app: true });
+  assert.deepEqual((await personOp("library_document", { id: table.id })).document.tags, ["observer", "kind:table"], "no table:<name> tag is derived");
+  // tag rules Observer must respect: ≤ 40 characters each (the manifest input schema), at most 20 per document
+  const long = await call("document_create", { title: "long tag", tags: [`source:${"x".repeat(40)}`] }, { app: true });
+  assert.equal(long.status, 400, `a tag longer than 40 characters is refused (${long.code})`);
+});
+
+test("C373 contribute level (read, create, update; no delete): an agent set to it adds and edits in its area but cannot delete", async () => {
+  const { a, agentA } = await ownAreas();
+  await personOp("tb.scopes_set", { agent: agentA, type: "area", id: a, access: "contribute" });
+  try {
+    const made = await ok("document_create", { title: "Contribute probe", area: a }, { agent: agentA });
+    await ok("document_update", { id: made.id, body: "edited", expectedVersion: made.version }, { agent: agentA });
+    assert.equal((await call("document_delete", { id: made.id }, { agent: agentA })).code, "scope_denied");
+    assert.equal(((await ok("areas_list", {}, { agent: agentA })).areas as { id: string; access: string }[]).find((x) => x.id === a)?.access, "read_write");
+  } finally {
+    await personOp("tb.scopes_set", { agent: agentA, type: "area", id: a, access: "read_write" });
+  }
+});

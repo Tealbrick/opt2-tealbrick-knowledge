@@ -77,6 +77,7 @@ function LoadError({ message, onRetry }: { message: string; onRetry: () => void 
 const ACCESS_OPTIONS = [
   { value: "", label: "No access" },
   { value: "read", label: "Read" },
+  { value: "contribute", label: "Read, add and edit" },
   { value: "read_write", label: "Read and write" },
 ];
 

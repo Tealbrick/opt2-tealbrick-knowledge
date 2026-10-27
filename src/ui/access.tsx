@@ -219,8 +219,8 @@ export function Access() {
               </tr>
             </thead>
             <tbody>
-              {data.log.map((l, i) => (
-                <tr key={`${l.at}-${i}`}>
+              {data.log.map((l) => (
+                <tr key={`${l.at}-${l.action}-${l.team}-${l.person}`}>
                   <td>{when(l.at)}</td>
                   <td>{ACTIONS[l.action] ?? l.action}</td>
                   <td>{data.teams.find((t) => t.id === l.team)?.name ?? l.team}</td>

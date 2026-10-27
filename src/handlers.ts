@@ -351,7 +351,7 @@ export function createHandlers(knowledge: Knowledge, TbError: ErrorFactory) {
     const fallbacks = statuses.filter((status) => status.via === "keyword");
     const engineDegraded = statuses.flatMap((status) => status.degraded ?? []);
     if (engine) {
-      const failed = fallbacks.filter((f) => f.error && f.error !== "area_not_ready" && f.error !== "no_engine");
+      const failed = fallbacks.filter((f) => f.error && f.error !== "area_not_ready" && f.error !== "no_engine" && f.error !== "gbrain_starting");
       knowledge.noteEngine(failed.length ? { state: "failing", detail: [...new Set(failed.map((f) => f.error as string))] } : engineDegraded.length ? { state: "degraded", detail: [...new Set(engineDegraded)] } : statuses.some((st) => st.via === "engine") ? { state: "ok", detail: [] } : null);
     }
     if (engine && (fallbacks.length || engineDegraded.length)) {
