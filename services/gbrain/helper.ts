@@ -1,12 +1,15 @@
 // C6 helper: creates GBrain sources for Knowledge areas through upstream's trusted local CLI
 // (upstream refuses `sources_add` over MCP). Listens on loopback only; tb-exec exposes it on the
-// manifest helper port after verifying the Knowledge instance assertion, for the declared path only.
+// manifest helper port after verifying the Knowledge instance assertion, for the declared paths only.
+// C373: `POST /models` answers which models this boot runs with (boot.ts writes the labels-only status file).
 import { execFile } from "node:child_process";
+import { readFile } from "node:fs/promises";
 import { createServer } from "node:http";
 
 const SOURCE = /^ka-[a-f0-9]{24}$/u;
 const NAME = /^[a-z0-9][a-z0-9-]{1,63}$/u;
 const root = process.env.GBRAIN_ROOT ?? "/opt/gbrain";
+const home = process.env.GBRAIN_HOME ?? "/data";
 let queue: Promise<unknown> = Promise.resolve();
 
 function addSource(id: string, name: string): Promise<"created" | "exists"> {
@@ -25,6 +28,15 @@ const server = createServer(async (req, res) => {
     res.writeHead(status, { "content-type": "application/json" });
     res.end(JSON.stringify(body));
   };
+  if (req.method === "POST" && req.url === "/models") {
+    req.resume(); // the body is empty: drain it
+    try {
+      // labels only (models.ts ModelStatus): never a key or a base URL
+      return reply(200, JSON.parse(await readFile(`${home}/knowledge-models.json`, "utf8")));
+    } catch {
+      return reply(503, { error: { code: "engine_starting", message: "the memory engine has not started yet" } });
+    }
+  }
   if (req.method !== "POST" || req.url !== "/sources") return reply(404, { error: { code: "not_found", message: "not found" } });
   const chunks: Buffer[] = [];
   for await (const chunk of req) chunks.push(chunk as Buffer);
