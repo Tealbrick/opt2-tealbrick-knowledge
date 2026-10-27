@@ -2,6 +2,30 @@
 
 All notable changes to the Knowledge mini app. Versions are assigned at merge (C340).
 
+## Unreleased (proposed 0.1.30; C373 Foundry, builds on 0.1.29)
+
+App database migration `0004_deep.sql` (expand only). New service image `opt2-tealbrick-knowledge-deep` (only deployed when
+the `deep` setting is on).
+
+### Added
+
+- Foundry feed: the company area's documents go to the deep service (helix-foundry). `kind:table` CSV documents become
+  datasets: pages with the same `source:<collection>` tag merge, and each row cites its document. Other documents become one
+  documents dataset. Idempotent on (document id, version); a deleted table gets a tombstone snapshot. Only the company area
+  is fed; other areas are refused.
+- Agent tools `deep_search` (rows and documents by words, no model, honours Rules tags), `deep_ask` (foundry's analyst
+  with the reasoning model: rows, SQL, assumptions, citations; without a model it says so and points to `deep_search`),
+  `deep_status`. Skill `knowledge-deep`.
+- Owner: `deep_settings_set` (company area on or paused) and a Foundry section on the Settings page (on/off, Foundry chat
+  model state, tables and sync state).
+- The `reasoning` model role is also used by the `deep` service (`KN_REASONING_*`). The supervisor applies it to foundry
+  (raw rows never go to the model, no background runs); callers can never set or read foundry's provider, and foundry's
+  model runs are refused while no model is applied.
+
+### Changed
+
+- `services/deep` base image Node 24.22.1; the supervisor's `DB_PATH` uses a template string.
+
 ## 0.1.29 (2026-10-27; C373 second brain: model roles, app writers, person and team memory; upgradeFrom ">=0.1.20 <=0.1.28 || 0.1.28-dev.1")
 
 `upgradeFrom` ">=0.1.20 <=0.1.28 || 0.1.28-dev.1". Needs Core with the manifest 0.1.32 pin (CORE-P5, core#67) and

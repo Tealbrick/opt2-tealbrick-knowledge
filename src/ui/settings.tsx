@@ -1,4 +1,4 @@
-// Settings page (C296, Martin): the memory engine and its health, the two model roles (embeddings, reasoning) and the older provider keys (set or not, never
+// Settings page (C296, Martin; C373 Foundry section): the memory engine and its health, the two model roles (embeddings, reasoning) and the older provider keys (set or not, never
 // a value), embedding status, the engine capabilities and the memory areas. Read-only: the engine is fixed at install and
 // changed in Portal; keys are entered only on the bridge key page.
 import { callOp } from "@opt2-tealbrick/miniapp-sdk/client";
@@ -23,7 +23,20 @@ interface SettingsOverview {
   tools: { offered: number | null; error: string | null; surface: string | null };
   capabilities: { id: string; label: string; state: "on" | "off" | "unknown"; reason: string }[];
   areas: { id: string; label: string; kind: string; engineReady: boolean; documents: number; ready: number; pending: number; failed: number }[];
+  /** C373: Foundry (deep knowledge); absent on an app without it */
+  deep?: DeepOverview;
 }
+
+interface DeepOverview {
+  enabled: boolean;
+  running: boolean;
+  health?: { ok: boolean; status: string; phase: string } | null;
+  model?: { state: "unset" | "pending" | "ok" | "failed" | "unknown"; provider?: string; model?: string; error?: string };
+  areas?: { id: string; label: string; selected: boolean; syncedAt: number | null; error: string | null; tables: { name: string; rows: number; documents: number }[]; failedTables: { name: string; error: string | null }[]; textDocuments: boolean }[];
+}
+
+const deepModelTag = (m: DeepOverview["model"]) =>
+  m?.state === "ok" ? <Tag status="live">on</Tag> : m?.state === "failed" ? <Tag status="needs-you">failed</Tag> : m?.state === "pending" ? <Tag status="busy">checking</Tag> : m?.state === "unset" ? <Tag>needs a reasoning model</Tag> : <Tag status="busy">unknown</Tag>;
 
 interface KeyRow {
   name: string;
@@ -49,6 +62,77 @@ const roleTag = (state: SettingsOverview["roles"][number]["state"]) =>
   state === "bound" ? <Tag status="live">bound</Tag> : state === "degraded" ? <Tag status="needs-you">degraded</Tag> : state === "not_bound" ? <Tag>not bound</Tag> : <Tag status="busy">unknown</Tag>;
 
 const onOff = (state: "on" | "off" | "unknown") => (state === "on" ? <Tag status="live">on</Tag> : state === "off" ? <Tag>off</Tag> : <Tag status="busy">unknown</Tag>);
+
+/** C373: Foundry on/off (set at install), Foundry chat (the reasoning role), and the company area feed with its sync state. */
+function FoundrySection({ deep, reload }: { deep: DeepOverview; reload: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const [failure, setFailure] = useState<string | null>(null);
+  const setAreas = (areas: string[]) => {
+    setBusy(true);
+    setFailure(null);
+    callOp("deep_settings_set", { areas, syncNow: true })
+      .then(() => reload())
+      .catch((e: unknown) => setFailure(errText(e)))
+      .finally(() => setBusy(false));
+  };
+  return (
+    <section className="tb-stack" aria-label="Foundry">
+      <h2>Foundry (company data)</h2>
+      <p>
+        Foundry: {deep.running ? <Tag status={deep.health && !deep.health.ok ? "needs-you" : "live"}>{deep.health && !deep.health.ok ? "not healthy" : "on"}</Tag> : deep.enabled ? <Tag status="needs-you">not deployed</Tag> : <Tag>off</Tag>}
+        {deep.running ? <span> Foundry chat: {deepModelTag(deep.model)}</span> : null}
+      </p>
+      {deep.model?.state === "failed" && deep.model.error ? <Notice tone="needs-you">{deep.model.error}</Notice> : null}
+      {deep.model?.state === "unset" ? <p className="tb-soft kn-measure">Set a reasoning model in Keys and models to let agents ask Foundry questions. Search works without one.</p> : null}
+      {!deep.running ? <p className="tb-soft kn-measure">Foundry is chosen when the app is installed (Portal, app settings: Add Foundry).</p> : null}
+      {failure ? <Notice tone="needs-you" role="alert">{failure}</Notice> : null}
+      {deep.running && deep.areas
+        ? deep.areas.map((a) => (
+            <div key={a.id} className="tb-stack">
+              <p>
+                <span className="strong">{a.label}</span>{" "}
+                {a.selected ? <Tag status={a.error ? "needs-you" : a.syncedAt ? "live" : "busy"}>{a.error ? `sync failed (${a.error})` : a.syncedAt ? `synced ${new Date(a.syncedAt).toLocaleString()}` : "waiting for the first sync"}</Tag> : <Tag>paused</Tag>}{" "}
+                <Button disabled={busy} onClick={() => setAreas(a.selected ? [] : [a.id])}>
+                  {a.selected ? "Pause" : "Read this area"}
+                </Button>
+              </p>
+              {a.tables.length || a.failedTables.length ? (
+                <Table>
+                  <thead>
+                    <tr>
+                      <th>Table</th>
+                      <th>Rows</th>
+                      <th>Documents</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {a.tables.map((t) => (
+                      <tr key={t.name}>
+                        <td className="strong">{t.name}</td>
+                        <td className="num">{t.rows}</td>
+                        <td className="num">{t.documents}</td>
+                      </tr>
+                    ))}
+                    {a.failedTables.map((t) => (
+                      <tr key={`failed-${t.name}`}>
+                        <td className="strong">{t.name}</td>
+                        <td colSpan={2}>
+                          <Tag status="needs-you">not loaded</Tag> <span className="tb-soft">{t.error}</span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </Table>
+              ) : (
+                <p className="tb-soft">No tables yet. Tables arrive from Observer as documents tagged kind:table.</p>
+              )}
+            </div>
+          ))
+        : null}
+      <p className="tb-soft kn-measure">Foundry reads only the company area. Person, team and agent memory never goes to Foundry.</p>
+    </section>
+  );
+}
 
 export function Settings() {
   const [data, setData] = useState<SettingsOverview | null>(null);
@@ -209,6 +293,8 @@ export function Settings() {
             </Table>
             <p className="tb-soft">Research notebooks: {data.research ? "on" : "off"}</p>
           </section>
+
+          {data.deep ? <FoundrySection deep={data.deep} reload={load} /> : null}
 
           <section className="tb-stack" aria-label="Memory areas">
             <h2>Memory areas</h2>

@@ -22,7 +22,7 @@ Knowledge is a normalization wrapper over engines. Canonical documents stay in K
 
 ## Operations (from `tealbrick.manifest.json`)
 
-53 operations.
+60 operations. Foundry (C373, agent, read): `deep_search`, `deep_ask`, `deep_status`; person: `deep_settings_set`.
 - Hot (agent, C336 M4): `recall` (meaning), `search` (words), `get` (open a `ref`), `context` (size-capped block for hooks), `ask` (engine think, model cost), `remember` (`text` or `items[]` with `source`, deduped per area). Every recall/search hit carries `ref` and `source` (citation; migration 0002 adds `source_ref`, `source_url`, `content_digest`).
 - Read (agent, per area): `recall`, `areas_list`, `collections_list`, `collection_get`, `collection_tree`, `documents_search`, `document_get`, `document_revisions`, `comments_list`, `links_list`, research reads, `engine` (dynamic, search mode since 0.1.26: agents see `knowledge__engine_search` / `knowledge__engine_call` instead of ~100 `gb_*` tools; ceiling destructive).
 - Write (agent): `remember`, `collection_create`, `document_create`, `document_update`, `comment_add`, `link_add`, `research_source_add`, `research_chat_start`, `research_ask`.
@@ -44,15 +44,35 @@ Settings (all `mutable:false`, set at deploy): `engine` (gbrain; hindsight is di
 
 Companion services (built from `services/<id>/Dockerfile`, started with the SDK `tb-exec` wrapper, which fetches declared keys and runs backup dump and restore): `gbrain-db` (pgvector on Postgres 17), `gbrain` (upstream commit pinned, a Tealbrick boot wrapper with a crash-safe migration lock and a helper), and, when research is on, `notebook-db` (SurrealDB under the Business Source License 1.1, C155) and `notebook` (Open Notebook). Upstream stays unmodified.
 
+## Foundry: deep knowledge (C336 F4; C373 feed and tools)
+
+Setting `deep` (default off, `mutable:false`; the Second-brain recipe installs it ON) adds the companion service `deep`: helix-foundry at a pinned commit, unmodified, plus the HelixDB server from its pinned image. An existing install without it needs a reinstall (the service is added at deploy).
+
+- **Service:** `services/deep/supervisor.ts` starts HelixDB, foundry's executor and its API (worker inline), all on loopback. The only private-network listener is a token proxy. It needs `Authorization: Bearer <DEEP_ACCESS_TOKEN>` (a generated secret), forwards only `/api/`, and drops Host, Origin and cookies. It answers `GET /deep/status` (model state). It refuses `/provider*` to every caller (403 `deep_provider_owned`) and refuses foundry's model runs while no model is applied (409 `deep_model_off`). Measured on neuu (amd64, podman): image 730 MB, healthy 7 s after start, about 300 MB at idle.
+- **Model:** the `reasoning` model role lists `usedBy: ["gbrain", "deep"]`. `tb-exec` fills `KN_REASONING_*` into the deep service and restarts it when the binding changes. The supervisor maps the binding to foundry's provider (anthropic → claude, openai → openai, azure-openai → azure, every OpenAI-compatible provider → custom chat-completions). It sets the provider with `PUT /provider` in every foundry workspace, with `allowRawData:false` (the model sees schema and masked samples; rows go only to the agent) and `continuous:false` (no background repair runs). Foundry tests the model with one structured call before it keeps it. Foundry needs no embeddings. Without a binding, no provider is set and nothing calls a model.
+- **Feed** (`src/engines/deep/sync.ts`, migration 0004): no new ingest path (C322(6)). Observer delivers documents into Knowledge, and the feed hands the documents of the company area to foundry, one foundry workspace for that area. It runs at start, every 60 s, and 2 s after a document write.
+  - A `kind:table` document (CSV with a header line) becomes one dataset. Pages with the same `source:<collection>` tag merge into one dataset, named after the last part of the collection (`source:public.orders` → `orders`). Each row carries `_knowledge_document` (its source document).
+  - Other documents become rows of the area's `knowledge_documents` dataset (title, tags, version, body up to 8000 characters).
+  - Idempotent on (document id, version). A changed schema is accepted (Knowledge's documents are the source). A bad CSV is recorded as `failed` and not retried until a document changes.
+  - A table whose documents are gone gets a one-row tombstone snapshot, because foundry has no dataset delete (older snapshot files stay on the deep volume).
+- **Visibility:** only the company area is fed, and other areas are refused (`deep_area_unsupported`). Person, team and agent memory never reach foundry, so no answer mixes the memories of different people. An agent sees Foundry only if it may read the company area.
+- **Tools (agent, read-only):**
+  - `deep_search`: rows and documents by words, no model. Rules narrowing `items`: tables whose source documents fail the tags and hidden documents are left out.
+  - `deep_ask`: foundry's analyst writes and runs read-only SQL. It returns rows, SQL, assumptions and citations to Knowledge documents. Without a model it answers plainly that a reasoning model is needed and points to `deep_search`. Narrowing `unsupported`, as `ask`.
+  - `deep_status`: tables, document count, last sync, model state; narrowing `items`.
+- **Owner:** person op `deep_settings_set` (company area on, or paused). The Settings page has a Foundry section.
+- **Attention:** `deep_missing` / `deep_unreachable` (the `/health` probe, retried every minute while unhealthy).
+- **Not built yet:** backup and restore of the deep volume, a dataset delete, the Connect database lease path (F5), per-area foundry workspaces with per-caller checks for person and team areas.
+
 ## Data
 
-- **Stored:** Migration 0001: `kn_areas`, `kn_collections`, `kn_documents` (title, slug, summary, body, status), `kn_revisions`, `kn_comments`, `kn_links`, `kn_documents_fts` (FTS5), `kn_projection` (outbox to the engine), `kn_state`. Migration 0003 (C373): `kn_areas.subject_kind` / `subject_id` (person and team areas, stored with kind `shared`), `kn_directory` (the reduced Governance directory copy: ids, owner, active and blocked flags, team names and members; no handles, no trust), `kn_team_grants`, `kn_access_log` (append-only). Sealed: registered engine client credentials. Engine data lives on the service volumes.
+- **Stored:** Migration 0001: `kn_areas`, `kn_collections`, `kn_documents` (title, slug, summary, body, status), `kn_revisions`, `kn_comments`, `kn_links`, `kn_documents_fts` (FTS5), `kn_projection` (outbox to the engine), `kn_state`. Migration 0004 (C373 Foundry): `kn_deep_areas` (the foundry workspace of an area, its documents dataset, the digest it was built from), `kn_deep_tables` (one row per table dataset: source documents, digest, state). Migration 0003 (C373): `kn_areas.subject_kind` / `subject_id` (person and team areas, stored with kind `shared`), `kn_directory` (the reduced Governance directory copy: ids, owner, active and blocked flags, team names and members; no handles, no trust), `kn_team_grants`, `kn_access_log` (append-only). Sealed: registered engine client credentials. Engine data lives on the service volumes.
 - **Never stored:** Attachments (no table, no op), model keys outside the bridge key store.
 
 ## External calls and background work
 
 - **External:** Only the engines, on the private network. Model providers (OpenAI, Google, Anthropic) are called by GBrain and Open Notebook, not by the app code.
-- **Background:** Projection outbox drain every 30 s (batch 20, max 12 attempts, backoff 5 s up to 1 hour). Engine probe at start and every 10 minutes (feeds SDK `attention()`). Retry of failed rows at boot. Migrations on the engine services are crash-safe (C69).
+- **Background:** Foundry feed every 60 s and after document writes (C373). Projection outbox drain every 30 s (batch 20, max 12 attempts, backoff 5 s up to 1 hour). Engine probe at start and every 10 minutes (feeds SDK `attention()`). Retry of failed rows at boot. Migrations on the engine services are crash-safe (C69).
 
 ## Person UI
 

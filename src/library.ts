@@ -6,6 +6,7 @@ import { readFileSync } from "node:fs";
 import type { HandlerSpec, Json, OpContext } from "@opt2-tealbrick/spec/sdk";
 import type { Area } from "./areas.ts";
 import { PROVIDER_MODELS } from "./config.ts";
+import { deepOverview } from "./deep.ts";
 import type { EngineSettings } from "./engines/gbrain/engine.ts";
 import { ENTRY_PREFIX } from "./engines/gbrain/exposure.ts";
 import type { NotebookClient } from "./engines/notebook/client.ts";
@@ -124,6 +125,8 @@ export function createLibraryHandlers(d: LibraryDeps): Record<string, HandlerSpe
             tools: { offered: report?.tools.offered?.length ?? null, error: report?.tools.error ?? null, surface: report?.surface ?? null },
             capabilities: engineCapabilities(s.engine !== null, report, CHAT_KEY[config.modelProvider]),
             areas,
+            // C373: Foundry (deep knowledge): on/off (deploy setting), model, the company area feed and its sync state
+            deep: await deepOverview(knowledge, s).catch(() => ({ enabled: config.deep, running: false, error: "deep_status_failed" }) as unknown as Json),
           });
         }),
     },
