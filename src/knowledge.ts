@@ -228,6 +228,7 @@ export class Knowledge {
     let engine: GBrainEngine | null = null;
     if (this.config.engine === "gbrain" && this.config.gbrainUrl && this.config.gbrainAdminToken) {
       const client = new GBrainClient({ baseUrl: this.config.gbrainUrl, adminToken: this.config.gbrainAdminToken, store: new SecretClientStore(this.secrets), fetch: this.opts.fetch, now });
+      client.onFailure = ({ stage, status, cause }) => this.engineLog?.("memory engine call failed", { stage, ...(status === undefined ? {} : { status }), ...(cause ? { cause } : {}) });
       engine = new GBrainEngine(client, areaSourceId(SHARED_AREA_ID));
     }
     const notebook =
@@ -258,6 +259,9 @@ export class Knowledge {
     this.provisionTimer = null;
     this.stopped = true;
   }
+
+  /** QA-KN027-1: the app log for engine-call failures (set in onStart; stage, status and cause code only). */
+  engineLog: ((msg: string, fields: Record<string, string | number>) => void) | null = null;
 
   /** Record what the engine just showed; a change pushes the app status at once (SDK `statusChanged`). */
   noteEngine(next: { state: EngineHealth["state"]; detail: string[] } | null): void {

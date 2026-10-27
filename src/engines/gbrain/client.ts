@@ -48,6 +48,36 @@ export interface GBrainClientOptions {
   now?: () => number;
 }
 
+/** QA-KN027-1: why an engine call failed, for the app log. Stage, HTTP status and the error's own code only: never a body, URL or token. */
+export interface GBrainFailure {
+  stage: "admin_login" | "full_stats" | "register_client" | "token";
+  status?: number;
+  cause?: string;
+}
+
+/**
+ * The error chain for the log, outermost first, at most 5 links: name, code, errno, syscall, address, port of each
+ * (undici puts the network error in `cause`, e.g. `TypeError` <- `Error code=ECONNREFUSED syscall=connect address=fd12::1 port=3131`).
+ * Never the message: it can carry a URL or an upstream body. Each field is sanitized and short; the whole string at most 400.
+ */
+export function failureCause(error: unknown): string {
+  const clean = (v: unknown, n: number) => String(v).replace(/[^A-Za-z0-9_.:/[\]-]/gu, "").slice(0, n);
+  const links: string[] = [];
+  let current: unknown = error;
+  for (let i = 0; current !== undefined && current !== null && i < 5; i++) {
+    if (typeof current !== "object") {
+      links.push(clean(typeof current, 16));
+      break;
+    }
+    const c = current as { name?: unknown; code?: unknown; errno?: unknown; syscall?: unknown; address?: unknown; port?: unknown; cause?: unknown; constructor?: { name?: unknown } };
+    const parts = [clean(c.name ?? c.constructor?.name ?? "object", 40)];
+    for (const key of ["code", "errno", "syscall", "address", "port"] as const) if (c[key] !== undefined && c[key] !== null) parts.push(`${key}=${clean(c[key], key === "address" ? 64 : 32)}`);
+    links.push(parts.join(" "));
+    current = c.cause;
+  }
+  return links.join(" <- ").slice(0, 400);
+}
+
 export class GBrainClient {
   readonly baseUrl: string;
   private readonly adminToken: string;
@@ -55,6 +85,16 @@ export class GBrainClient {
   private readonly fetcher: typeof fetch;
   private readonly now: () => number;
   private adminCookie: { value: string; expires: number } | null = null;
+  /** QA-KN027-1: set by the app (onStart) to log engine-call failures; each distinct failure is logged once in a row. */
+  onFailure: ((failure: GBrainFailure) => void) | null = null;
+  private lastFailure = "";
+
+  private failed(failure: GBrainFailure): void {
+    const key = `${failure.stage}|${failure.status ?? ""}|${failure.cause ?? ""}`;
+    if (key === this.lastFailure) return;
+    this.lastFailure = key;
+    this.onFailure?.(failure);
+  }
   private readonly tokens = new Map<string, { token: string; expires: number }>();
   private readonly pending = new Map<string, Promise<string>>();
 
@@ -82,12 +122,17 @@ export class GBrainClient {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ token: this.adminToken }),
       });
-    } catch {
+    } catch (error) {
+      this.failed({ stage: "admin_login", cause: failureCause(error) });
       throw new GBrainServiceError("gbrain_admin_unavailable");
     }
     const cookie = response.headers.get("set-cookie")?.split(";")[0];
     await response.body?.cancel();
-    if (!response.ok || !cookie?.startsWith("gbrain_admin=")) throw new GBrainServiceError("gbrain_admin_unavailable");
+    if (!response.ok || !cookie?.startsWith("gbrain_admin=")) {
+      this.failed({ stage: "admin_login", status: response.status, cause: response.ok ? "no_admin_cookie" : "http_status" });
+      throw new GBrainServiceError("gbrain_admin_unavailable");
+    }
+    this.lastFailure = "";
     // Upstream admin sessions last 24 h; renew well before.
     this.adminCookie = { value: cookie, expires: this.now() + 12 * 3_600_000 };
     return cookie;
@@ -106,11 +151,13 @@ export class GBrainClient {
       });
     } catch (error) {
       if (error instanceof GBrainServiceError) throw error;
+      this.failed({ stage: "register_client", cause: failureCause(error) });
       throw new GBrainServiceError("gbrain_client_registration_failed");
     }
     const body = (await response.json().catch(() => null)) as Record<string, unknown> | null;
     if (response.status === 401) this.adminCookie = null;
     if (!response.ok) {
+      this.failed({ stage: "register_client", status: response.status, cause: "http_status" });
       if (body?.error === "unknown_source" || body?.error === "archived_source") throw new GBrainServiceError("area_binding_required", "memory engine source is not provisioned for this area");
       throw new GBrainServiceError("gbrain_client_registration_failed");
     }
@@ -135,12 +182,16 @@ export class GBrainClient {
         signal: AbortSignal.timeout(15_000),
         body: new URLSearchParams({ grant_type: "client_credentials", client_id: stored.clientId, client_secret: stored.clientSecret, scope: "read write" }),
       });
-    } catch {
+    } catch (error) {
+      this.failed({ stage: "token", cause: failureCause(error) });
       throw new GBrainServiceError("gbrain_token_unavailable");
     }
     const body = (await response.json().catch(() => null)) as Record<string, unknown> | null;
     if (response.status === 400 || response.status === 401) return null; // revoked or unknown client: re-register once
-    if (!response.ok || typeof body?.access_token !== "string") throw new GBrainServiceError("gbrain_token_unavailable");
+    if (!response.ok || typeof body?.access_token !== "string") {
+      this.failed({ stage: "token", status: response.status, cause: response.ok ? "no_access_token" : "http_status" });
+      throw new GBrainServiceError("gbrain_token_unavailable");
+    }
     return { token: body.access_token, expiresIn: typeof body.expires_in === "number" ? body.expires_in : 300 };
   }
 
@@ -229,6 +280,7 @@ export class GBrainClient {
         response = await this.fetcher(`${this.baseUrl}/admin/api/full-stats`, { redirect: "error", signal: AbortSignal.timeout(15_000), headers: { cookie: await this.admin() } });
       } catch (error) {
         if (error instanceof GBrainServiceError) throw error;
+        this.failed({ stage: "full_stats", cause: failureCause(error) });
         throw new GBrainServiceError("gbrain_admin_unavailable");
       }
       // Admin sessions live in the engine's memory: after an engine restart the cookie is unknown; log in again once.
@@ -239,7 +291,10 @@ export class GBrainClient {
       }
       const body = (await response.json().catch(() => null)) as Record<string, unknown> | null;
       // An unhealthy engine answers 503 {error, error_description}: no counts → unavailable.
-      if (!body || typeof body.page_count !== "number") throw new GBrainServiceError("gbrain_admin_unavailable");
+      if (!body || typeof body.page_count !== "number") {
+        this.failed({ stage: "full_stats", status: response.status, cause: body ? "no_page_count" : "no_json" });
+        throw new GBrainServiceError("gbrain_admin_unavailable");
+      }
       return body;
     }
     throw new GBrainServiceError("gbrain_admin_unavailable");
