@@ -59,11 +59,13 @@ export function knowledgeDefinition(env: Record<string, string | undefined>, TbE
         knowledge.kick(services);
         // F89: probe the engine now (and every 10 min) so a degraded engine shows before the first recall.
         await knowledge.watchEngine(services, ctx.statusChanged ? () => ctx.statusChanged?.() : null, opts.engineProbeMs).catch(() => undefined);
+        // C373: hand the selected areas' documents to the deep service now and every minute (not awaited: it may start later).
+        void knowledge.watchDeep(services, opts.deepSyncMs).catch(() => undefined);
         // C296 INFO-2: a missing provider key is named at once (the engine waits for it).
         await knowledge.checkProviderKeys(ctx).catch(() => undefined);
         // a keysChanged during boot may have recorded it before the status push was wired: push once now (review)
         if (knowledge.attention()?.code === ENGINE_KEY_MISSING) ctx.statusChanged?.();
-        ctx.log.info("knowledge started", { engine: services.engine ? "gbrain" : "none", configured: knowledge.config.engine, attention: knowledge.attention()?.code ?? "none", engineState: knowledge.engineStatus().state, research: services.notebook !== null, areas: services.areas.list().length });
+        ctx.log.info("knowledge started", { engine: services.engine ? "gbrain" : "none", configured: knowledge.config.engine, attention: knowledge.attention()?.code ?? "none", engineState: knowledge.engineStatus().state, research: services.notebook !== null, deep: services.deep !== null, areas: services.areas.list().length });
       },
     },
   };

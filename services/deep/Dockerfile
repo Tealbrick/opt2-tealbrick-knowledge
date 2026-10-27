@@ -1,7 +1,7 @@
 # Deep knowledge (C130, C325; FOUNDRY-DESIGN v2 §2): helix-foundry at a pinned commit, unmodified, + HelixDB server from
 # its pinned image + tb-exec wrapper + the loopback supervisor and token proxy (services/deep/supervisor.ts).
 # Build context: repository root.
-FROM node:24.21.0-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20 AS tb
+FROM node:24.22.1-bookworm-slim@sha256:55fb5f5a527ea2c5c4a95f963e48ef90aa38c7b346054fdc8ee9957a2b55d205 AS tb
 # C62/BSD-10: tb-exec from the integrity-pinned lock (services/tb-exec), no install scripts.
 COPY services/tb-exec/package.json services/tb-exec/package-lock.json /opt/tb/
 RUN npm ci --prefix /opt/tb --omit=dev --ignore-scripts --no-audit --no-fund && npm cache clean --force
@@ -11,7 +11,7 @@ COPY tealbrick.manifest.json /opt/tb/tealbrick.manifest.json
 # HelixDB server: the image foundry pins (one-way storage upgrades: moving this pin is a migration, see services/README.md).
 FROM ghcr.io/helixdb/helixdb:v0.0.12@sha256:f22b50fdab8fadbf8b5a881e656f293fdf5c688bad018f503b8dbc2f0f29543d AS helix
 
-FROM node:24.21.0-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20 AS foundry
+FROM node:24.22.1-bookworm-slim@sha256:55fb5f5a527ea2c5c4a95f963e48ef90aa38c7b346054fdc8ee9957a2b55d205 AS foundry
 ARG FOUNDRY_REPO=https://github.com/helixdb/helix-foundry.git
 ARG FOUNDRY_COMMIT=52cfaa3ed2bde3fbeeca933fb77be55580a75efb
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates git && rm -rf /var/lib/apt/lists/* \
@@ -23,7 +23,7 @@ WORKDIR /opt/foundry
 RUN corepack enable && corepack prepare pnpm@10.7.0 --activate \
   && pnpm install --frozen-lockfile && pnpm build:sdk
 
-FROM node:24.21.0-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20
+FROM node:24.22.1-bookworm-slim@sha256:55fb5f5a527ea2c5c4a95f963e48ef90aa38c7b346054fdc8ee9957a2b55d205
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates tini && rm -rf /var/lib/apt/lists/*
 COPY --from=tb /opt/tb /opt/tb
 COPY --from=helix /bin/helix-server /usr/local/bin/helix-server

@@ -3,6 +3,7 @@ import type { Db } from "@opt2-tealbrick/spec/sdk";
 import { type AreaProvisioner, Areas } from "./areas.ts";
 import { type KnowledgeConfig, PROVIDER_KEY, PROVIDER_MODELS } from "./config.ts";
 import { DeepClient, type DeepHealth } from "./engines/deep/client.ts";
+import { DeepSync } from "./engines/deep/sync.ts";
 import { type ClientStore, GBrainClient, type StoredClient } from "./engines/gbrain/client.ts";
 import { GBrainEngine } from "./engines/gbrain/engine.ts";
 import { NotebookClient } from "./engines/notebook/client.ts";
@@ -25,6 +26,8 @@ export interface Services {
   projector: Projector | null;
   /** C336 F4: deep knowledge companion client (null when the setting is off or the service is not wired) */
   deep: DeepClient | null;
+  /** C373: the feed of Knowledge documents into the deep service (null when deep is off) */
+  deepSync: DeepSync | null;
   config: KnowledgeConfig;
 }
 
@@ -92,6 +95,8 @@ export const ENGINE_MISSING = "engine_missing";
 export const DEEP_MISSING = "deep_missing";
 export const DEEP_UNREACHABLE = "deep_unreachable";
 export const DEEP_RETRY_MS = 60_000;
+/** C373: how often the deep feed looks for document changes it was not kicked for (writes kick it at once) */
+export const DEEP_SYNC_MS = 60_000;
 
 export interface KnowledgeOptions {
   fetch?: typeof fetch;
@@ -102,6 +107,8 @@ export interface KnowledgeOptions {
   engineProbeMs?: number;
   /** first background provisioning retry delay (default PROVISION_RETRY_MS, doubles up to PROVISION_RETRY_MAX_MS) */
   provisionRetryMs?: number;
+  /** C373: deep feed interval (default DEEP_SYNC_MS); 0 syncs once at start only */
+  deepSyncMs?: number;
 }
 
 export class Knowledge {
@@ -115,6 +122,8 @@ export class Knowledge {
   /** C336 F4: last deep knowledge probe (null = not probed yet) */
   private deepHealth: DeepHealth | null = null;
   private deepRetry: ReturnType<typeof setTimeout> | null = null;
+  private deepTimer: ReturnType<typeof setInterval> | null = null;
+  private deepKick: ReturnType<typeof setTimeout> | null = null;
   private statusChanged: (() => void) | null = null;
   private probeTimer: ReturnType<typeof setInterval> | null = null;
   private pendingRequeue = false;
@@ -156,7 +165,8 @@ export class Knowledge {
         : null;
     const projector = engine ? new Projector(db, store, areas, engine, now) : null;
     const deep = this.config.deep && this.config.deepUrl && this.config.deepToken ? new DeepClient({ baseUrl: this.config.deepUrl, token: this.config.deepToken, fetch: this.opts.fetch }) : null;
-    this.services = { db, store, areas, engine, notebook, projector, deep, config: this.config };
+    const deepSync = deep ? new DeepSync(db, areas, deep, now) : null;
+    this.services = { db, store, areas, engine, notebook, projector, deep, deepSync, config: this.config };
     const interval = this.opts.drainIntervalMs ?? 30_000;
     if (projector && interval > 0 && !this.timer) {
       this.timer = setInterval(() => void this.services?.projector?.drain().catch(() => undefined), interval);
@@ -179,6 +189,10 @@ export class Knowledge {
     this.provisionTimer = null;
     if (this.deepRetry) clearTimeout(this.deepRetry);
     this.deepRetry = null;
+    if (this.deepTimer) clearInterval(this.deepTimer);
+    this.deepTimer = null;
+    if (this.deepKick) clearTimeout(this.deepKick);
+    this.deepKick = null;
     this.stopped = true;
   }
 
@@ -318,6 +332,27 @@ export class Knowledge {
   /** Kick the projection outbox without waiting (called after every document write). */
   kick(services: Services) {
     void services.projector?.drain().catch(() => undefined);
+    this.kickDeep(services);
+  }
+
+  /** C373: a document write reaches the deep service a moment later (writes in a burst share one pass). */
+  kickDeep(services: Services, delayMs = 2000) {
+    if (!services.deepSync || this.stopped || this.deepKick) return;
+    this.deepKick = setTimeout(() => {
+      this.deepKick = null;
+      void services.deepSync?.run().catch(() => undefined);
+    }, delayMs);
+    this.deepKick.unref();
+  }
+
+  /** C373: sync the deep feed now and every `intervalMs` (onStart). */
+  watchDeep(services: Services, intervalMs = DEEP_SYNC_MS): Promise<unknown> {
+    if (!services.deepSync) return Promise.resolve();
+    if (intervalMs > 0 && !this.deepTimer) {
+      this.deepTimer = setInterval(() => void (this.services ?? services).deepSync?.run().catch(() => undefined), intervalMs);
+      this.deepTimer.unref();
+    }
+    return services.deepSync.run();
   }
 
   /** Provision engine resources for areas that lack them (shared by concurrent callers). */
