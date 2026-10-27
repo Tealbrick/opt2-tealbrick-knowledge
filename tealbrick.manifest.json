@@ -4,7 +4,7 @@
   "id": "knowledge",
   "name": "Knowledge",
   "summary": "Memory and documents for your agents: a private memory area per agent, a shared company area, research notebooks.",
-  "description": "Knowledge gives every connected agent its own memory area and a shared company area. Agents remember and recall through memory tools; documents keep revisions, comments and links. Memory runs on GBrain, research on Open Notebook, both inside your own deployment.",
+  "description": "Knowledge gives every connected agent its own memory area and a shared company area. With Governance, the agents of one person share that person's memory and team members' agents read their team's memory; the owner decides which team may read whose memory. Agents remember and recall through memory tools; documents keep revisions, comments and links. Memory runs on GBrain, research on Open Notebook, both inside your own deployment.",
   "version": "0.1.26",
   "sdkMajor": 1,
   "publisher": {
@@ -338,7 +338,7 @@
     {
       "id": "recall",
       "title": "Recall memories",
-      "description": "Search your memory: every area you can read (your own area and the company area), or one area. Returns ranked passages; each has `ref` (open it with document_get or the engine tools), `source` (the citation), the area and its tags. The owner's rules may limit results to memories with certain tags.",
+      "description": "Search your memory: every area you can read (your own area, your owner's personal memory, your teams' memory and the company area), or one area. Returns ranked passages; each has `ref` (open it with document_get or the engine tools), `source` (the citation), the area and its tags. The owner's rules may limit results to memories with certain tags.",
       "input": {
         "type": "object",
         "additionalProperties": false,
@@ -354,7 +354,7 @@
           "area": {
             "type": "string",
             "pattern": "^[a-z0-9][a-z0-9-]{1,63}$",
-            "description": "Area id. Omit to use your own memory area."
+            "description": "Area id. Omit to use your default area: your owner's personal memory when Governance names your owner, else your own agent area."
           },
           "limit": {
             "type": "integer",
@@ -393,7 +393,7 @@
     {
       "id": "remember",
       "title": "Remember",
-      "description": "Save a memory in an area you can write to (default: your own area): `text` for one memory, or `items` for several. Each memory is stored once per area (the same text again returns the stored one). It becomes searchable by recall and is cited with its `source` when you give one. Add tags (for example work or personal): the owner's rules can limit recall to some tags.",
+      "description": "Save a memory in an area you can write to (default: your owner's personal memory when Governance names your owner, else your own agent area; the answer names the area): `text` for one memory, or `items` for several. Each memory is stored once per area (the same text again returns the stored one). It becomes searchable by recall and is cited with its `source` when you give one. Add tags (for example work or personal): the owner's rules can limit recall to some tags.",
       "input": {
         "type": "object",
         "additionalProperties": false,
@@ -411,7 +411,7 @@
           "area": {
             "type": "string",
             "pattern": "^[a-z0-9][a-z0-9-]{1,63}$",
-            "description": "Area id. Omit to use your own memory area."
+            "description": "Area id. Omit to use your default area: your owner's personal memory when Governance names your owner, else your own agent area."
           },
           "tags": {
             "type": "array",
@@ -769,7 +769,7 @@
     {
       "id": "ask",
       "title": "Ask your memory",
-      "description": "Ask a question that needs an answer composed from several memories, with citations and a note on what the memory does not know. Uses the deployment's reasoning model (costs model budget); runs in an area you can write to (default: your own area).",
+      "description": "Ask a question that needs an answer composed from several memories, with citations and a note on what the memory does not know. Uses the deployment's reasoning model (costs model budget); runs in an area you can write to (default: your owner's personal memory, else your own agent area).",
       "input": {
         "type": "object",
         "additionalProperties": false,
@@ -785,7 +785,7 @@
           "area": {
             "type": "string",
             "pattern": "^[a-z0-9][a-z0-9-]{1,63}$",
-            "description": "Area id. Omit to use your own area."
+            "description": "Area id. Omit to use your default area: your owner's personal memory when Governance names your owner, else your own agent area."
           }
         }
       },
@@ -811,7 +811,7 @@
     {
       "id": "areas_list",
       "title": "List areas",
-      "description": "List the memory areas you can read, with your access (read or read and write) and which one is your own.",
+      "description": "List the memory areas you can read: your own agent area, your owner's personal memory, your teams' memory, the company area and any person's memory the owner shared with one of your teams (`onlyTags` when only some tags are shared). Shows your access (read or read and write) and `defaultArea`, where a write without `area` goes.",
       "input": {
         "type": "object",
         "additionalProperties": false,
@@ -823,6 +823,22 @@
         "properties": {
           "areas": {
             "type": "array"
+          },
+          "defaultArea": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "directory": {
+            "type": "string",
+            "enum": [
+              "owner_known",
+              "no_owner",
+              "unavailable",
+              "not_applicable"
+            ],
+            "description": "owner_known: Governance names your owner; no_owner: it does not; unavailable: Knowledge has no current Governance directory (only your own area and the company area)."
           }
         }
       },
@@ -846,7 +862,7 @@
           "area": {
             "type": "string",
             "pattern": "^[a-z0-9][a-z0-9-]{1,63}$",
-            "description": "Area id. Omit to use your own memory area."
+            "description": "Area id. Omit to use your default area: your owner's personal memory when Governance names your owner, else your own agent area."
           }
         }
       },
@@ -882,7 +898,7 @@
           "area": {
             "type": "string",
             "pattern": "^[a-z0-9][a-z0-9-]{1,63}$",
-            "description": "Area id. Omit to use your own memory area."
+            "description": "Area id. Omit to use your default area: your owner's personal memory when Governance names your owner, else your own agent area."
           },
           "name": {
             "type": "string",
@@ -935,7 +951,7 @@
           "area": {
             "type": "string",
             "pattern": "^[a-z0-9][a-z0-9-]{1,63}$",
-            "description": "Area id. Omit to use your own memory area."
+            "description": "Area id. Omit to use your default area: your owner's personal memory when Governance names your owner, else your own agent area."
           },
           "collectionId": {
             "type": "string",
@@ -1011,7 +1027,7 @@
           "area": {
             "type": "string",
             "pattern": "^[a-z0-9][a-z0-9-]{1,63}$",
-            "description": "Area id. Omit to use your own memory area."
+            "description": "Area id. Omit to use your default area: your owner's personal memory when Governance names your owner, else your own agent area."
           },
           "collectionId": {
             "type": "string",
@@ -1424,7 +1440,7 @@
           "area": {
             "type": "string",
             "pattern": "^[a-z0-9][a-z0-9-]{1,63}$",
-            "description": "Area id. Omit to use your own memory area."
+            "description": "Area id. Omit to use your default area: your owner's personal memory when Governance names your owner, else your own agent area."
           },
           "limit": {
             "type": "integer",
@@ -1470,7 +1486,7 @@
           "area": {
             "type": "string",
             "pattern": "^[a-z0-9][a-z0-9-]{1,63}$",
-            "description": "Area id. Omit to use your own memory area."
+            "description": "Area id. Omit to use your default area: your owner's personal memory when Governance names your owner, else your own agent area."
           },
           "id": {
             "type": "string",
@@ -1502,7 +1518,7 @@
           "area": {
             "type": "string",
             "pattern": "^[a-z0-9][a-z0-9-]{1,63}$",
-            "description": "Area id. Omit to use your own memory area."
+            "description": "Area id. Omit to use your default area: your owner's personal memory when Governance names your owner, else your own agent area."
           }
         }
       },
@@ -1538,7 +1554,7 @@
           "area": {
             "type": "string",
             "pattern": "^[a-z0-9][a-z0-9-]{1,63}$",
-            "description": "Area id. Omit to use your own memory area."
+            "description": "Area id. Omit to use your default area: your owner's personal memory when Governance names your owner, else your own agent area."
           },
           "id": {
             "type": "string",
@@ -1574,7 +1590,7 @@
           "area": {
             "type": "string",
             "pattern": "^[a-z0-9][a-z0-9-]{1,63}$",
-            "description": "Area id. Omit to use your own memory area."
+            "description": "Area id. Omit to use your default area: your owner's personal memory when Governance names your owner, else your own agent area."
           },
           "title": {
             "type": "string",
@@ -1619,7 +1635,7 @@
           "area": {
             "type": "string",
             "pattern": "^[a-z0-9][a-z0-9-]{1,63}$",
-            "description": "Area id. Omit to use your own memory area."
+            "description": "Area id. Omit to use your default area: your owner's personal memory when Governance names your owner, else your own agent area."
           },
           "title": {
             "type": "string",
@@ -1662,7 +1678,7 @@
           "area": {
             "type": "string",
             "pattern": "^[a-z0-9][a-z0-9-]{1,63}$",
-            "description": "Area id. Omit to use your own memory area."
+            "description": "Area id. Omit to use your default area: your owner's personal memory when Governance names your owner, else your own agent area."
           },
           "sessionId": {
             "type": "string",
@@ -1708,7 +1724,7 @@
           "area": {
             "type": "string",
             "pattern": "^[a-z0-9][a-z0-9-]{1,63}$",
-            "description": "Area id. Omit to use your own memory area."
+            "description": "Area id. Omit to use your default area: your owner's personal memory when Governance names your owner, else your own agent area."
           },
           "sessionId": {
             "type": "string",
@@ -1893,7 +1909,7 @@
           "area": {
             "type": "string",
             "pattern": "^[a-z0-9][a-z0-9-]{1,63}$",
-            "description": "Area id. Omit to use your own memory area."
+            "description": "Area id. Omit to use your default area: your owner's personal memory when Governance names your owner, else your own agent area."
           }
         }
       },
@@ -1920,7 +1936,7 @@
           "area": {
             "type": "string",
             "pattern": "^[a-z0-9][a-z0-9-]{1,63}$",
-            "description": "Area id. Omit to use your own memory area."
+            "description": "Area id. Omit to use your default area: your owner's personal memory when Governance names your owner, else your own agent area."
           },
           "id": {
             "type": "string",
@@ -2783,6 +2799,159 @@
       "idempotency": "supported",
       "receipt": true,
       "audience": "person"
+    },
+    {
+      "id": "access_overview",
+      "title": "Access overview",
+      "description": "People and their memory areas, teams with members and the grants that let a team read a person's memory, and whether Knowledge has the Governance directory.",
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "directory": {
+            "type": "object"
+          },
+          "people": {
+            "type": "array"
+          },
+          "teams": {
+            "type": "array"
+          },
+          "agentsWithoutOwner": {
+            "type": "array"
+          },
+          "grants": {
+            "type": "array"
+          },
+          "log": {
+            "type": "array"
+          }
+        }
+      },
+      "crud": [
+        "read"
+      ],
+      "effect": "read",
+      "idempotency": "none",
+      "receipt": false,
+      "audience": "person"
+    },
+    {
+      "id": "access_grant_set",
+      "title": "Let a team read a person's memory",
+      "description": "Let the agents of one team read one person's memory (all of it, or only memories with one of the given tags). Replaces an earlier grant for the same team and person.",
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "team",
+          "person"
+        ],
+        "properties": {
+          "team": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "description": "Governance team id."
+          },
+          "person": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "description": "Governance person id."
+          },
+          "tags": {
+            "type": "array",
+            "maxItems": 20,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 40
+            },
+            "description": "Only memories with at least one of these tags. Omit or leave empty for the whole memory."
+          }
+        }
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "team": {
+            "type": "string"
+          },
+          "person": {
+            "type": "string"
+          },
+          "tags": {
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "changed": {
+            "type": "boolean"
+          }
+        }
+      },
+      "crud": [
+        "create"
+      ],
+      "effect": "write",
+      "idempotency": "required",
+      "receipt": true,
+      "audience": "person"
+    },
+    {
+      "id": "access_grant_remove",
+      "title": "Stop a team reading a person's memory",
+      "description": "Remove the grant that lets a team's agents read a person's memory. Takes effect on their next call.",
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "team",
+          "person"
+        ],
+        "properties": {
+          "team": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "person": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          }
+        }
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "team": {
+            "type": "string"
+          },
+          "person": {
+            "type": "string"
+          },
+          "removed": {
+            "type": "boolean"
+          }
+        }
+      },
+      "crud": [
+        "update"
+      ],
+      "effect": "write",
+      "idempotency": "supported",
+      "receipt": true,
+      "audience": "person"
     }
   ],
   "scopes": [
@@ -2944,6 +3113,18 @@
       }
     ]
   },
+  "companions": [
+    {
+      "product": "fleet",
+      "operations": [
+        "directory_feed"
+      ],
+      "crud": [
+        "read"
+      ],
+      "purpose": "Reads the Governance directory (people, teams, which person owns which agent) so each person's agents share that person's memory (refreshed outside calls)."
+    }
+  ],
   "skills": [
     {
       "id": "knowledge-memory",

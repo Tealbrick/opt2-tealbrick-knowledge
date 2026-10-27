@@ -20,6 +20,8 @@ export interface StartContext {
   scopes: ScopeStore;
   getKey(name: string): Promise<string | null>;
   callServiceHelper<O = Json>(serviceId: string, path: string, body: Json): Promise<O>;
+  /** SDK C85: app-initiated companion call (the Governance directory feed, C373); absent in hand-built test contexts */
+  callApp?<O = Json>(product: string, op: string, input: Json): Promise<{ status: "ok"; output: O } | { status: "held"; holdId: string }>;
 }
 
 export type KnowledgeDefinition = AppDefinition & { onStart(ctx: StartContext): Promise<void>; attention?(): Promise<{ code: string; reason: string } | null> };
@@ -57,6 +59,8 @@ export function knowledgeDefinition(env: Record<string, string | undefined>, TbE
         const requeued = knowledge.requeueAfterRestore(services);
         if (requeued) ctx.log.info("projection requeued after restore", { rows: requeued });
         knowledge.kick(services);
+        // C373: the Governance directory copy (who owns which agent, teams) is read now and every 60 s, outside calls.
+        knowledge.watchDirectory(ctx.db, ctx.callApp);
         // F89: probe the engine now (and every 10 min) so a degraded engine shows before the first recall.
         await knowledge.watchEngine(services, ctx.statusChanged ? () => ctx.statusChanged?.() : null, opts.engineProbeMs).catch(() => undefined);
         // C296 INFO-2: a missing provider key is named at once (the engine waits for it).

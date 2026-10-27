@@ -1,7 +1,8 @@
 // Wiring of Knowledge's domain services onto the SDK-provided database and context.
-import type { Db } from "@opt2-tealbrick/spec/sdk";
+import type { Db, Json } from "@opt2-tealbrick/spec/sdk";
 import { type AreaProvisioner, Areas } from "./areas.ts";
 import { type KnowledgeConfig, PROVIDER_KEY, PROVIDER_MODELS } from "./config.ts";
+import { type CallApp, startDirectoryTimer } from "./directory-feed.ts";
 import { type ClientStore, GBrainClient, type StoredClient } from "./engines/gbrain/client.ts";
 import { GBrainEngine } from "./engines/gbrain/engine.ts";
 import { NotebookClient } from "./engines/notebook/client.ts";
@@ -95,7 +96,12 @@ export interface KnowledgeOptions {
   engineProbeMs?: number;
   /** first background provisioning retry delay (default PROVISION_RETRY_MS, doubles up to PROVISION_RETRY_MAX_MS) */
   provisionRetryMs?: number;
+  /** C373: Governance directory refresh interval (default REFRESH_MS, 60 s) */
+  directoryRefreshMs?: number;
 }
+
+/** SDK C85 background `callApp` (StartContext), as Knowledge uses it for the Governance directory (C373). */
+export type StartContextCallApp = (product: string, op: string, input: Json) => Promise<{ status: "ok"; output: unknown } | { status: "held"; holdId: string }>;
 
 export class Knowledge {
   readonly config: KnowledgeConfig;
@@ -117,6 +123,7 @@ export class Knowledge {
   private provisionInFlight = false;
   private provisionLog: ((msg: string, fields: Record<string, string>) => void) | null = null;
   private stopped = false;
+  private stopDirectory: (() => void) | null = null;
 
   constructor(config: KnowledgeConfig, opts: KnowledgeOptions = {}) {
     this.config = config;
@@ -159,7 +166,15 @@ export class Knowledge {
     return this.services;
   }
 
+  /** C373: start the Governance directory timer once (src/directory-feed.ts); no `callApp` = no directory (fail closed). */
+  watchDirectory(db: Db, callApp: StartContextCallApp | undefined): void {
+    if (!callApp || this.stopDirectory || this.stopped) return;
+    this.stopDirectory = startDirectoryTimer(db, ((product, op, input) => callApp(product, op, input)) as CallApp, this.opts.directoryRefreshMs);
+  }
+
   stop() {
+    this.stopDirectory?.();
+    this.stopDirectory = null;
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
     if (this.probeTimer) clearInterval(this.probeTimer);
