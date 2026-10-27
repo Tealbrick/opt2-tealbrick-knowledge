@@ -25,6 +25,7 @@ Knowledge gives agents memory and documents, with data in the customer's own dep
 - Document bodies are projected into the memory engine as GBrain pages. The engine can be rebuilt from Knowledge (`afterRestore` requeues everything). Engines are pinned, unmodified upstream services: GBrain (memory) and Open Notebook (research, optional). The Hindsight engine is disabled.
 - Engine tools are exposed 1:1 under a dynamic `engine` list, bounded by a pinned surface; anything else fails closed. Without an engine, recall degrades to keyword search (`degraded: true`).
 - Areas are grant scopes: one private memory area per agent and one shared company area.
+- Companion apps (Observer) may write into the company area as app callers: `areas_list`, `document_create`, `document_update` only, never an agent's private area. The document page names the app ("Observer").
 - Auth, grants, receipts, settings and backups come from the Miniapp SDK. Knowledge has no own auth.
 
 ## Language
@@ -67,7 +68,8 @@ Run the person UI without a bridge: set `TB_STANDALONE=1` and `TB_DATA_DIR` to a
 The SDK reads only `TB_*` variables (SDK API section 13). The Dockerfile does not set `TB_DATA_DIR` or `TB_BACKUP_DIR`, so the deploy must provide them (`/data` and `/data/backup`). App-specific:
 
 - Settings (all `mutable:false`, set at deploy): `engine` (gbrain), `research` (default false), `model_provider` (openai default, google, anthropic).
-- Keys, from the bridge key store (account default): `OPENAI_API_KEY` (required for openai and for anthropic embeddings), `ANTHROPIC_API_KEY`, `GOOGLE_GENERATIVE_AI_API_KEY`.
+- Model roles (C373, manifest `settings.modelRoles`): `embeddings` (search by meaning) and `reasoning` (ask), both optional. The owner binds each role on the bridge Keys and models page. `tb-exec` fills them into the `gbrain` service as `KN_EMBEDDINGS_{PROVIDER,MODEL,BASE_URL,KEY,DIMS}` and `KN_REASONING_{PROVIDER,MODEL,BASE_URL,KEY}`; the GBrain boot wrapper (`services/gbrain/models.ts`) turns them into the engine's own settings and reports the result at helper path `/models`. Without a role, recall is keyword-only and `ask` answers 409 `reasoning_model_missing`. The Settings page shows both roles as bound, not bound or degraded.
+- Older provider keys (fallback, now optional): `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_GENERATIVE_AI_API_KEY`. A role with no binding uses the `model_provider` defaults when its key is set.
 - Environment passed to the app: `KNOWLEDGE_ENGINE`, `KNOWLEDGE_RESEARCH`, `KNOWLEDGE_MODEL_PROVIDER`, `KNOWLEDGE_GBRAIN_URL`, `KNOWLEDGE_GBRAIN_ADMIN_TOKEN`, `KNOWLEDGE_NOTEBOOK_URL`, `KNOWLEDGE_NOTEBOOK_PASSWORD` (wired by the deploy recipe).
 - Service knobs: `KNOWLEDGE_MIGRATION_{WAIT_S,LOCK_STALE_S,POLL_S,RETRY_MIN_S,RETRY_MAX_S}`.
 - Default model names live in `src/config.ts`. Making them customer-editable is an open item.
@@ -75,7 +77,7 @@ The SDK reads only `TB_*` variables (SDK API section 13). The Dockerfile does no
 Companion services (built from `services/<id>/Dockerfile`, started with the SDK `tb-exec` wrapper, which fetches declared keys and runs backup dump and restore):
 
 - `gbrain-db`: pgvector on Postgres 17.
-- `gbrain`: upstream commit pinned, with a Tealbrick boot wrapper (crash-safe migration lock) and a helper.
+- `gbrain`: upstream commit pinned, with a Tealbrick boot wrapper (crash-safe migration lock, model plan from the roles) and a helper (`/sources`, `/models`).
 - `notebook-db`: SurrealDB (Business Source License 1.1), only when research is on.
 - `notebook`: Open Notebook, only when research is on.
 

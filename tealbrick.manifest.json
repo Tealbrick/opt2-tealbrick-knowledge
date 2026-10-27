@@ -392,6 +392,92 @@
       "audience": "agent"
     },
     {
+      "id": "document_create",
+      "title": "Create document",
+      "description": "Create a document in a collection (default: the area's default collection).",
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "title"
+        ],
+        "properties": {
+          "area": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]{1,63}$",
+            "description": "Area id. Omit to use your own memory area."
+          },
+          "collectionId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "parentId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "body": {
+            "type": "string",
+            "maxLength": 500000
+          },
+          "summary": {
+            "type": "string",
+            "maxLength": 2000
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "draft",
+              "published",
+              "archived"
+            ]
+          },
+          "tags": {
+            "type": "array",
+            "maxItems": 20,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 40
+            }
+          }
+        }
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "area": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "version": {
+            "type": "integer"
+          }
+        }
+      },
+      "crud": [
+        "create"
+      ],
+      "effect": "write",
+      "scopeType": "area",
+      "idempotency": "required",
+      "receipt": true,
+      "audience": "agent"
+    },
+    {
       "id": "remember",
       "title": "Remember",
       "description": "Save a memory in an area you can write to (default: your own area): `text` for one memory, or `items` for several. Each memory is stored once per area (the same text again returns the stored one). It becomes searchable by recall and is cited with its `source` when you give one. Add tags (for example work or personal): the owner's rules can limit recall to some tags.",
@@ -996,92 +1082,6 @@
       "scopeType": "area",
       "idempotency": "none",
       "receipt": false,
-      "audience": "agent"
-    },
-    {
-      "id": "document_create",
-      "title": "Create document",
-      "description": "Create a document in a collection (default: the area's default collection).",
-      "input": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": [
-          "title"
-        ],
-        "properties": {
-          "area": {
-            "type": "string",
-            "pattern": "^[a-z0-9][a-z0-9-]{1,63}$",
-            "description": "Area id. Omit to use your own memory area."
-          },
-          "collectionId": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 64
-          },
-          "parentId": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 64
-          },
-          "title": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 200
-          },
-          "body": {
-            "type": "string",
-            "maxLength": 500000
-          },
-          "summary": {
-            "type": "string",
-            "maxLength": 2000
-          },
-          "status": {
-            "type": "string",
-            "enum": [
-              "draft",
-              "published",
-              "archived"
-            ]
-          },
-          "tags": {
-            "type": "array",
-            "maxItems": 20,
-            "items": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 40
-            }
-          }
-        }
-      },
-      "output": {
-        "type": "object",
-        "additionalProperties": false,
-        "properties": {
-          "id": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 64
-          },
-          "area": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 64
-          },
-          "version": {
-            "type": "integer"
-          }
-        }
-      },
-      "crud": [
-        "create"
-      ],
-      "effect": "write",
-      "scopeType": "area",
-      "idempotency": "required",
-      "receipt": true,
       "audience": "agent"
     },
     {
@@ -2797,6 +2797,15 @@
           "label": "Read",
           "crud": [
             "read"
+          ]
+        },
+        {
+          "id": "contribute",
+          "label": "Read, add and edit",
+          "crud": [
+            "read",
+            "create",
+            "update"
           ]
         },
         {

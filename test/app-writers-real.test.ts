@@ -181,3 +181,16 @@ test("C373 Observer replay (observer#11): areas_list {}, document_create / docum
   const long = await call("document_create", { title: "long tag", tags: [`source:${"x".repeat(40)}`] }, { app: true });
   assert.equal(long.status, 400, `a tag longer than 40 characters is refused (${long.code})`);
 });
+
+test("C373 contribute level (read, create, update; no delete): an agent set to it adds and edits in its area but cannot delete", async () => {
+  const { a, agentA } = await ownAreas();
+  await personOp("tb.scopes_set", { agent: agentA, type: "area", id: a, access: "contribute" });
+  try {
+    const made = await ok("document_create", { title: "Contribute probe", area: a }, { agent: agentA });
+    await ok("document_update", { id: made.id, body: "edited", expectedVersion: made.version }, { agent: agentA });
+    assert.equal((await call("document_delete", { id: made.id }, { agent: agentA })).code, "scope_denied");
+    assert.equal(((await ok("areas_list", {}, { agent: agentA })).areas as { id: string; access: string }[]).find((x) => x.id === a)?.access, "read_write");
+  } finally {
+    await personOp("tb.scopes_set", { agent: agentA, type: "area", id: a, access: "read_write" });
+  }
+});
