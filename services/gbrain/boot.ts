@@ -4,11 +4,21 @@
 //    every stop signal (the old `sh` entrypoint died on SIGTERM and left upstream's lease behind: qa1, 2026-10-12).
 // 3. Spawns `gbrain serve --http`, forwards signals, exits with its status.
 import { type ChildProcess, spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { constants, hostname } from "node:os";
 import { AbortedError, type BootStatus, type Log, migrateCrashSafe } from "./migration-lock.ts";
+import { applyEnv, builtFrom, type ModelStatus, planModels } from "./models.ts";
 import { connectPg, pgOptionsFromEnv } from "./pg-lock-session.ts";
+
+/** C373: the model status file the helper serves at `/models` (labels only), on the service volume beside GBrain's home. */
+export const MODEL_STATUS_FILE = "knowledge-models.json";
+
+function writeStatus(home: string, status: ModelStatus): void {
+  const path = `${home}/${MODEL_STATUS_FILE}`;
+  writeFileSync(`${path}.tmp`, `${JSON.stringify({ ...status, at: new Date().toISOString() })}\n`, { mode: 0o644 });
+  renameSync(`${path}.tmp`, path);
+}
 
 const STOP_SIGNALS: readonly NodeJS.Signals[] = ["SIGTERM", "SIGINT", "SIGQUIT"];
 const FORWARDED: readonly NodeJS.Signals[] = [...STOP_SIGNALS, "SIGHUP", "SIGUSR1", "SIGUSR2"];
@@ -29,10 +39,10 @@ function seconds(env: Record<string, string | undefined>, name: string, fallback
 }
 
 /** Runs one GBrain CLI command as a child; on `signal` it forwards SIGTERM, then SIGKILL after the grace period. */
-export function runChild(argv: readonly string[], signal: AbortSignal, graceMs = CHILD_STOP_GRACE_MS): Promise<number> {
+export function runChild(argv: readonly string[], signal: AbortSignal, graceMs = CHILD_STOP_GRACE_MS, env: NodeJS.ProcessEnv = process.env): Promise<number> {
   return new Promise((resolve) => {
     const [file, ...args] = argv as [string, ...string[]];
-    const child = spawn(file, args, { stdio: "inherit" });
+    const child = spawn(file, args, { stdio: "inherit", env });
     let kill: NodeJS.Timeout | null = null;
     const onAbort = () => {
       child.kill("SIGTERM");
@@ -96,6 +106,12 @@ export async function main(env: Record<string, string | undefined> = process.env
     });
   }
 
+  // C373: the models this boot runs with (model roles, else the legacy provider setting); the env GBrain gets is composed here
+  const configPath = `${home}/.gbrain/config.json`;
+  const readBuilt = () => (existsSync(configPath) ? builtFrom(JSON.parse(readFileSync(configPath, "utf8"))) : null);
+  let plan = planModels(env, readBuilt());
+  let gbEnv = applyEnv(env, plan.env);
+  let enabled = false;
   const server = await statusServer(port, bind, () => status);
   try {
     const pg = pgOptionsFromEnv(env);
@@ -113,13 +129,28 @@ export async function main(env: Record<string, string | undefined> = process.env
       attentionMinMs: seconds(env, "KNOWLEDGE_MIGRATION_RETRY_MIN_S", 30_000),
       attentionMaxMs: seconds(env, "KNOWLEDGE_MIGRATION_RETRY_MAX_S", 300_000),
       run: async (signal) => {
-        if (!existsSync(`${home}/.gbrain/config.json`)) {
-          const emb = env.GBRAIN_EMBEDDING_MODEL ?? "openai:text-embedding-3-small";
-          const dims = env.GBRAIN_EMBEDDING_DIMENSIONS ?? "1536";
-          const code = await runChild([...gbrain, "init", "--non-interactive", "--embedding-model", emb, "--embedding-dimensions", dims], signal);
+        plan = planModels(env, readBuilt());
+        gbEnv = applyEnv(env, plan.env);
+        if (plan.init) {
+          let code = await runChild([...gbrain, "init", "--non-interactive", ...plan.init], signal, undefined, gbEnv);
+          if (code !== 0 && plan.init[0] !== "--no-embedding" && !signal.aborted) {
+            // GBrain refused this embeddings model (unknown size, unknown model): start without embeddings, say so
+            log("warn", "embeddings_init_failed", { model: plan.status.embeddings.wanted?.model ?? null, code });
+            code = await runChild([...gbrain, "init", "--non-interactive", "--no-embedding"], signal, undefined, gbEnv);
+            plan.status.embeddings = { ...plan.status.embeddings, state: "failed", active: null };
+          }
           if (code !== 0) return code;
         }
-        return runChild([...gbrain, "apply-migrations", "--yes", "--no-autopilot-install"], signal);
+        const code = await runChild([...gbrain, "apply-migrations", "--yes", "--no-autopilot-install"], signal, undefined, gbEnv);
+        if (code !== 0 || !plan.enable) return code;
+        // a brain built without embeddings and a binding now: enable in place (refuses, changing nothing, when it cannot fit)
+        const enable = await runChild([...gbrain, "embeddings", "enable", ...plan.enable], signal, undefined, gbEnv);
+        enabled = enable === 0;
+        if (!enabled) {
+          log("warn", "embeddings_enable_failed", { model: plan.status.embeddings.wanted?.model ?? null, code: enable });
+          plan.status.embeddings = { ...plan.status.embeddings, state: "failed", active: null };
+        }
+        return 0;
       },
     });
   } catch (e) {
@@ -131,14 +162,26 @@ export async function main(env: Record<string, string | undefined> = process.env
   status = { status: "starting", phase: "serve" };
   await closeServer(server);
   if (stopSignal) return signalCode(stopSignal);
+  try {
+    writeStatus(home, plan.status);
+  } catch (e) {
+    log("warn", "model_status_unwritten", { message: e instanceof Error ? e.message : String(e) });
+  }
+  log("info", "models", { embeddings: plan.status.embeddings.state, embeddingModel: plan.status.embeddings.active?.model ?? null, reasoning: plan.status.reasoning.state, reasoningModel: plan.status.reasoning.model });
 
   // Private-network shape from upstream docs/mcp/DEPLOY.md ("Plain HTTP"): no --public-url, so the OAuth issuer stays
   // the default http://localhost:<port> (the MCP SDK refuses a non-HTTPS issuer on any other host). Knowledge's
   // client_credentials tokens are bound to that default resource and verified without reading the request host.
   const [file, ...args] = [...gbrain, "serve", "--http", "--bind", bind, "--port", String(port), "--suppress-bootstrap-token", "--fail-fast"] as [string, ...string[]];
   log("info", "serve_starting", { port });
-  const child = spawn(file, args, { stdio: "inherit" });
+  const child = spawn(file, args, { stdio: "inherit", env: gbEnv });
   serve = child;
+  if (enabled) {
+    // embeddings were just enabled: vectors for the existing chunks, beside serve (Postgres; per-source upstream locks)
+    const embed = new AbortController();
+    child.once("exit", () => embed.abort());
+    void runChild([...gbrain, "embed", "--stale"], embed.signal, undefined, gbEnv).then((code) => log(code === 0 ? "info" : "warn", "embed_stale_done", { code }));
+  }
   return new Promise((resolve) => {
     child.once("error", () => resolve(127));
     child.once("exit", (code, sig) => resolve(code ?? signalCode(sig)));

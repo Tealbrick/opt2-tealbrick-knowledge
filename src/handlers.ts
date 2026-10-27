@@ -550,6 +550,11 @@ export function createHandlers(knowledge: Knowledge, TbError: ErrorFactory) {
           const id = defaultArea(ctx, input.area);
           // model cost runs only in an area the caller may write (as the engine's own think)
           await writable(ctx, id, "read");
+          // C373: think needs the reasoning role (or the legacy provider key); say so instead of an engine error
+          const reasoning = knowledge.engineModels()?.reasoning ?? (await knowledge.checkModels(ctx))?.reasoning;
+          if (reasoning && reasoning.state !== "ok") {
+            throw fail("reasoning_model_missing", "ask needs a reasoning model: the owner sets the reasoning role on the Keys and models page (open it from Portal)", 409);
+          }
           const area = await readyArea(ctx, s, id, "source");
           try {
             const answer = await engine.call(area.sourceId, "gb_think", { question: String(input.question) }, ctx.caller.id);
@@ -1044,8 +1049,8 @@ export function createHandlers(knowledge: Knowledge, TbError: ErrorFactory) {
     async keysChanged() {
       const s = knowledge.current();
       if (s) knowledge.forgetResearchModel(s);
-      // C296 INFO-2: a key the engine waited for may be set now (or one was removed)
-      await knowledge.checkProviderKeys().catch(() => undefined);
+      // C373: keys or model roles changed (one keysRev): tb-exec restarts the engine with them; read its models again
+      await knowledge.modelsChanged().catch(() => undefined);
     },
   };
 

@@ -209,7 +209,8 @@
         "helper": {
           "port": 3140,
           "paths": [
-            "/sources"
+            "/sources",
+            "/models"
           ]
         }
       },
@@ -2862,11 +2863,11 @@
       },
       {
         "id": "models",
-        "title": "Model provider",
+        "title": "Model provider (older installs)",
         "when": {
           "engine": "gbrain"
         },
-        "help": "The memory engine needs an embedding model to search by meaning. Anthropic has no embeddings, so it also needs an OpenAI key.",
+        "help": "Set models on the Keys and models page instead: embeddings (search by meaning) and reasoning (ask). This provider and its key are used only while no model role is set. Without any embeddings model, recall is keyword-only.",
         "fields": [
           {
             "key": "model_provider",
@@ -2898,7 +2899,7 @@
         "name": "OPENAI_API_KEY",
         "label": "OpenAI API key",
         "provider": "OpenAI",
-        "required": true,
+        "required": false,
         "source": "account_default",
         "usedBy": [
           "gbrain",
@@ -2910,13 +2911,14 @@
             "anthropic"
           ]
         },
-        "step": "models"
+        "step": "models",
+        "help": "Older installs only: used while no model role is set on the Keys and models page."
       },
       {
         "name": "ANTHROPIC_API_KEY",
         "label": "Anthropic API key",
         "provider": "Anthropic",
-        "required": true,
+        "required": false,
         "source": "account_default",
         "usedBy": [
           "gbrain",
@@ -2925,13 +2927,14 @@
         "when": {
           "model_provider": "anthropic"
         },
-        "step": "models"
+        "step": "models",
+        "help": "Older installs only: used while no model role is set on the Keys and models page."
       },
       {
         "name": "GOOGLE_GENERATIVE_AI_API_KEY",
         "label": "Google Gemini API key",
         "provider": "Google",
-        "required": true,
+        "required": false,
         "source": "account_default",
         "usedBy": [
           "gbrain",
@@ -2940,7 +2943,41 @@
         "when": {
           "model_provider": "google"
         },
-        "step": "models"
+        "step": "models",
+        "help": "Older installs only: used while no model role is set on the Keys and models page."
+      }
+    ],
+    "modelRoles": [
+      {
+        "role": "embeddings",
+        "required": false,
+        "minPolicy": "standard",
+        "usedBy": [
+          "gbrain"
+        ],
+        "env": {
+          "provider": "KN_EMBEDDINGS_PROVIDER",
+          "model": "KN_EMBEDDINGS_MODEL",
+          "baseUrl": "KN_EMBEDDINGS_BASE_URL",
+          "key": "KN_EMBEDDINGS_KEY",
+          "dims": "KN_EMBEDDINGS_DIMS"
+        },
+        "help": "Search by meaning. Without it recall is keyword-only. The memory index keeps the model it was built with; a later change needs a re-index."
+      },
+      {
+        "role": "reasoning",
+        "required": false,
+        "minPolicy": "standard",
+        "usedBy": [
+          "gbrain"
+        ],
+        "env": {
+          "provider": "KN_REASONING_PROVIDER",
+          "model": "KN_REASONING_MODEL",
+          "baseUrl": "KN_REASONING_BASE_URL",
+          "key": "KN_REASONING_KEY"
+        },
+        "help": "Answers questions over memory (ask). Without it ask answers that a reasoning model is needed."
       }
     ]
   },

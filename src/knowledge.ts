@@ -81,8 +81,41 @@ export const PROVISION_RETRY_MAX_MS = 5 * 60_000;
 export const PROVISION_UNREACHABLE_AFTER = 4;
 /** C296 review: attention code when the engine companion does not answer, so its sources cannot be created. */
 export const ENGINE_UNREACHABLE = "memory_engine_unreachable";
-/** C296 QA INFO-2: attention code while the memory engine waits for its provider key (tb-exec holds GBrain until it is set). */
-export const ENGINE_KEY_MISSING = "memory_engine_key_missing";
+/** C373 (spec MODEL_ROLE_ATTENTION): an optional model role is not set (or cannot be used), so Knowledge runs with less. */
+export const MODEL_ROLE_OPTIONAL = "model_role_optional";
+/** C373: the embeddings binding differs from the model the memory index was built with; the index keeps its model. */
+export const EMBEDDINGS_CHANGED = "embeddings_changed";
+
+/**
+ * C373: which models the memory engine runs with, as its boot wrapper reports them (services/gbrain/models.ts ModelStatus,
+ * through the helper path `/models`). Labels only: GBrain `provider:model` strings and sizes, never a key or an address.
+ */
+export interface EngineModels {
+  embeddings: { state: string; source: "role" | "legacy" | null; active: { model: string; dims: number | null } | null; wanted: { model: string; dims: number | null } | null };
+  reasoning: { state: string; source: "role" | "legacy" | null; model: string | null };
+}
+
+const label = (v: unknown): string | null => (typeof v === "string" && /^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,160}$/u.test(v) && !v.includes("//") ? v : null);
+const sized = (v: unknown): { model: string; dims: number | null } | null => {
+  const o = v && typeof v === "object" ? (v as Record<string, unknown>) : null;
+  const model = label(o?.model);
+  return model ? { model, dims: typeof o?.dims === "number" && Number.isInteger(o.dims) && o.dims > 0 ? o.dims : null } : null;
+};
+const sourceOf = (v: unknown) => (v === "role" || v === "legacy" ? v : null);
+
+/** Reads the helper answer strictly (anything unexpected → null = unknown); only closed labels pass. */
+export function readEngineModels(raw: unknown): EngineModels | null {
+  const o = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : null;
+  const e = o?.embeddings && typeof o.embeddings === "object" ? (o.embeddings as Record<string, unknown>) : null;
+  const r = o?.reasoning && typeof o.reasoning === "object" ? (o.reasoning as Record<string, unknown>) : null;
+  const EMB = ["ok", "unset", "changed", "enabled", "unsupported", "dims_missing", "failed"];
+  const RSN = ["ok", "unset", "unsupported", "conflict"];
+  if (o?.v !== 1 || !e || !r || !EMB.includes(String(e.state)) || !RSN.includes(String(r.state))) return null;
+  return {
+    embeddings: { state: String(e.state), source: sourceOf(e.source), active: sized(e.active), wanted: sized(e.wanted) },
+    reasoning: { state: String(r.state), source: sourceOf(r.source), model: label(r.model) },
+  };
+}
 /** C296: attention code when no memory engine runs at all (a setting that is not available, or no engine service). */
 export const ENGINE_MISSING = "engine_missing";
 
@@ -111,9 +144,9 @@ export class Knowledge {
   private provisionTimer: ReturnType<typeof setTimeout> | null = null;
   private provisionAttempt = 0;
   private provisionAccess: ServiceAccess | null = null;
-  /** C296 INFO-2: provider keys the engine needs that the bridge reports unset (last check) */
-  private missingKeys: string[] = [];
-  private keyCheckSeq = 0;
+  /** C373: the models the engine reported last (null: not known yet, e.g. the engine is still starting) */
+  private models: EngineModels | null = null;
+  private modelCheckSeq = 0;
   private provisionInFlight = false;
   private provisionLog: ((msg: string, fields: Record<string, string>) => void) | null = null;
   private stopped = false;
@@ -197,17 +230,11 @@ export class Knowledge {
     if (!this.config.gbrainUrl || !this.config.gbrainAdminToken) {
       return { code: ENGINE_MISSING, reason: "No memory engine runs: the GBrain service is not deployed with this app, so recall is keyword-only. Redeploy the app from Portal to add it." };
     }
-    // C296 INFO-2: the engine cannot start without its provider key: name it (more precise than "unreachable").
-    if (this.missingKeys.length) {
-      const keys = this.missingKeys.join(", ");
-      return {
-        code: ENGINE_KEY_MISSING,
-        reason: `The memory engine waits for ${keys}, so recall is keyword-only. Enter ${this.missingKeys.length > 1 ? "them" : "it"} on the bridge key page (open it from Portal); the engine then starts by itself.`.slice(0, 200),
-      };
-    }
     if (this.provisionAttempt > PROVISION_UNREACHABLE_AFTER) {
       return { code: ENGINE_UNREACHABLE, reason: "A memory area cannot be set up in the memory engine (retried for over a minute), so recall there is keyword-only. Check the GBrain service in your project." };
     }
+    const models = this.modelAttention();
+    if (models) return models;
     const { state, detail } = this.engineHealth;
     const list = detail.join(", ").slice(0, 80);
     if (state === "degraded") {
@@ -216,14 +243,14 @@ export class Knowledge {
       if (detail.some((d) => d.startsWith("embed") && d.endsWith(":provider_error"))) {
         return {
           code: KEY_REJECTED,
-          reason: `Key rejected by the provider: the memory engine’s embedding calls fail (${list}), so recall is keyword-only. Enter a valid model key on the bridge key page.`.slice(0, 200),
+          reason: `Key rejected by the provider: the memory engine’s embedding calls fail (${list}), so recall is keyword-only. Enter a valid key on the Keys and models page.`.slice(0, 200),
         };
       }
       const embeddings = detail.some((d) => d.startsWith("embed") || d.startsWith("keyword_only") || d.includes("no_provider") || d.includes("provider_error") || d.includes("no_key"));
       return {
         code: "memory_engine_degraded",
         reason: (embeddings
-          ? `Memory engine runs without embeddings (${list}): recall is keyword-only. Check the engine's embedding provider key.`
+          ? `Memory engine runs without embeddings (${list}): recall is keyword-only. Check the embeddings model on the Keys and models page.`
           : `Memory engine runs degraded (${list}): recall adds keyword search.`).slice(0, 200),
       };
     }
@@ -235,6 +262,8 @@ export class Knowledge {
   async probeEngine(services: Services): Promise<void> {
     const engine = services.engine;
     const area = services.areas.get(SHARED_AREA_ID);
+    // C373: the models the engine runs with (a restart on new keys or roles changes them)
+    await this.checkModels().catch(() => undefined);
     if (!engine || !area?.sourceReady) return;
     try {
       const { degraded } = await engine.recall(area.id, area.sourceId, "knowledge engine status check", 1);
@@ -316,7 +345,7 @@ export class Knowledge {
       const quiet = attempt !== 1 && attempt % 5 !== 0;
       void this.provision(this.services ?? current, known, quiet ? undefined : this.provisionLog ?? undefined)
         .catch(() => undefined)
-        .then(() => (this.stopped ? undefined : this.checkProviderKeys()))
+        .then(() => (this.stopped ? undefined : this.checkModels()))
         .catch(() => undefined)
         .then(() => {
           this.provisionInFlight = false;
@@ -329,34 +358,68 @@ export class Knowledge {
     this.provisionTimer.unref();
   }
 
+  /** C373: the models the engine runs with (last helper answer), or null when not known yet. */
+  engineModels(): EngineModels | null {
+    return this.models ? structuredClone(this.models) : null;
+  }
+
   /**
-   * C296 INFO-2: which provider keys of the configured model provider the bridge reports unset (getKey → null). A key the
-   * bridge cannot answer for right now is not counted (unknown is not "missing"). The status is pushed when the set changes.
+   * C373: the owner-facing attention for model roles (spec MODEL_ROLE_ATTENTION): an embeddings binding that differs from
+   * the index (`embeddings_changed`), or optional roles that are not usable (`model_role_optional`, readiness degraded).
    */
-  async checkProviderKeys(access?: Pick<ServiceAccess, "getKey">): Promise<string[]> {
+  private modelAttention(): Attention | null {
+    const m = this.models;
+    if (!m) return null;
+    const e = m.embeddings;
+    if (e.state === "changed") {
+      return {
+        code: EMBEDDINGS_CHANGED,
+        reason: `The embeddings model changed to ${e.wanted?.model ?? "another model"}. The memory index keeps ${e.active?.model ?? "its model"} until it is re-indexed (not automatic yet).`.slice(0, 200),
+      };
+    }
+    const why: Record<string, string> = {
+      unset: "no embeddings model is set",
+      unsupported: "the embeddings provider is not supported by the memory engine",
+      dims_missing: "the embeddings model needs its vector size on the Keys and models page",
+      failed: "the memory engine refused the embeddings model",
+    };
+    const embeddings = why[e.state];
+    const reasoning = m.reasoning.state === "ok" ? null : m.reasoning.state === "conflict" ? "the reasoning model needs the same provider key as embeddings" : "no reasoning model is set, so ask cannot answer";
+    if (embeddings) {
+      return {
+        code: MODEL_ROLE_OPTIONAL,
+        reason: `Recall is keyword-only: ${embeddings}.${reasoning ? ` Also ${reasoning}.` : ""} Set models on the Keys and models page (open it from Portal).`.slice(0, 200),
+      };
+    }
+    if (reasoning) return { code: MODEL_ROLE_OPTIONAL, reason: `Memory works, but ${reasoning}. Set a reasoning model on the Keys and models page (open it from Portal).`.slice(0, 200) };
+    return null;
+  }
+
+  /**
+   * C373: asks the engine's helper which models this boot runs with. A helper that cannot answer (engine starting, old
+   * image without `/models`) keeps what was known. The status is pushed when the answer changes.
+   */
+  async checkModels(access?: Pick<ServiceAccess, "callServiceHelper">): Promise<EngineModels | null> {
     const source = access ?? this.provisionAccess;
-    if (!source || this.config.engine !== "gbrain") return this.missingKeys;
-    const seq = ++this.keyCheckSeq;
-    const missing: string[] = [];
-    for (const name of PROVIDER_MODELS[this.config.modelProvider].keys) {
-      try {
-        if ((await source.getKey(name)) === null) missing.push(name);
-      } catch {
-        // the bridge cannot answer right now (paused, updating): keep what was known for this key (review)
-        if (this.missingKeys.includes(name)) missing.push(name);
-      }
+    if (!source || this.config.engine !== "gbrain" || !this.config.gbrainUrl) return this.models;
+    const seq = ++this.modelCheckSeq;
+    let next: EngineModels | null;
+    try {
+      next = readEngineModels(await source.callServiceHelper("gbrain", "/models", {} as never));
+    } catch {
+      return this.models;
     }
-    if (seq !== this.keyCheckSeq) return this.missingKeys; // a newer check started meanwhile: it decides (review)
-    missing.sort();
-    if (missing.join(",") !== this.missingKeys.join(",")) {
-      const keysArrived = this.missingKeys.length > 0 && missing.length === 0;
-      this.missingKeys = missing;
-      this.statusChanged?.();
-      // The engine starts now (tb-exec had held it): provision again at once, not after the long backoff, so the owner never
-      // reads "cannot be set up" for minutes after entering the key (review).
-      if (keysArrived) this.restartProvisioning();
-    }
-    return missing;
+    if (seq !== this.modelCheckSeq || !next) return this.models;
+    const before = this.models ? JSON.stringify(this.models) : null;
+    this.models = next;
+    if (JSON.stringify(next) !== before) this.statusChanged?.();
+    return next;
+  }
+
+  /** C373: keys or model roles changed (keysRev): the engine restarts with them; ask its helper again and provision at once. */
+  async modelsChanged(): Promise<void> {
+    this.restartProvisioning();
+    await this.checkModels();
   }
 
   /** C296 INFO-2: start the background provisioning over (counter reset, next try soon), e.g. once the engine's key arrived. */
