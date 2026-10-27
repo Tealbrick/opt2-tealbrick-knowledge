@@ -43,8 +43,8 @@ own licences) on Debian (the licences of its packages are in `/usr/share/doc/*/c
 Knowledge ships four companion images next to the app image (`tealbrick-ci.json`). Each one runs a pinned, unmodified
 upstream and adds only the files named in `services/README.md` (Tealbrick code, Apache-2.0). Every companion image also
 contains `@opt2-tealbrick/miniapp-sdk` 0.1.12 (`tb-exec`) with its dependencies (the 8 MIT/BSD-3-Clause packages of
-the table above, installed from `services/tb-exec/package-lock.json`) and a Node.js 24.21.0 binary
-(`node:24.21.0-bookworm-slim`, MIT).
+the table above, installed from `services/tb-exec/package-lock.json`) and a Node.js 24.22.1 binary
+(`node:24.22.1-bookworm-slim`, MIT).
 
 | Companion image | Upstream | Exact image / ref | Licence | URL |
 |---|---|---|---|---|
@@ -53,7 +53,7 @@ the table above, installed from `services/tb-exec/package-lock.json`) and a Node
 | `opt2-tealbrick-knowledge-gbrain` (wrapper deps) | `postgres` (postgres.js), used by `boot.ts` | 3.4.9, from `services/gbrain/package-lock.json` | Unlicense | https://github.com/porsager/postgres |
 | `opt2-tealbrick-knowledge-gbrain-db` | pgvector (PostgreSQL with the pgvector extension) | `pgvector/pgvector:0.8.1-pg17@sha256:3e8b3adfd27b5707128f60956f62a793c3c9326ea8cfaf0eab7adccb5d700b21` | PostgreSQL License (PostgreSQL 17 and pgvector 0.8.1; the Debian packages in the image keep their own licences) (to verify against the image) | https://github.com/pgvector/pgvector |
 | `opt2-tealbrick-knowledge-notebook` | Open Notebook (research engine) | `lfnovo/open_notebook:1.14.0@sha256:6c5fb35b6c60549e4c2dc7617d1f07aaf0a67c4954564a73498d536b8186e879` (source tag v1.14.0, commit `30c7e2a63e43b7f270fc2c638f0b6246934a53f4`) | MIT, "Copyright (c) 2024 Luis Novo" (checked in the upstream `LICENSE` at v1.14.0) | https://github.com/lfnovo/open-notebook |
-| `opt2-tealbrick-knowledge-notebook-db` | SurrealDB (database for Open Notebook) | `surrealdb/surrealdb:v2.6.5@sha256:7db835aab6355b66e2b5779a3cddae811f201c417adadb4413310ae7f925110e`; only the `/surreal` binary is copied onto `node:24.21.0-bookworm-slim` | Business Source License 1.1 (the SurrealDB server; converts to Apache-2.0 on the change date in its licence file). Not Apache-2.0 today. Exact terms and change date: to verify in the licence file of v2.6.5 | https://github.com/surrealdb/surrealdb |
+| `opt2-tealbrick-knowledge-notebook-db` | SurrealDB (database for Open Notebook) | `surrealdb/surrealdb:v2.6.5@sha256:7db835aab6355b66e2b5779a3cddae811f201c417adadb4413310ae7f925110e`; only the `/surreal` binary is copied onto `node:24.22.1-bookworm-slim` | Business Source License 1.1 (the SurrealDB server; converts to Apache-2.0 on the change date in its licence file). Not Apache-2.0 today. Exact terms and change date: to verify in the licence file of v2.6.5 | https://github.com/surrealdb/surrealdb |
 
 - GBrain and Open Notebook install their own dependencies when their images are built (GBrain: `bun install --frozen-lockfile
   --production` from the upstream lockfile; Open Notebook: the Python and Node packages inside the upstream image).
