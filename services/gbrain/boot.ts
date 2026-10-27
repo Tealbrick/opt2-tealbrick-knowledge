@@ -4,11 +4,11 @@
 //    every stop signal (the old `sh` entrypoint died on SIGTERM and left upstream's lease behind: qa1, 2026-10-12).
 // 3. Spawns `gbrain serve --http`, forwards signals, exits with its status.
 import { type ChildProcess, spawn } from "node:child_process";
-import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { constants, hostname } from "node:os";
 import { AbortedError, type BootStatus, type Log, migrateCrashSafe } from "./migration-lock.ts";
-import { applyEnv, builtFrom, type ModelStatus, planModels } from "./models.ts";
+import { applyEnv, type BuiltBrain, builtFrom, type ModelStatus, planModels } from "./models.ts";
 import { connectPg, pgOptionsFromEnv } from "./pg-lock-session.ts";
 
 /** C373: the model status file the helper serves at `/models` (labels only), on the service volume beside GBrain's home. */
@@ -108,7 +108,24 @@ export async function main(env: Record<string, string | undefined> = process.env
 
   // C373: the models this boot runs with (model roles, else the legacy provider setting); the env GBrain gets is composed here
   const configPath = `${home}/.gbrain/config.json`;
-  const readBuilt = () => (existsSync(configPath) ? builtFrom(JSON.parse(readFileSync(configPath, "utf8"))) : null);
+  // A config.json that cannot be parsed never stops the boot (the status server must come up): the brain is kept as it is
+  // and the status says "unreadable" (a plain attention for the owner), see models.ts BuiltBrain.keep.
+  const readBuilt = (): BuiltBrain | null => {
+    if (!existsSync(configPath)) return null;
+    try {
+      return builtFrom(JSON.parse(readFileSync(configPath, "utf8")));
+    } catch {
+      log("warn", "config_unreadable", {});
+      return builtFrom(undefined);
+    }
+  };
+  // QA-KN24-3: the status file of the PREVIOUS boot is stale from now on (the models may have changed): the helper answers
+  // 503 engine_starting until this boot has written its own, so Knowledge never reads an old answer as the new one.
+  try {
+    rmSync(`${home}/${MODEL_STATUS_FILE}`, { force: true });
+  } catch (e) {
+    log("warn", "model_status_stale", { message: e instanceof Error ? e.message : String(e) });
+  }
   let plan = planModels(env, readBuilt());
   let gbEnv = applyEnv(env, plan.env);
   let enabled = false;

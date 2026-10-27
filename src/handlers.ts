@@ -213,7 +213,12 @@ export function createHandlers(knowledge: Knowledge, TbError: ErrorFactory) {
     // an app writes into a shared area under its own write row (APP_CALLER_OPS), an agent under its row on that area
     const row = isApp(ctx.caller) ? ctx.caller.id : area;
     if (!(await ctx.scope.can(AREA_SCOPE, row, crud))) throw fail("scope_denied", `no ${crud} access to area ${area}`, 403);
-    if (isApp(ctx.caller)) knowledge.noteCaller(services(ctx), ctx.caller);
+    if (isApp(ctx.caller)) {
+      // QA-KN24-4: `listed` is false once the companion edge was removed (or the slice expired) but the grant is still valid.
+      // Conformance (A12.caller_name) lets such a caller run, so the write is allowed and left in the app log.
+      if (ctx.caller.listed === false) ctx.log.warn("app write by a caller that is not listed (companion edge removed?)", { caller: ctx.caller.id });
+      knowledge.noteCaller(services(ctx), ctx.caller);
+    }
   }
   async function targetAreas(ctx: OpContext, area: unknown): Promise<string[]> {
     if (typeof area === "string") {
@@ -570,7 +575,9 @@ export function createHandlers(knowledge: Knowledge, TbError: ErrorFactory) {
           // model cost runs only in an area the caller may write (as the engine's own think)
           await writable(ctx, id, "read");
           // C373: think needs the reasoning role (or the legacy provider key); say so instead of an engine error
-          const reasoning = knowledge.engineModels()?.reasoning ?? (await knowledge.checkModels(ctx))?.reasoning;
+          // QA-KN24-3: a "not ok" answer may predate the owner's change (the engine restarts), so ask the helper again before refusing
+          let reasoning = knowledge.engineModels()?.reasoning;
+          if (!reasoning || reasoning.state !== "ok") reasoning = (await knowledge.checkModels(ctx))?.reasoning ?? reasoning;
           if (reasoning && reasoning.state !== "ok") {
             throw fail("reasoning_model_missing", "ask needs a reasoning model: the owner sets the reasoning role on the Keys and models page (open it from Portal)", 409);
           }
@@ -593,8 +600,10 @@ export function createHandlers(knowledge: Knowledge, TbError: ErrorFactory) {
           const out = [];
           for (const area of s.areas.list()) {
             if (!appSees(ctx, area.id) || !(await ctx.scope.can(AREA_SCOPE, area.id, "read"))) continue;
-            const write = await ctx.scope.can(AREA_SCOPE, isApp(ctx.caller) ? ctx.caller.id : area.id, "create");
-            out.push({ id: area.id, label: area.label, kind: area.kind, own: area.id === own, access: write ? "read_write" : "read" });
+            const row = isApp(ctx.caller) ? ctx.caller.id : area.id;
+            // QA-KN24-10: the real level; `contribute` can create and update but not delete, so it is not "read_write"
+            const access = (await ctx.scope.can(AREA_SCOPE, row, "delete")) ? "read_write" : (await ctx.scope.can(AREA_SCOPE, row, "create")) ? "contribute" : "read";
+            out.push({ id: area.id, label: area.label, kind: area.kind, own: area.id === own, access });
           }
           return { areas: out };
         }),
@@ -1017,6 +1026,8 @@ export function createHandlers(knowledge: Knowledge, TbError: ErrorFactory) {
     },
     call: (tool, args, ctx) =>
       wrap(async () => {
+        // QA-KN24-2: engine tools are not among APP_CALLER_OPS (`narrowed` guards only the static ops): an app never calls them
+        if (isApp(ctx.caller)) throw fail("scope_denied", "an app may only list areas and create or update documents in the company area", 403);
         const s = services(ctx);
         const engine = s.engine;
         if (!engine) throw fail("engine_capability_unavailable", "no memory engine in this deployment", 404);
@@ -1047,7 +1058,7 @@ export function createHandlers(knowledge: Knowledge, TbError: ErrorFactory) {
           else await readable(ctx, id);
           return (await call(id)) as Json;
         }
-        const areas = await ctx.scope.readable(AREA_SCOPE);
+        const areas = (await ctx.scope.readable(AREA_SCOPE)).filter((id) => appSees(ctx, id));
         const outcomes = await fanOut(areas, FAN_OUT_LIMIT, call);
         return {
           results: outcomes.filter((outcome) => outcome.ok).map((outcome) => ({ area: outcome.area, data: outcome.value })),

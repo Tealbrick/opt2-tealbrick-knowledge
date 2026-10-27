@@ -87,6 +87,13 @@ export const PROVISION_RETRY_MAX_MS = 5 * 60_000;
 export const PROVISION_UNREACHABLE_AFTER = 4;
 /** C296 review: attention code when the engine companion does not answer, so its sources cannot be created. */
 export const ENGINE_UNREACHABLE = "memory_engine_unreachable";
+/** Attention code of an engine that runs part of its pipeline only. */
+export const DEGRADED = "memory_engine_degraded";
+/**
+ * QA-KN24-3: after keys or model roles change, tb-exec restarts the engine (a minute or more). The check made at the change
+ * still reaches the OLD engine, so ask the helper again after these delays (30 s, 90 s, 3 min) until its answer differs.
+ */
+export const MODELS_RECHECK_MS: readonly number[] = [30_000, 90_000, 180_000];
 /** C373 (spec MODEL_ROLE_ATTENTION): an optional model role is not set (or cannot be used), so Knowledge runs with less. */
 export const MODEL_ROLE_OPTIONAL = "model_role_optional";
 /** C373: the embeddings binding differs from the model the memory index was built with; the index keeps its model. */
@@ -97,8 +104,8 @@ export const EMBEDDINGS_CHANGED = "embeddings_changed";
  * through the helper path `/models`). Labels only: GBrain `provider:model` strings and sizes, never a key or an address.
  */
 export interface EngineModels {
-  embeddings: { state: string; source: "role" | "legacy" | null; active: { model: string; dims: number | null } | null; wanted: { model: string; dims: number | null } | null };
-  reasoning: { state: string; source: "role" | "legacy" | null; model: string | null };
+  embeddings: { state: string; source: "role" | "legacy" | null; active: { model: string; dims: number | null } | null; wanted: { model: string; dims: number | null } | null; addressIgnored?: true };
+  reasoning: { state: string; source: "role" | "legacy" | null; model: string | null; addressIgnored?: true };
 }
 
 const label = (v: unknown): string | null => (typeof v === "string" && /^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,160}$/u.test(v) && !v.includes("//") ? v : null);
@@ -114,12 +121,12 @@ export function readEngineModels(raw: unknown): EngineModels | null {
   const o = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : null;
   const e = o?.embeddings && typeof o.embeddings === "object" ? (o.embeddings as Record<string, unknown>) : null;
   const r = o?.reasoning && typeof o.reasoning === "object" ? (o.reasoning as Record<string, unknown>) : null;
-  const EMB = ["ok", "unset", "changed", "enabled", "unsupported", "dims_missing", "failed"];
+  const EMB = ["ok", "unset", "changed", "enabled", "unsupported", "dims_missing", "failed", "unreadable"];
   const RSN = ["ok", "unset", "unsupported", "conflict"];
   if (o?.v !== 1 || !e || !r || !EMB.includes(String(e.state)) || !RSN.includes(String(r.state))) return null;
   return {
-    embeddings: { state: String(e.state), source: sourceOf(e.source), active: sized(e.active), wanted: sized(e.wanted) },
-    reasoning: { state: String(r.state), source: sourceOf(r.source), model: label(r.model) },
+    embeddings: { state: String(e.state), source: sourceOf(e.source), active: sized(e.active), wanted: sized(e.wanted), ...(e.addressIgnored === true ? { addressIgnored: true as const } : {}) },
+    reasoning: { state: String(r.state), source: sourceOf(r.source), model: label(r.model), ...(r.addressIgnored === true ? { addressIgnored: true as const } : {}) },
   };
 }
 export type RoleState = "bound" | "not_bound" | "degraded" | "unknown";
@@ -134,6 +141,9 @@ export interface RoleRow {
   /** plain-words sentence for the owner; null when nothing needs saying */
   notice: string | null;
 }
+
+/** QA-KN24-7: shown when a base URL is bound for a provider whose address the memory engine does not let anyone change. */
+const FIXED_ADDRESS = "This provider uses its fixed address, so the base URL you set is not used.";
 
 /** C373: the two model roles as the owner reads them: bound / not bound / degraded (+ a notice), or unknown while the engine has not answered. */
 export function roleRows(m: EngineModels | null): RoleRow[] {
@@ -168,14 +178,19 @@ export function roleRows(m: EngineModels | null): RoleRow[] {
     case "dims_missing":
       Object.assign(emb, { state: "degraded", notice: "This embeddings model needs its vector size. Set it on the Keys and models page. Until then search uses keywords only." });
       break;
+    case "unreadable":
+      Object.assign(emb, { state: "degraded", notice: "The memory engine cannot read its own setup file, so it left embeddings as they were. Ask support to check the engine volume." });
+      break;
     default:
       Object.assign(emb, { state: "degraded", notice: "The memory engine refused this embeddings model, so search uses keywords only." });
   }
+  if (e.addressIgnored) emb.notice = `${emb.notice ? `${emb.notice} ` : ""}${FIXED_ADDRESS}`;
   const r = m.reasoning;
   const rsn: RoleRow = { role: "reasoning", label: "Reasoning (ask and explain)", state: "bound", model: r.model, notice: r.source === "legacy" ? "It comes from the older provider keys." : null };
   if (r.state === "unset") Object.assign(rsn, { state: "not_bound", model: null, notice: "No reasoning model is set, so ask cannot answer. Memory and search still work." });
   else if (r.state === "unsupported") Object.assign(rsn, { state: "degraded", notice: "The memory engine does not support this reasoning provider, so ask cannot answer." });
   else if (r.state === "conflict") Object.assign(rsn, { state: "degraded", notice: "The reasoning model needs the same provider key as embeddings. Use one provider for both, or the same key." });
+  if (r.addressIgnored) rsn.notice = `${rsn.notice ? `${rsn.notice} ` : ""}${FIXED_ADDRESS}`;
   return [emb, rsn];
 }
 
@@ -197,6 +212,8 @@ export interface KnowledgeOptions {
   engineStartingMaxMs?: number;
   /** first background provisioning retry delay (default PROVISION_RETRY_MS, doubles up to PROVISION_RETRY_MAX_MS) */
   provisionRetryMs?: number;
+  /** delays of the model re-checks after keys or roles changed (default MODELS_RECHECK_MS; tests) */
+  modelsRecheckMs?: readonly number[];
 }
 
 export class Knowledge {
@@ -220,6 +237,7 @@ export class Knowledge {
   /** C373: the models the engine reported last (null: not known yet, e.g. the engine is still starting) */
   private models: EngineModels | null = null;
   private modelCheckSeq = 0;
+  private modelsRecheckTimer: ReturnType<typeof setTimeout> | null = null;
   private provisionInFlight = false;
   private provisionLog: ((msg: string, fields: Record<string, string>) => void) | null = null;
   private stopped = false;
@@ -275,6 +293,8 @@ export class Knowledge {
     this.reprobeTimer = null;
     if (this.provisionTimer) clearTimeout(this.provisionTimer);
     this.provisionTimer = null;
+    if (this.modelsRecheckTimer) clearTimeout(this.modelsRecheckTimer);
+    this.modelsRecheckTimer = null;
     this.stopped = true;
   }
 
@@ -318,8 +338,16 @@ export class Knowledge {
     if (this.provisionAttempt > PROVISION_UNREACHABLE_AFTER) {
       return { code: ENGINE_UNREACHABLE, reason: "A memory area cannot be set up in the memory engine (retried for over a minute), so recall there is keyword-only. Check the GBrain service in your project." };
     }
-    const models = this.modelAttention();
-    if (models) return models;
+    // QA-KN24-1: what the engine itself shows (key rejected, failing, starting) comes before the model notices, which only
+    // explain a working engine (an embeddings-only install must still read "key rejected" or "engine failing"). A plain
+    // "degraded" engine reads as the model notice when one exists (it names the cause); otherwise as degraded.
+    const health = this.healthAttention();
+    if (health && health.code !== DEGRADED) return health;
+    return this.modelAttention() ?? health;
+  }
+
+  /** What the last engine answers show, as an owner attention (null: ok or not known yet). */
+  private healthAttention(): Attention | null {
     const { state, detail } = this.engineHealth;
     const list = detail.join(", ").slice(0, 80);
     if (state === "degraded") {
@@ -333,7 +361,7 @@ export class Knowledge {
       }
       const embeddings = detail.some((d) => d.startsWith("embed") || d.startsWith("keyword_only") || d.includes("no_provider") || d.includes("provider_error") || d.includes("no_key"));
       return {
-        code: "memory_engine_degraded",
+        code: DEGRADED,
         reason: (embeddings
           ? `Memory engine runs without embeddings (${list}): recall is keyword-only. Check the embeddings model on the Keys and models page.`
           : `Memory engine runs degraded (${list}): recall adds keyword search.`).slice(0, 200),
@@ -518,6 +546,7 @@ export class Knowledge {
       unsupported: "the embeddings provider is not supported by the memory engine",
       dims_missing: "the embeddings model needs its vector size on the Keys and models page",
       failed: "the memory engine refused the embeddings model",
+      unreadable: "the memory engine cannot read its setup file",
     };
     const embeddings = why[e.state];
     const reasoning = m.reasoning.state === "ok" ? null : m.reasoning.state === "conflict" ? "the reasoning model needs the same provider key as embeddings" : "no reasoning model is set, so ask cannot answer";
@@ -555,7 +584,30 @@ export class Knowledge {
   /** C373: keys or model roles changed (keysRev): the engine restarts with them; ask its helper again and provision at once. */
   async modelsChanged(): Promise<void> {
     this.restartProvisioning();
+    const before = this.models ? JSON.stringify(this.models) : null;
     await this.checkModels();
+    // QA-KN24-3: that answer probably came from the engine that is about to restart; look again until it changes
+    if ((this.models ? JSON.stringify(this.models) : null) === before) this.armModelsRecheck(before, 0);
+  }
+
+  /** Re-reads the engine's models after each delay of the schedule, until the answer differs from `before` (the last schedule step is the end). */
+  private armModelsRecheck(before: string | null, step: number): void {
+    if (this.modelsRecheckTimer) clearTimeout(this.modelsRecheckTimer);
+    this.modelsRecheckTimer = null;
+    const schedule = this.opts.modelsRecheckMs ?? MODELS_RECHECK_MS;
+    const delay = schedule[step];
+    if (this.stopped || delay === undefined) return;
+    this.modelsRecheckTimer = setTimeout(() => {
+      this.modelsRecheckTimer = null;
+      if (this.stopped) return;
+      void this.checkModels()
+        .catch(() => undefined)
+        .then(() => {
+          if ((this.models ? JSON.stringify(this.models) : null) !== before) return;
+          this.armModelsRecheck(before, step + 1);
+        });
+    }, delay);
+    this.modelsRecheckTimer.unref();
   }
 
   /** C296 INFO-2: start the background provisioning over (counter reset, next try soon), e.g. once the engine's key arrived. */

@@ -35,6 +35,20 @@ bridge P-2 (0.2.11); until then Core skips this release. No app database migrati
 
 ### Fixed
 
+- QA of knowledge#24 (KN24-1, KN24-2, KN24-3, KN24-4, KN24-7, KN24-10):
+  - Engine health comes first: `memory_engine_key_rejected`, `memory_engine_failing` and `memory_engine_starting` are no longer
+    hidden by `model_role_optional` (an embeddings-only install). The model notice shows when the engine answers.
+  - An app caller is refused on every dynamic `engine` tool (it only lists areas and writes documents in the company area), and the
+    engine fan-out keeps only areas an app may see.
+  - The GBrain boot removes the previous `knowledge-models.json` at start (the helper answers 503 until the new boot wrote its own).
+    After a model-role or key change Knowledge re-reads `/models` at +30 s, +90 s and +3 min until the answer changes, and `ask`
+    re-reads it before it refuses with `reasoning_model_missing`.
+  - Boot: a `config.json` that names no embedding model (and not `embedding_disabled`) leaves the brain as it is (no
+    `embeddings enable`); a corrupt file no longer crashes the boot (status `unreadable`, Settings notice).
+  - `areas_list` shows `contribute` for the contribute level. A write by an app that is no longer listed (`Caller.listed` false) is
+    allowed, as conformance A12.caller_name requires, and logged as a warning.
+  - Settings notes "this provider uses its fixed address" when a base URL is bound for together, mistral, deepseek or voyage.
+
 - Ported from 0.1.28 (hotfix/0.1.27): a memory engine that is still starting (502/503, refused, reset, timeout) is not a
   failure; attention `memory_engine_starting`; the engine is re-probed after 1 s, doubling to 60 s.
 

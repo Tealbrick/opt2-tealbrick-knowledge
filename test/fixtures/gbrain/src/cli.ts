@@ -18,6 +18,11 @@ const record = (what: string) => {
 
 if (cmd === "init") {
   record("init");
+} else if (cmd === "embeddings") {
+  // C373: `embeddings enable` (the boot enables embeddings in place on a brain built without them)
+  record(`embeddings-${rest[0] ?? ""}`);
+} else if (cmd === "embed") {
+  record("embed");
 } else if (cmd === "serve") {
   const port = Number(rest[rest.indexOf("--port") + 1]);
   const server = createServer((_req, res) => {
