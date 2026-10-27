@@ -9,7 +9,7 @@ import { deterministicRequestId } from "./engines/gbrain/client.ts";
 import { documentIdFromSlug, EngineCallError, engineError, type RecallRow } from "./engines/gbrain/engine.ts";
 import { resolveEntry as engineResolve } from "./engines/gbrain/exposure.ts";
 import { NotebookError } from "./engines/notebook/client.ts";
-import { agentAreaId } from "./ids.ts";
+import { agentAreaId, SHARED_AREA_ID } from "./ids.ts";
 import type { AppSecrets, Knowledge, Services } from "./knowledge.ts";
 import { createLibraryHandlers } from "./library.ts";
 import { fanOut, mergeRanked } from "./merge.ts";
@@ -24,7 +24,20 @@ type In = Record<string, any>;
 export function ownArea(caller: Caller): string | null {
   return caller.type === "agent" ? agentAreaId(caller.id) : null;
 }
-const writeScope = (input: In, caller: Caller) => (typeof input.area === "string" ? input.area : ownArea(caller));
+
+/**
+ * C373 app writers (Observer deliveries). A companion APP caller (`caller.type === "app"`, e.g. Observer with its companion
+ * grant for these ops) may use only these ops: list the areas it can read, and create or update documents in a SHARED area
+ * (the company area). Never an agent's private area, never any other read, whatever scope rows say.
+ *
+ * Its write permission is the SDK `own` default grant, which the SDK gives every first-seen caller: read_write on an
+ * instance named after the app (SDK store only; Knowledge has no area for it). The SDK gate checks that row (`writeScope`
+ * below), so the owner can turn app writes off with `tb.scopes_set` (level `read`) on it; Knowledge then writes into the
+ * shared area the app names (default: company), which it must also be able to read (the `shared` default grant).
+ */
+export const APP_CALLER_OPS: ReadonlySet<string> = new Set(["areas_list", "document_create", "document_update"]);
+const isApp = (caller: Caller) => caller.type === "app";
+const writeScope = (input: In, caller: Caller) => (isApp(caller) ? caller.id : typeof input.area === "string" ? input.area : ownArea(caller));
 const readScope = (input: In) => (typeof input.area === "string" ? input.area : null);
 const anyScope = () => null;
 
@@ -150,6 +163,7 @@ export function createHandlers(knowledge: Knowledge, TbError: ErrorFactory) {
     return {
       ...spec,
       run: async (input, ctx) => {
+        if (isApp(ctx.caller) && !APP_CALLER_OPS.has(id)) throw fail("scope_denied", "an app may only list areas and create or update documents in the company area", 403);
         admit(NARROWING_POLICY[id] ?? "unsupported", ctx);
         return run(input, ctx);
       },
@@ -189,12 +203,17 @@ export function createHandlers(knowledge: Knowledge, TbError: ErrorFactory) {
   const secretsOf = (ctx: object) => (ctx as { secrets?: AppSecrets }).secrets;
   const services = (ctx: OpContext) => knowledge.bind(ctx.db, secretsOf(ctx));
 
+  /** C373: an app caller sees only shared areas (an agent's area answers like a missing one, as for other agents). */
+  const appSees = (ctx: OpContext, area: string) => !isApp(ctx.caller) || services(ctx).areas.get(area)?.kind === "shared";
   async function readable(ctx: OpContext, area: string): Promise<void> {
-    if (!(await ctx.scope.can(AREA_SCOPE, area, "read"))) throw notFound();
+    if (!appSees(ctx, area) || !(await ctx.scope.can(AREA_SCOPE, area, "read"))) throw notFound();
   }
   async function writable(ctx: OpContext, area: string, crud: CrudAction): Promise<void> {
     await readable(ctx, area);
-    if (!(await ctx.scope.can(AREA_SCOPE, area, crud))) throw fail("scope_denied", `no ${crud} access to area ${area}`, 403);
+    // an app writes into a shared area under its own write row (APP_CALLER_OPS), an agent under its row on that area
+    const row = isApp(ctx.caller) ? ctx.caller.id : area;
+    if (!(await ctx.scope.can(AREA_SCOPE, row, crud))) throw fail("scope_denied", `no ${crud} access to area ${area}`, 403);
+    if (isApp(ctx.caller)) knowledge.noteCaller(services(ctx), ctx.caller);
   }
   async function targetAreas(ctx: OpContext, area: unknown): Promise<string[]> {
     if (typeof area === "string") {
@@ -204,7 +223,7 @@ export function createHandlers(knowledge: Knowledge, TbError: ErrorFactory) {
     return ctx.scope.readable(AREA_SCOPE);
   }
   function defaultArea(ctx: OpContext, area: unknown): string {
-    const id = typeof area === "string" ? area : ownArea(ctx.caller);
+    const id = typeof area === "string" ? area : isApp(ctx.caller) ? SHARED_AREA_ID : ownArea(ctx.caller);
     // A caller with no memory area of its own (a companion app, not an agent) has nothing to default to: scope_denied (0.1.12 conformance A12.companion_inbound).
     if (!id) throw fail("scope_denied", "name an area you can access: this caller has no area of its own", 403);
     return id;
@@ -573,8 +592,8 @@ export function createHandlers(knowledge: Knowledge, TbError: ErrorFactory) {
           const own = ownArea(ctx.caller);
           const out = [];
           for (const area of s.areas.list()) {
-            if (!(await ctx.scope.can(AREA_SCOPE, area.id, "read"))) continue;
-            const write = await ctx.scope.can(AREA_SCOPE, area.id, "create");
+            if (!appSees(ctx, area.id) || !(await ctx.scope.can(AREA_SCOPE, area.id, "read"))) continue;
+            const write = await ctx.scope.can(AREA_SCOPE, isApp(ctx.caller) ? ctx.caller.id : area.id, "create");
             out.push({ id: area.id, label: area.label, kind: area.kind, own: area.id === own, access: write ? "read_write" : "read" });
           }
           return { areas: out };

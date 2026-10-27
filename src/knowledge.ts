@@ -358,6 +358,28 @@ export class Knowledge {
     this.provisionTimer.unref();
   }
 
+  /**
+   * C373: the display name of an app caller that wrote here (documents keep its instance id in `created_by`), so the document
+   * page names "Observer", not an id, also after the app is gone. Stored once per caller in kn_state (no migration).
+   */
+  noteCaller(services: Services, caller: { id: string; name: string; product?: string }): void {
+    const label = (caller.name && caller.name !== caller.id ? caller.name : (caller.product ?? "")).slice(0, 80);
+    if (!label) return;
+    services.db.prepare("INSERT INTO kn_state (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(`caller/${caller.id}`, label);
+  }
+
+  /** C373: display names of the app callers among `ids` (agents and people are named by the UI from tb.agents_list / the session). */
+  callerNames(services: Services, ids: Iterable<string>): Record<string, string> {
+    const out: Record<string, string> = {};
+    const read = services.db.prepare("SELECT value FROM kn_state WHERE key = ?");
+    for (const id of new Set(ids)) {
+      if (!id.startsWith("ins_")) continue;
+      const row = read.get(`caller/${id}`);
+      if (row) out[id] = String(row.value);
+    }
+    return out;
+  }
+
   /** C373: the models the engine runs with (last helper answer), or null when not known yet. */
   engineModels(): EngineModels | null {
     return this.models ? structuredClone(this.models) : null;

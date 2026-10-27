@@ -74,6 +74,8 @@ interface DocResponse {
   revisions: { version: number; title: string; summary: string | null; createdBy: string; createdAt: number }[];
   comments: Comment[];
   links: { outbound: DocLink[]; backlinks: DocLink[] };
+  /** C373: app writers by display name ("Observer"), from the app's own record (older apps answer without it) */
+  authors?: Record<string, string>;
 }
 interface Revision {
   version: number;
@@ -432,9 +434,10 @@ function Outline({ nodes, onOpen }: { nodes: TreeNode[]; onOpen: (id: string) =>
 
 /**
  * C331 (demo gap 10): documents, revisions and comments store the writer's caller id (an agent id, or the person's id). The page
- * names agents as `tb.agents_list` does, the signed-in person as "you"; any other id (an app, a removed agent) stays as stored.
+ * names agents as `tb.agents_list` does, the signed-in person as "you", an app that wrote (C373, e.g. Observer) by the name
+ * Knowledge recorded for it; any other id (a removed agent) stays as stored.
  */
-function useAuthorName(): (id: string) => string {
+function useAuthorName(authors?: Record<string, string>): (id: string) => string {
   const { principal } = useSession();
   const [agents, setAgents] = useState<Record<string, string>>({});
   useEffect(() => {
@@ -442,12 +445,12 @@ function useAuthorName(): (id: string) => string {
       .then((r) => setAgents(Object.fromEntries(r.agents.filter((a) => a.name).map((a) => [a.id, a.name]))))
       .catch(() => setAgents({}));
   }, []);
-  return useCallback((id: string) => agents[id] ?? (principal && id === principal.id ? "you" : id), [agents, principal]);
+  return useCallback((id: string) => agents[id] ?? authors?.[id] ?? (principal && id === principal.id ? "you" : id), [agents, authors, principal]);
 }
 
 function DocumentView({ id, nav, setNav }: { id: string; nav: LibraryNav; setNav: SetNav }) {
-  const authorName = useAuthorName();
   const [data, setData] = useState<DocResponse | null>(null);
+  const authorName = useAuthorName(data?.authors);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [revision, setRevision] = useState<Revision | null>(null);

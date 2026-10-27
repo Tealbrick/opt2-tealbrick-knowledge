@@ -180,7 +180,11 @@ export function createLibraryHandlers(d: LibraryDeps): Record<string, HandlerSpe
         wrap(async () => {
           const s = services(ctx);
           const document = doc(s, input.id);
-          return json({ document, revisions: s.store.revisions(document.id, 100), comments: s.store.listComments(document.id), links: s.store.listLinks(document.id) });
+          const revisions = s.store.revisions(document.id, 100);
+          const comments = s.store.listComments(document.id);
+          // C373: app writers by name ("Observer"), never a bare instance id
+          const authors = knowledge.callerNames(s, [document.createdBy, document.updatedBy, ...revisions.map((r) => r.createdBy), ...comments.map((c) => c.createdBy)]);
+          return json({ document, revisions, comments, links: s.store.listLinks(document.id), authors });
         }),
     },
 
