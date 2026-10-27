@@ -4,6 +4,7 @@ import { callOp, TbProvider, useScopes, useSession } from "@opt2-tealbrick/minia
 import { AppShell, appArt, appColour, Button, Field, Notice, Select, STANDARD_PAGES, Table, Tabs, Tag } from "@opt2-tealbrick/ui";
 import { StrictMode, useCallback, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
+import { Access } from "./access.tsx";
 import { ErrorNotice, errText, PageHead, useOverview } from "./common.tsx";
 import { Library, type LibraryNav } from "./library.tsx";
 import { Recall } from "./recall.tsx";
@@ -16,9 +17,9 @@ const NAME = "Knowledge";
 const STILLS = new URL("./stills/", import.meta.url).href;
 
 /** Shell page id → path under the base `/a/knowledge/`. Memory is the launch page (manifest `ui.launchPath`), Agents & scopes is `ui.configurePath`. */
-const ROUTES = { ...standardRoutes("memory"), research: "research", settings: "settings", keys: "keys" };
+const ROUTES = { ...standardRoutes("memory"), research: "research", access: "access", settings: "settings", keys: "keys" };
 /** Own pages first, then the standard ones (the kit list holds Holds, Receipts, Agents & scopes, Keys, Backups & export). */
-const PAGES = [{ id: "memory", label: "Memory" }, { id: "research", label: "Research" }, { id: "settings", label: "Settings" }, ...STANDARD_PAGES.filter((p) => p.id in ROUTES)];
+const PAGES = [{ id: "memory", label: "Memory" }, { id: "research", label: "Research" }, { id: "access", label: "Access" }, { id: "settings", label: "Settings" }, ...STANDARD_PAGES.filter((p) => p.id in ROUTES)];
 
 type MemoryTab = "library" | "recall" | "status";
 const MEMORY_TABS: { value: MemoryTab; label: string }[] = [
@@ -36,7 +37,7 @@ function initialTab(): MemoryTab {
 interface AreaStatus {
   id: string;
   label: string;
-  kind: "agent" | "shared";
+  kind: "agent" | "shared" | "person" | "team";
   engineReady: boolean;
   researchReady: boolean;
   pending: number;
@@ -86,7 +87,8 @@ function Configure({ agents, areas }: { agents: readonly Agent[]; areas: Areas }
   const [error, setError] = useState<string | null>(null);
   if (areas.error) return <LoadError message={areas.error} onRetry={areas.reload} />;
   if (!areas.areas) return <p className="tb-soft" role="status">Loading memory areas.</p>;
-  const columns = areas.areas;
+  // C373: person and team areas follow the Governance directory and the grants on the Access page, not per-agent rows here
+  const columns = areas.areas.filter((area) => area.kind === "agent" || area.kind === "shared");
   const level = (agent: string, area: string) => access.find((row) => row.agent === agent && row.type === "area" && row.instanceId === area)?.access ?? "";
   const change = async (agent: string, area: string, value: string) => {
     setBusy(`${agent}|${area}`);
@@ -318,13 +320,15 @@ function App() {
       ) : nav.page === "agents" ? (
         <AgentsPage
           empty="No agent is connected to Knowledge yet. Draw a line from an agent to Knowledge on the canvas."
-          lede="Each agent has its own memory area. Everyone can read the company area; turn on “Read and write” to let an agent add company knowledge."
+          lede="Each agent has its own memory area. Everyone can read the company area; turn on “Read and write” to let an agent add company knowledge. Personal and team memory is set on the Access page."
           render={(agents) => <Configure agents={agents} areas={areas} />}
         />
       ) : nav.page === "holds" ? (
         <HoldsPage list={holds} only={nav.hold} empty="Nothing waits for your approval." />
       ) : nav.page === "receipts" ? (
         <ReceiptsPage empty="No agent actions recorded yet." />
+      ) : nav.page === "access" ? (
+        <Access />
       ) : nav.page === "settings" ? (
         <Settings />
       ) : nav.page === "keys" ? (

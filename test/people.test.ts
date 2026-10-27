@@ -160,7 +160,7 @@ test("C373: owner A's agent cannot read or write person B's area (absent from re
 });
 
 test("C373: team members' agents read the team area; the owner writes it from the Library; non-members and a blocked agent do not", async () => {
-  const { run, ctx, owner, recallIds } = await setup();
+  const { run, owner, recallIds } = await setup();
   const doc = await run("library_document_create", { area: SALES, title: "Sales playbook", body: "Acme LLC discount ladder", status: "published" }, owner());
   assert.deepEqual(await recallIds(BO, "ladder"), [doc.id], "Ben's agent reads Sales through its owner");
   assert.deepEqual(await recallIds(ADA, "ladder"), [], "Anna is not in Sales");

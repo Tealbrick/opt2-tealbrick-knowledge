@@ -135,7 +135,7 @@ export function TextBlock({ text, label }: { text: string; label: string }) {
 export interface AreaOption {
   id: string;
   label: string;
-  kind: "agent" | "shared";
+  kind: "agent" | "shared" | "person" | "team";
   documents?: number;
   collections?: number;
   engineReady: boolean;
