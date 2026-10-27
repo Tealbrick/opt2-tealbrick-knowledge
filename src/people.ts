@@ -13,6 +13,7 @@ import { createHash } from "node:crypto";
 import type { Db } from "@opt2-tealbrick/spec/sdk";
 import type { Areas } from "./areas.ts";
 import { type DirectoryModel, directoryState } from "./directory-feed.ts";
+import { normalizeTag } from "./narrowing.ts";
 import { cleanTags } from "./store/documents.ts";
 
 const hash = (kind: string, id: string) => createHash("sha256").update(`${kind}:${id}`).digest("hex").slice(0, 24);
@@ -133,6 +134,11 @@ export function setGrant(db: Db, input: { team: string; person: string; tags?: s
   if (!state.model.teams.some((t) => t.id === input.team)) throw new GrantError("team_unknown", "Governance does not list this team.", 404);
   if (!state.model.people.some((p) => p.id === input.person)) throw new GrantError("person_unknown", "Governance does not list this person.", 404);
   const tags = cleanTags(input.tags ?? undefined);
+  // QA-KN25-1: a limit the owner asked for must never become "the whole area": refuse tags that clean to nothing or lose some
+  if (input.tags?.length) {
+    const asked = new Set(input.tags.map(normalizeTag));
+    if (asked.has("") || tags.length < asked.size) throw new GrantError("invalid_input", "Each tag must have text, and a grant may name at most 20 tags. Fix the tags, or leave them empty to share the whole area.", 400);
+  }
   const tagsJson = tags.length ? JSON.stringify(tags) : null;
   return db.transaction(() => {
     const before = db.prepare("SELECT tags FROM kn_team_grants WHERE team_id = ? AND person_id = ?").get(input.team, input.person);
