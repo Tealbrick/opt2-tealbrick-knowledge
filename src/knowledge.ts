@@ -2,9 +2,9 @@
 import type { Db, Json } from "@opt2-tealbrick/spec/sdk";
 import { type AreaProvisioner, Areas } from "./areas.ts";
 import { type KnowledgeConfig, PROVIDER_KEY, PROVIDER_MODELS } from "./config.ts";
+import { type CallApp, onDirectoryModel, startDirectoryTimer } from "./directory-feed.ts";
 import { DeepClient, type DeepHealth } from "./engines/deep/client.ts";
 import { DeepSync } from "./engines/deep/sync.ts";
-import { type CallApp, onDirectoryModel, startDirectoryTimer } from "./directory-feed.ts";
 import { type ClientStore, GBrainClient, type StoredClient } from "./engines/gbrain/client.ts";
 import { GBrainEngine } from "./engines/gbrain/engine.ts";
 import { NotebookClient } from "./engines/notebook/client.ts";
@@ -228,6 +228,9 @@ export interface KnowledgeOptions {
   provisionRetryMs?: number;
   /** C373: deep feed interval (default DEEP_SYNC_MS); 0 syncs once at start only */
   deepSyncMs?: number;
+  /** C373: how long deep_ask waits for foundry's analyst, and how often it looks (tests) */
+  deepAskWaitMs?: number;
+  deepAskPollMs?: number;
   /** C373: Governance directory refresh interval (default REFRESH_MS, 60 s) */
   directoryRefreshMs?: number;
   /** delays of the model re-checks after keys or roles changed (default MODELS_RECHECK_MS; tests) */
@@ -429,6 +432,11 @@ export class Knowledge {
       return { code: DEEP_UNREACHABLE, reason: `The deep knowledge service does not answer healthy (${this.deepHealth.status}${this.deepHealth.phase ? `: ${this.deepHealth.phase}` : ""}). Check the deep service in your project.`.slice(0, 200) };
     }
     return null;
+  }
+
+  /** C373: the last deep service probe (null = not probed yet). */
+  deepHealthNow(): DeepHealth | null {
+    return this.deepHealth;
   }
 
   /** One deep knowledge probe (the proxy's /health); pushes the status when the result changes. */

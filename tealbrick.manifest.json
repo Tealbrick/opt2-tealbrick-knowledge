@@ -2047,7 +2047,7 @@
           "area": {
             "type": "string",
             "pattern": "^[a-z0-9][a-z0-9-]{1,63}$",
-            "description": "Area id. Omit to search every Foundry area you can read."
+            "description": "Area id. Omit for the company area (the only area Foundry reads today)."
           },
           "table": {
             "type": "string",
@@ -3190,7 +3190,7 @@
     {
       "id": "deep_settings_set",
       "title": "Choose Foundry areas",
-      "description": "Owner: the memory areas whose documents Foundry reads (default: the company area). A removed area stops syncing; what Foundry already holds stays until a dataset delete exists.",
+      "description": "Owner: whether Foundry reads the company area (the only area it may read today; person, team and agent areas stay out). An empty list pauses the feed; what Foundry already holds stays until a dataset delete exists.",
       "input": {
         "type": "object",
         "additionalProperties": false,
@@ -3200,7 +3200,7 @@
         "properties": {
           "areas": {
             "type": "array",
-            "maxItems": 50,
+            "maxItems": 1,
             "items": {
               "type": "string",
               "pattern": "^[a-z0-9][a-z0-9-]{1,63}$"

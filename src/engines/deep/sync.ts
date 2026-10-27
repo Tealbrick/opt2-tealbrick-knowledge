@@ -2,8 +2,12 @@
 // only"): Observer delivers documents into Knowledge (document_create/update); this job hands the documents of the areas
 // the owner selects (default: the company area) to foundry, one foundry workspace per area.
 //
-// - `kind:table` documents (CSV with a header line) become foundry datasets: one dataset per `table:<name>` tag (the pages
-//   of one table merge), or one per document without that tag. Every row carries `_knowledge_document` (its source).
+// - `kind:table` documents (CSV with a header line) become foundry datasets: one dataset per `source:<collection>` tag
+//   (Observer tags every page of a DB table with the same `source:<schema>.<table>`, so the pages merge), or one per
+//   document without that tag. Every row carries `_knowledge_document` (its source document).
+// - Visibility (C373): only the company area is fed today. Every agent that may read the company area may read all of it
+//   (tag narrowing is applied per document by the tools); person and team areas (#25) are never fed, so no Foundry answer
+//   can be built from a person's memory. More areas need one foundry workspace per area AND per-caller checks: later.
 // - Every other document becomes one row of the area's `knowledge_documents` dataset (title, tags, version, body excerpt).
 // - Idempotent on (document id, version): a dataset is re-sent only when its (id, version) list changed.
 // - A table whose documents are all gone gets an empty tombstone snapshot (foundry has no dataset delete; older snapshot
@@ -12,12 +16,15 @@ import { createHash } from "node:crypto";
 import type { Db } from "@opt2-tealbrick/spec/sdk";
 import type { Areas } from "../../areas.ts";
 import { SHARED_AREA_ID } from "../../ids.ts";
-import { CsvError, parseCsvPages } from "./csv.ts";
 import { type DeepClient, type DeepDataset, DeepError } from "./client.ts";
+import { CsvError, parseCsvPages } from "./csv.ts";
 
 export const DEEP_AREAS_KEY = "deep_areas";
 export const TABLE_TAG = "kind:table";
-export const TABLE_NAME_PREFIX = "table:";
+/** Observer's collection tag (`source:<schema>.<table>` for DB pages): the table a `kind:table` page belongs to. */
+export const TABLE_SOURCE_PREFIX = "source:";
+/** The only area Foundry reads today (see the header). */
+export const DEEP_AREAS_ALLOWED: readonly string[] = [SHARED_AREA_ID];
 export const TEXT_DATASET = "knowledge_documents";
 /** The column every table row carries: the Knowledge document it came from (citations). */
 export const SOURCE_COLUMN = "_knowledge_document";
@@ -76,10 +83,17 @@ const tagsOf = (raw: unknown): string[] => {
   }
 };
 
-/** The table a `kind:table` document belongs to: its `table:<name>` tag, else the document alone. */
+/** The table a `kind:table` document belongs to: its `source:<collection>` tag, else the document alone. */
 export function tableKey(doc: { id: string; tags: readonly string[] }): string {
-  const named = doc.tags.find((t) => t.startsWith(TABLE_NAME_PREFIX) && t.length > TABLE_NAME_PREFIX.length);
+  const named = doc.tags.find((t) => t.startsWith(TABLE_SOURCE_PREFIX) && t.length > TABLE_SOURCE_PREFIX.length);
   return named ?? `doc:${doc.id}`;
+}
+
+/** The dataset name of a table: the last part of its collection (`public.orders` → `orders`), else the document title. */
+export function tableName(key: string, title: string): string {
+  if (!key.startsWith(TABLE_SOURCE_PREFIX)) return title.slice(0, 100) || "table";
+  const collection = key.slice(TABLE_SOURCE_PREFIX.length);
+  return (collection.split(".").filter(Boolean).at(-1) ?? collection).slice(0, 100);
 }
 
 export class DeepSync {
@@ -98,7 +112,7 @@ export class DeepSync {
     this.now = now;
   }
 
-  /** The areas the owner selected (default: the company area); unknown ids are dropped. */
+  /** The areas the owner selected (default: the company area); only allowed, existing areas count. */
   selectedAreas(): string[] {
     const row = this.db.prepare("SELECT value FROM kn_state WHERE key = ?").get(DEEP_AREAS_KEY);
     let ids: string[] = [SHARED_AREA_ID];
@@ -110,11 +124,12 @@ export class DeepSync {
         // a broken value falls back to the default
       }
     }
-    return ids.filter((id) => this.areas.get(id) !== null);
+    return ids.filter((id) => DEEP_AREAS_ALLOWED.includes(id) && this.areas.get(id) !== null);
   }
 
+  /** Owner choice: the company area, or none (Foundry pauses its feed). Any other area is refused by the caller first. */
   setSelectedAreas(ids: readonly string[]): string[] {
-    const known = [...new Set(ids)].filter((id) => this.areas.get(id) !== null);
+    const known = [...new Set(ids)].filter((id) => DEEP_AREAS_ALLOWED.includes(id) && this.areas.get(id) !== null);
     this.db.prepare("INSERT INTO kn_state (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(DEEP_AREAS_KEY, JSON.stringify(known));
     return known;
   }
@@ -214,7 +229,7 @@ export class DeepSync {
         const hash = digest(pages);
         const before = known.get(key);
         if (before && before.state !== "deleted" && this.sourceDigest(area, key) === hash) continue;
-        const name = key.startsWith(TABLE_NAME_PREFIX) ? key.slice(TABLE_NAME_PREFIX.length).slice(0, 100) : (pages[0]?.title ?? "table").slice(0, 100);
+        const name = tableName(key, pages[0]?.title ?? "table");
         const bodies = this.bodies(pages.map((p) => p.id));
         let rows: Row[];
         try {

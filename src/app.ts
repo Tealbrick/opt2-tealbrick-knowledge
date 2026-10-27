@@ -28,7 +28,7 @@ export type KnowledgeDefinition = AppDefinition & { onStart(ctx: StartContext): 
 
 export function knowledgeDefinition(env: Record<string, string | undefined>, TbError: ErrorFactory, opts: KnowledgeOptions = {}): { definition: KnowledgeDefinition; knowledge: Knowledge } {
   const knowledge = new Knowledge(readConfig(env), opts);
-  const { handlers, dynamic, events } = createHandlers(knowledge, TbError);
+  const { handlers, dynamic, events } = createHandlers(knowledge, TbError, { ...(opts.deepAskWaitMs !== undefined ? { askWaitMs: opts.deepAskWaitMs } : {}), ...(opts.deepAskPollMs !== undefined ? { askPollMs: opts.deepAskPollMs } : {}) });
   return {
     knowledge,
     definition: {

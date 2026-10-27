@@ -72,7 +72,7 @@ export function childSpecs(e: SupervisorEnv): ChildSpec[] {
       command: e.helixBin,
       args: [],
       cwd: join(e.dataDir, "helix"),
-      env: { ...base, HELIX_HTTP_ADDR: `127.0.0.1:${HELIX_HTTP_PORT}`, HELIX_GRPC_ADDR: `127.0.0.1:${HELIX_GRPC_PORT}`, DB_PATH: join(e.dataDir, "helix", "db") + "/", RUST_LOG: "server=info,db=info" },
+      env: { ...base, HELIX_HTTP_ADDR: `127.0.0.1:${HELIX_HTTP_PORT}`, HELIX_GRPC_ADDR: `127.0.0.1:${HELIX_GRPC_PORT}`, DB_PATH: `${join(e.dataDir, "helix", "db")}/`, RUST_LOG: "server=info,db=info" },
     },
     {
       name: "executor",

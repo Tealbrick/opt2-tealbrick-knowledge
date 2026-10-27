@@ -8,6 +8,7 @@ import type { AppEvents, Caller, DynamicHandlers, HandlerSpec, HookContext, Json
 import { createAccessHandlers } from "./access.ts";
 import { type AreaAccess, areaAccess } from "./area-access.ts";
 import { AREA_SCOPE, type Area } from "./areas.ts";
+import { createDeepHandlers } from "./deep.ts";
 import { syncDirectory } from "./directory-feed.ts";
 import { deterministicRequestId } from "./engines/gbrain/client.ts";
 import { documentIdFromSlug, EngineCallError, engineError, type RecallRow } from "./engines/gbrain/engine.ts";
@@ -99,6 +100,11 @@ export const NARROWING_POLICY: Readonly<Record<string, "items" | "untagged" | "n
   research_chat_start: "untagged",
   research_ask: "untagged",
   research_source_delete: "untagged",
+  // C373 Foundry: deep_search and deep_status return only rows and documents whose source documents pass the tags;
+  // deep_ask runs foundry's analyst over the whole area (like ask), so any tag narrowing refuses it
+  deep_search: "items",
+  deep_status: "items",
+  deep_ask: "unsupported",
   // §18.4 c/e (not listed → unsupported): collection_delete (would remove hidden documents), library_* writes, engine tools
 };
 
@@ -131,7 +137,7 @@ export function searchCatalog(entries: readonly DynamicCatalogEntry[], query: st
     .map((row) => row.entry);
 }
 
-export function createHandlers(knowledge: Knowledge, TbError: ErrorFactory) {
+export function createHandlers(knowledge: Knowledge, TbError: ErrorFactory, deepOptions: { askWaitMs?: number; askPollMs?: number } = {}) {
   const fail = (code: string, message: string, status: number) => new TbError(code, message, status);
   const notFound = () => fail("not_found", "not found", 404);
 
@@ -1146,7 +1152,8 @@ export function createHandlers(knowledge: Knowledge, TbError: ErrorFactory) {
 
   const library = createLibraryHandlers({ knowledge, services, wrap, fail, notFound, recallAcross, readyArea, notebookOf, tagFilter });
   const access = createAccessHandlers({ services, wrap, fail });
-  const all = Object.fromEntries(Object.entries({ ...handlers, ...library, ...access }).map(([id, spec]) => [id, narrowed(id, spec)]));
+  const deep = createDeepHandlers({ knowledge, services, wrap, fail, notFound, readable: (ctx, area) => readable(ctx, area), tagFilter, ...deepOptions });
+  const all = Object.fromEntries(Object.entries({ ...handlers, ...library, ...access, ...deep }).map(([id, spec]) => [id, narrowed(id, spec)]));
   return { handlers: all, dynamic: { engine: engineDynamic }, events };
 }
 
