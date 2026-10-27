@@ -1,0 +1,211 @@
+{
+  "valid": [
+    {
+      "v": 1,
+      "revision": 42,
+      "teams": [
+        {
+          "id": "team_sales",
+          "members": [
+            {
+              "kind": "agent",
+              "id": "agt_01M4TNVDHPXJGTHATZV5SVJHX9",
+              "role": "lead"
+            },
+            {
+              "kind": "contact",
+              "id": "ct_anna"
+            }
+          ],
+          "name": "Sales"
+        }
+      ],
+      "contacts": [
+        {
+          "id": "ct_anna",
+          "kind": "person",
+          "status": "active",
+          "trust": "trusted",
+          "handles": [
+            "buzz:npub180cvv07tjdrrgpa0j7j7tmnyl2yr6yr7l8j4s3evf6u64th6gkwsyjh6w6",
+            "slack:U012ABCDEF"
+          ]
+        },
+        {
+          "id": "ct_bot",
+          "kind": "outside_agent",
+          "status": "departed",
+          "trust": "unreviewed",
+          "handles": [
+            "telegram:-1001234567890"
+          ]
+        }
+      ],
+      "agents": [
+        {
+          "id": "agt_01M4TNVDHPXJGTHATZV5SVJHX9",
+          "status": "active",
+          "trust": "trusted",
+          "owner": "ct_anna"
+        },
+        {
+          "id": "agt_01M4TWGYN437B0W62JBV36HQT5",
+          "status": "paused",
+          "trust": "limited",
+          "owner": null
+        }
+      ]
+    },
+    {
+      "v": 1,
+      "revision": 42,
+      "unchanged": true
+    },
+    {
+      "v": 1,
+      "revision": 0,
+      "teams": [],
+      "contacts": [],
+      "agents": [],
+      "futureField": "ignored by readers (L24)"
+    }
+  ],
+  "invalid": [
+    {
+      "why": "wrong version",
+      "doc": {
+        "v": 2,
+        "revision": 1,
+        "teams": [],
+        "contacts": [],
+        "agents": []
+      }
+    },
+    {
+      "why": "non-canonical handle",
+      "doc": {
+        "v": 1,
+        "revision": 1,
+        "teams": [],
+        "contacts": [
+          {
+            "id": "c",
+            "kind": "person",
+            "status": "active",
+            "trust": "trusted",
+            "handles": [
+              "slack:u012abcdef"
+            ]
+          }
+        ],
+        "agents": []
+      }
+    },
+    {
+      "why": "unknown trust",
+      "doc": {
+        "v": 1,
+        "revision": 1,
+        "teams": [],
+        "contacts": [],
+        "agents": [
+          {
+            "id": "agt_01M4TNVDHPXJGTHATZV5SVJHX9",
+            "status": "active",
+            "trust": "vip",
+            "owner": null
+          }
+        ]
+      }
+    },
+    {
+      "why": "teams missing",
+      "doc": {
+        "v": 1,
+        "revision": 1,
+        "contacts": [],
+        "agents": []
+      }
+    },
+    {
+      "why": "email-shaped handle",
+      "doc": {
+        "v": 1,
+        "revision": 1,
+        "teams": [],
+        "contacts": [
+          {
+            "id": "c",
+            "kind": "person",
+            "status": "active",
+            "trust": "trusted",
+            "handles": [
+              "email:anna@example.com"
+            ]
+          }
+        ],
+        "agents": []
+      }
+    },
+    {
+      "why": "agent status outside enum",
+      "doc": {
+        "v": 1,
+        "revision": 1,
+        "teams": [],
+        "contacts": [],
+        "agents": [
+          {
+            "id": "agt_01M4TNVDHPXJGTHATZV5SVJHX9",
+            "status": "deleted",
+            "trust": "trusted",
+            "owner": null
+          }
+        ]
+      }
+    },
+    {
+      "why": "member role outside enum",
+      "doc": {
+        "v": 1,
+        "revision": 1,
+        "teams": [
+          {
+            "id": "t",
+            "members": [
+              {
+                "kind": "agent",
+                "id": "a",
+                "role": "boss"
+              }
+            ]
+          }
+        ],
+        "contacts": [],
+        "agents": []
+      }
+    }
+  ],
+  "invalidByNormalizeHandle": [
+    {
+      "why": "right-shape npub with a bad checksum (pattern passes; normalizeHandle refuses)",
+      "doc": {
+        "v": 1,
+        "revision": 1,
+        "teams": [],
+        "contacts": [
+          {
+            "id": "c",
+            "kind": "person",
+            "status": "active",
+            "trust": "trusted",
+            "handles": [
+              "buzz:npub180cvv07tjdrrgpa0j7j7tmnyl2yr6yr7l8j4s3evf6u64th6gkwsyjh6w7"
+            ]
+          }
+        ],
+        "agents": []
+      }
+    }
+  ]
+}

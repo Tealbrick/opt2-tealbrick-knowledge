@@ -29,6 +29,7 @@ g.IS_REACT_ACT_ENVIRONMENT = true;
 
 const AGENT = "agt_01M5PM72GE2Q843A6AJ77DWQH0";
 const GONE = "agt_01M5PM72QW76BQM2QBN0DBZE8K";
+const OBSERVER = "ins_01M5PM73ZZ0BSERVER00000000"; // C373: an app writer (Observer deliveries)
 const T = Date.parse("2026-10-24T09:00:00.000Z");
 const stub = { agentsFail: false };
 const doc = {
@@ -43,7 +44,9 @@ const doc = {
   comments: [
     { id: "cmt_1", parentId: null, body: "Checked.", createdBy: "per_1", createdAt: T },
     { id: "cmt_2", parentId: null, body: "Old note.", createdBy: GONE, createdAt: T },
+    { id: "cmt_3", parentId: null, body: "Delivered from mail.", createdBy: OBSERVER, createdAt: T },
   ],
+  authors: { [OBSERVER]: "Observer" },
   links: { outbound: [], backlinks: [] },
 };
 const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -104,6 +107,15 @@ describe("Document page: who wrote it (C331 demo gap 10)", () => {
     assert.match(t, /you, /u);
     assert.ok(!t.includes(AGENT), "no agent id on the page");
     assert.ok(t.includes(GONE), "an id the agent list does not know stays as stored");
+    await m.unmount();
+  });
+
+  it("C373: names an app writer by the name Knowledge recorded (Observer), never its instance id", async () => {
+    stub.agentsFail = false;
+    const m = await mount(mod.Library);
+    const t = text(m.host);
+    assert.match(t, /Observer, /u);
+    assert.ok(!t.includes(OBSERVER), "no instance id on the page");
     await m.unmount();
   });
 

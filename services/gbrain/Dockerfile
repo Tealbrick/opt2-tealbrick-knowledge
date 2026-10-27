@@ -24,7 +24,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 COPY --from=tb /usr/local/bin/node /usr/local/bin/node
 COPY --from=tb /opt/tb /opt/tb
 COPY --from=tb /opt/knowledge /opt/knowledge
-COPY services/gbrain/entrypoint.sh services/gbrain/helper.ts services/gbrain/boot.ts services/gbrain/migration-lock.ts services/gbrain/pg-lock-session.ts /opt/knowledge/
+COPY services/gbrain/entrypoint.sh services/gbrain/helper.ts services/gbrain/boot.ts services/gbrain/models.ts services/gbrain/migration-lock.ts services/gbrain/pg-lock-session.ts /opt/knowledge/
 RUN chmod 0755 /opt/knowledge/entrypoint.sh && mkdir -p /data
 ENV GBRAIN_HOME=/data GBRAIN_ROOT=/opt/gbrain PORT=3131
 EXPOSE 3131 3140

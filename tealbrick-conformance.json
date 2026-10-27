@@ -39,9 +39,9 @@
   },
   "inputsAs": {
     "app": {
-      "remember": {
-        "text": "conformance app memory",
-        "area": "${area0}"
+      "document_create": {
+        "title": "conformance app document",
+        "area": "company"
       }
     }
   },

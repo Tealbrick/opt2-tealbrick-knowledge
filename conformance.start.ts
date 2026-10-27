@@ -1,6 +1,7 @@
 // Conformance harness (CONFORMANCE §2, app target): `tb-conformance app --start conformance.start.ts` boots Knowledge
 // with the suite's env (fake bridge, enrolment code, TB_KEK, data dir) plus the deploy-time settings env. No engine
 // services run here: recall answers from keyword search (`degraded: true`), engine-backed ops answer `area_not_ready`.
+import { applyLevelCrud, LEVEL_CRUD_ENV, parseLevelCrud } from "@opt2-tealbrick/conformance";
 import { defineApp, startApp, TbError } from "@opt2-tealbrick/miniapp-sdk";
 import { knowledgeDefinition, manifest } from "./src/app.ts";
 
@@ -26,6 +27,17 @@ export default async function start(env: Record<string, string>): Promise<{ url:
             ...base.dynamic,
             engine: {
               ...engine,
+              // conformance 0.1.30 A20.catalog_admitted needs a non-empty catalog; no engine runs here, so the stub lists its two tools
+              catalog: async () =>
+                Object.entries(STUB_TOOLS).map(([name, tool]) => ({
+                  name,
+                  title: name.replace(/_/gu, " ").slice(0, 60),
+                  description: `Conformance stub (${tool.effect}).`,
+                  inputSchema: { type: "object" as const, properties: {} },
+                  crud: tool.crud,
+                  effect: tool.effect,
+                  ...(tool.holdFamily ? { holdFamily: tool.holdFamily } : {}),
+                })),
               resolve: async (tool: string, ctx: Parameters<typeof engine.resolve>[1]) => {
                 const stub = STUB_TOOLS[tool];
                 return stub ? { tool, ...stub } : engine.resolve(tool, ctx);
@@ -41,7 +53,10 @@ export default async function start(env: Record<string, string>): Promise<{ url:
     ...(env.TBCONF_PORTAL_ROOT_KEYS ? { portalRootKeys: JSON.parse(env.TBCONF_PORTAL_ROOT_KEYS) } : {}),
     port: env.TBCONF_PORT ? Number(env.TBCONF_PORT) : manifest.runtime.port,
   } as Parameters<typeof startApp>[2];
-  const running = await startApp(defineApp(definition), full, harness);
+  // "An app update" in the black-box suite (conformance 0.1.30, A21 rows): the suite restarts the app with TBCONF_LEVEL_CRUD
+  // and expects the digest of the updated manifest. Harness only; production never reads it.
+  const levelCrud = parseLevelCrud(env[LEVEL_CRUD_ENV] ?? process.env[LEVEL_CRUD_ENV]);
+  const running = await startApp(defineApp(levelCrud.length ? { ...definition, manifest: applyLevelCrud(definition.manifest, levelCrud) } : definition), full, harness);
   return {
     url: `http://127.0.0.1:${running.port}`,
     stop: async () => {

@@ -3,6 +3,6 @@
   "private": true,
   "description": "C62/BSD-10: the tb-exec layer of every Knowledge companion image, installed with `npm ci --ignore-scripts` from the integrity-pinned package-lock.json next to this file.",
   "dependencies": {
-    "@opt2-tealbrick/miniapp-sdk": "https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-sdk-miniapp-sdk-v0.1.12/opt2-tealbrick-miniapp-sdk-0.1.12.tgz"
+    "@opt2-tealbrick/miniapp-sdk": "https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-sdk-miniapp-sdk-v0.1.41/opt2-tealbrick-miniapp-sdk-0.1.41.tgz"
   }
 }

@@ -8,7 +8,7 @@ import type { Json, OpContext } from "@opt2-tealbrick/spec/sdk";
 import { knowledgeDefinition } from "../src/app.ts";
 import { NARROWING_POLICY } from "../src/handlers.ts";
 import { areaSourceId } from "../src/ids.ts";
-import { ENGINE_KEY_MISSING, ENGINE_MISSING, ENGINE_UNREACHABLE, KEY_REJECTED, memorySecrets, SECRET_NAME } from "../src/knowledge.ts";
+import { DEGRADED, EMBEDDINGS_CHANGED, ENGINE_MISSING, ENGINE_STARTING, ENGINE_UNREACHABLE, KEY_REJECTED, type KnowledgeOptions, MODEL_ROLE_OPTIONAL, memorySecrets, readEngineModels, roleRows, SECRET_NAME } from "../src/knowledge.ts";
 import { DocumentStore } from "../src/store/documents.ts";
 import { context, type FakeGBrain, FakeScopes, fakeGBrain, memoryDb, TestError } from "./helpers.ts";
 
@@ -381,7 +381,7 @@ test("engine tools: catalog filters policy exclusions and source_id; calls are a
   await run("recall", { query: "warm up" }, ctx(ADA)); // provisions the sources
   const dynamic = definition.dynamic?.engine;
   assert.ok(dynamic);
-  const hookCtx = { db: ctx(ADA).db, log: ctx(ADA).log, getKey: async () => null, signal: new AbortController().signal, secrets: memorySecrets() };
+  const hookCtx = { db: ctx(ADA).db, log: ctx(ADA).log, getKey: async () => null, modelRole: async () => null, signal: new AbortController().signal, secrets: memorySecrets() };
   const catalog = await dynamic.catalog(null, hookCtx);
   const names = catalog.map((entry) => entry.name);
   assert.ok(names.includes("gb_remember"));
@@ -827,7 +827,7 @@ test("R-2: a provider_error on the embedding stage reads as a rejected key (fire
   const { knowledge } = await taggedMemories();
   knowledge.noteEngine({ state: "degraded", detail: ["embed_unavailable:provider_error"] });
   assert.equal(knowledge.attention()?.code, KEY_REJECTED);
-  assert.match(knowledge.attention()?.reason ?? "", /^Key rejected by the provider: .*embed_unavailable:provider_error.*Enter a valid model key on the bridge key page\.$/u);
+  assert.match(knowledge.attention()?.reason ?? "", /^Key rejected by the provider: .*embed_unavailable:provider_error.*Enter a valid key on the Keys and models page\.$/u);
   knowledge.noteEngine({ state: "degraded", detail: ["embed_unavailable:no_provider"] });
   assert.equal(knowledge.attention()?.code, "memory_engine_degraded");
   knowledge.noteEngine({ state: "ok", detail: [] });
@@ -917,6 +917,100 @@ test("C296 (prod): the engine comes up after Knowledge: provisioning retries in 
   }
 });
 
+test("QA-KN027-1: a probe that meets GBrain's boot supervisor (503 starting) is not a failure, and the engine is re-probed until it answers", async () => {
+  const db = memoryDb();
+  const scopes = new FakeScopes();
+  const env = { KNOWLEDGE_ENGINE: "gbrain", KNOWLEDGE_GBRAIN_URL: gbrain.url, KNOWLEDGE_GBRAIN_ADMIN_TOKEN: gbrain.adminToken };
+  // the DEV shape: provisioning retries fast, the 10 min probe is far away, the quick re-probe is short
+  const { definition, knowledge } = knowledgeDefinition(env, TestError, { drainIntervalMs: 0, engineProbeMs: 600_000, engineReprobeMs: 20, provisionRetryMs: 5 });
+  let down = 1; // the helper is not claimed yet on the first attempt (helper_unavailable)
+  const callServiceHelper = (async (_service: string, _path: string, body: Json) => {
+    if (down-- > 0) throw new Error("service_unreachable");
+    gbrain.sources.add(String((body as Record<string, unknown>).id)); // `sources add` works through the CLI during boot
+    return {};
+  }) as OpContext["callServiceHelper"];
+  const log = { debug() {}, info() {}, warn() {}, error() {} };
+  const seen: (string | null)[] = [];
+  gbrain.booting = true;
+  try {
+    await definition.onStart({ db, secrets: memorySecrets(), log: log as never, scopes: scopes.asStore(), getKey: async () => "sk-test-provider-key", callServiceHelper, statusChanged() { seen.push(knowledge.attention()?.code ?? null); } });
+    // provisioning succeeds while GBrain still boots: the follow-up probe meets the supervisor's 503
+    for (let i = 0; i < 300 && !knowledge.current()?.areas.get("company")?.sourceReady; i++) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(knowledge.current()?.areas.get("company")?.sourceReady, true);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    assert.notEqual(knowledge.attention()?.code, "memory_engine_failing", "a booting engine is not reported as failing");
+    assert.equal(knowledge.engineStatus().state, "starting");
+    assert.equal(knowledge.attention()?.code, "memory_engine_starting");
+    gbrain.booting = false; // GBrain serves
+    for (let i = 0; i < 300 && knowledge.engineStatus().state !== "ok"; i++) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(knowledge.engineStatus().state, "ok", "the quick re-probe sees the engine once it serves (no 10 min wait)");
+    assert.equal(knowledge.attention(), null);
+    assert.ok(!seen.includes("memory_engine_failing"), `no failing attention was ever pushed: ${JSON.stringify(seen)}`);
+  } finally {
+    gbrain.booting = false;
+    knowledge.stop();
+  }
+});
+
+test("QA-KN027-1: GBrain answers 503 for the first N calls (any path) → the engine ends ready; past the start window it shows failing", async () => {
+  const db = memoryDb();
+  const scopes = new FakeScopes();
+  const env = { KNOWLEDGE_ENGINE: "gbrain", KNOWLEDGE_GBRAIN_URL: gbrain.url, KNOWLEDGE_GBRAIN_ADMIN_TOKEN: gbrain.adminToken };
+  const { definition, knowledge } = knowledgeDefinition(env, TestError, { drainIntervalMs: 0, engineProbeMs: 600_000, engineReprobeMs: 5, engineReprobeMaxMs: 40, provisionRetryMs: 5 });
+  const callServiceHelper = (async (_service: string, _path: string, body: Json) => {
+    gbrain.sources.add(String((body as Record<string, unknown>).id));
+    return {};
+  }) as OpContext["callServiceHelper"];
+  const log = { debug() {}, info() {}, warn() {}, error() {} };
+  const seen: (string | null)[] = [];
+  gbrain.fail503 = 6;
+  try {
+    await definition.onStart({ db, secrets: memorySecrets(), log: log as never, scopes: scopes.asStore(), getKey: async () => "sk-test-provider-key", callServiceHelper, statusChanged() { seen.push(knowledge.attention()?.code ?? null); } });
+    for (let i = 0; i < 400 && knowledge.engineStatus().state !== "ok"; i++) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(gbrain.fail503, 0, "all N 503s were consumed");
+    assert.equal(knowledge.engineStatus().state, "ok", "the engine ends ready");
+    assert.equal(knowledge.attention(), null);
+    assert.ok(!seen.includes("memory_engine_failing"), `never reported failing: ${JSON.stringify(seen)}`);
+  } finally {
+    gbrain.fail503 = 0;
+    knowledge.stop();
+  }
+  // an engine that never comes up is "starting" only for the start window, then failing (and still re-probed)
+  const late = knowledgeDefinition(env, TestError, { drainIntervalMs: 0, engineProbeMs: 600_000, engineReprobeMs: 5, engineReprobeMaxMs: 20, engineStartingMaxMs: 60, provisionRetryMs: 5 });
+  const db2 = memoryDb();
+  gbrain.booting = true;
+  try {
+    await late.definition.onStart({ db: db2, secrets: memorySecrets(), log: log as never, scopes: scopes.asStore(), getKey: async () => "sk-test-provider-key", callServiceHelper, statusChanged() {} });
+    for (let i = 0; i < 400 && late.knowledge.attention()?.code !== "memory_engine_failing"; i++) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(late.knowledge.attention()?.code, "memory_engine_failing");
+    assert.deepEqual(late.knowledge.engineStatus().detail, ["gbrain_not_started"]);
+    gbrain.booting = false;
+    for (let i = 0; i < 400 && late.knowledge.engineStatus().state !== "ok"; i++) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(late.knowledge.engineStatus().state, "ok", "a sticky failure clears itself when GBrain comes back");
+  } finally {
+    gbrain.booting = false;
+    late.knowledge.stop();
+  }
+});
+
+test("QA-KN027-1: a real engine failure still shows, and the quick re-probe clears it as soon as the engine answers", async () => {
+  const { knowledge } = await taggedMemories();
+  const s = knowledge.current();
+  assert.ok(s);
+  gbrain.queryReply = "unparsable";
+  (knowledge as unknown as { opts: { engineProbeMs?: number; engineReprobeMs?: number } }).opts.engineProbeMs = 600_000;
+  (knowledge as unknown as { opts: { engineReprobeMs?: number } }).opts.engineReprobeMs = 20;
+  try {
+    await knowledge.probeEngine(s);
+    assert.equal(knowledge.engineStatus().state, "failing");
+  } finally {
+    gbrain.queryReply = undefined;
+  }
+  for (let i = 0; i < 300 && knowledge.engineStatus().state !== "ok"; i++) await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(knowledge.engineStatus().state, "ok", "re-probed without waiting for the 10 min probe");
+  knowledge.stop();
+});
+
 test("C296 review: an engine that never answers is reported (memory_engine_unreachable) and clears when it comes up; stop() ends the loop", async () => {
   const db = memoryDb();
   const scopes = new FakeScopes();
@@ -957,7 +1051,8 @@ test("C296 review: stop() during an in-flight background provision does not sche
   const { definition, knowledge } = knowledgeDefinition(env, TestError, { drainIntervalMs: 0, engineProbeMs: 0, provisionRetryMs: 1 });
   let calls = 0;
   let release: () => void = () => undefined;
-  const callServiceHelper = (async () => {
+  const callServiceHelper = (async (_service: string, path: string) => {
+    if (path === "/models") throw new Error("service_unreachable"); // C373: the engine's models are unknown too
     calls++;
     if (calls === 1) throw new Error("service_unreachable");
     await new Promise<void>((resolve) => (release = resolve));
@@ -999,6 +1094,8 @@ test("C296 Settings: engine (GBrain, Hindsight greyed soon), models and key name
   assert.equal(out.engine.running, true);
   assert.deepEqual(out.engine.choices, [{ value: "gbrain", label: "GBrain", note: "Sourced pages and facts, hybrid search, a typed graph of people and companies." }, { value: "hindsight", label: "Hindsight", note: "soon", disabled: true }]);
   assert.deepEqual(out.models.keys, ["OPENAI_API_KEY"]);
+  // C373: this engine fake answers no /models (an old image): both roles read "unknown", never invented
+  assert.deepEqual(out.roles.map((r: Record<string, unknown>) => [r.role, r.state, r.model]), [["embeddings", "unknown", null], ["reasoning", "unknown", null]]);
   assert.equal(out.documents.total, 1);
   assert.ok(Array.isArray(out.areas) && out.areas.some((a: Record<string, unknown>) => a.id === ADA_AREA && a.engineReady === true));
   assert.equal(out.tools.error, null);
@@ -1046,58 +1143,116 @@ test("C296 review: Settings reads the engine counts again after an engine restar
   assert.equal(out.embeddings.error, null);
 });
 
-test("C296 INFO-2: while the engine waits for its provider key the attention names the key; it clears when the key is set (quiet)", async () => {
+/** C373: the gbrain helper's `/models` answer (services/gbrain/models.ts ModelStatus), labels only. */
+const modelsAnswer = (embeddings: Record<string, unknown>, reasoning: Record<string, unknown>) => ({ v: 1, embeddings: { source: null, active: null, wanted: null, ...embeddings }, reasoning: { source: null, model: null, ...reasoning }, at: "2026-10-27T00:00:00.000Z" });
+const KEYLESS = modelsAnswer({ state: "unset" }, { state: "unset" });
+const BOUND = modelsAnswer({ state: "ok", source: "role", active: { model: "openai:text-embedding-3-small", dims: 1536 }, wanted: { model: "openai:text-embedding-3-small", dims: 1536 } }, { state: "ok", source: "role", model: "openrouter:openai/gpt-5.2-chat" });
+
+/** A Knowledge with GBrain whose helper answers `/models` with `models()` (an Error is thrown) and creates sources. */
+async function modelSetup(models: () => unknown, extra: KnowledgeOptions = {}) {
   const db = memoryDb();
   const scopes = new FakeScopes();
   const env = { KNOWLEDGE_ENGINE: "gbrain", KNOWLEDGE_GBRAIN_URL: gbrain.url, KNOWLEDGE_GBRAIN_ADMIN_TOKEN: gbrain.adminToken, KNOWLEDGE_MODEL_PROVIDER: "openai" };
-  const { definition, knowledge } = knowledgeDefinition(env, TestError, { drainIntervalMs: 0, engineProbeMs: 0, provisionRetryMs: 1_000_000 });
-  let key: string | null = null;
-  let pushes = 0;
-  const callServiceHelper = (async (_service: string, _path: string, body: Json) => {
+  const { definition, knowledge } = knowledgeDefinition(env, TestError, { drainIntervalMs: 0, engineProbeMs: 0, provisionRetryMs: 1_000_000, ...extra });
+  const helperPaths: string[] = [];
+  const callServiceHelper = (async (_service: string, path: string, body: Json) => {
+    helperPaths.push(path);
+    if (path === "/models") {
+      const answer = models();
+      if (answer instanceof Error) throw answer;
+      return answer;
+    }
     gbrain.sources.add(String((body as Record<string, unknown>).id));
     return {};
   }) as OpContext["callServiceHelper"];
   const log = { debug() {}, info() {}, warn() {}, error() {} };
+  let pushes = 0;
+  await definition.onStart({ db, secrets: memorySecrets(), log: log as never, scopes: scopes.asStore(), getKey: async () => null, callServiceHelper, statusChanged: () => void pushes++ });
+  const eventCtx = { db, scopes: scopes.asStore(), log, callApp: async () => ({}) as never, statusChanged() {}, ownerLink: () => null } as never;
+  return { db, scopes, definition, knowledge, callServiceHelper, helperPaths, eventCtx, pushes: () => pushes };
+}
+
+test("C373 keyless (DEV): no model role and no key → model_role_optional (degraded), keyword recall works, ask says 'set a reasoning model'", async () => {
+  let answer: unknown = KEYLESS;
+  const m = await modelSetup(() => answer);
   try {
-    await definition.onStart({ db, secrets: memorySecrets(), log: log as never, scopes: scopes.asStore(), getKey: async () => key, callServiceHelper, statusChanged: () => void pushes++ });
-    assert.equal(knowledge.attention()?.code, ENGINE_KEY_MISSING, "fires");
-    assert.match(knowledge.attention()?.reason ?? "", /waits for OPENAI_API_KEY.*bridge key page.*starts by itself/u);
-    assert.ok(pushes >= 1, "the status is pushed");
-    key = "sk-test-value";
-    await definition.events?.keysChanged?.(["OPENAI_API_KEY"], { db, scopes: scopes.asStore(), log, callApp: async () => ({}) as never, statusChanged() {}, ownerLink: () => null } as never);
-    assert.notEqual(knowledge.attention()?.code, ENGINE_KEY_MISSING, "quiet once the key is set");
-    assert.ok(!JSON.stringify(knowledge.attention() ?? {}).includes("sk-test-value"), "never the value");
+    assert.ok(m.helperPaths.includes("/models"), "the engine's models are read at start");
+    const attention = m.knowledge.attention();
+    assert.equal(attention?.code, MODEL_ROLE_OPTIONAL, "fires");
+    assert.match(attention?.reason ?? "", /keyword-only: no embeddings model is set\. Also no reasoning model is set, so ask cannot answer\..*Keys and models page/u);
+    assert.ok((attention?.reason.length ?? 0) <= 200);
+    assert.ok(m.pushes() >= 1, "the status is pushed");
+    const ctx = (agent: string) => context(m.db, m.scopes, agent, { callServiceHelper: m.callServiceHelper });
+    await m.definition.events?.agentAdded?.({ id: ADA, name: "Ada", mode: "free", status: "active" }, m.eventCtx);
+    m.scopes.applyDefaults(ADA);
+    const handler = (id: string) => (m.definition.handlers[id] as { run: (input: Json, ctx: OpContext) => Promise<Record<string, any>> }).run;
+    await handler("remember")({ text: "Keyless memory about the zebra project" }, ctx(ADA));
+    await m.knowledge.current()?.projector?.drain();
+    const recall = await handler("recall")({ query: "zebra" }, ctx(ADA));
+    assert.ok(recall.results.length >= 1, "recall still finds the memory");
+    await assert.rejects(handler("ask")({ question: "what is the zebra project?" }, ctx(ADA)), (e: unknown) => e instanceof TestError && e.code === "reasoning_model_missing" && e.httpStatus === 409 && /Keys and models page/u.test(e.message));
+    // the owner binds both roles: the engine restarts (keysRev) and the next answer clears the attention (quiet)
+    answer = BOUND;
+    await m.definition.events?.keysChanged?.([], m.eventCtx);
+    assert.equal(m.knowledge.attention(), null, "quiet once both roles are set");
+    const asked = await handler("ask")({ question: "what is the zebra project?" }, ctx(ADA));
+    assert.match(JSON.stringify(asked.answer), /answer to what is the zebra project/u);
   } finally {
-    knowledge.stop();
+    m.knowledge.stop();
   }
 });
 
-test("C296 INFO-2: an unknown key state is not 'missing'; the Anthropic provider names both keys; no engine keeps engine_missing first", async () => {
-  const env = { KNOWLEDGE_ENGINE: "gbrain", KNOWLEDGE_GBRAIN_URL: gbrain.url, KNOWLEDGE_GBRAIN_ADMIN_TOKEN: gbrain.adminToken, KNOWLEDGE_MODEL_PROVIDER: "anthropic" };
-  const { knowledge } = knowledgeDefinition(env, TestError, { drainIntervalMs: 0 });
-  assert.deepEqual(await knowledge.checkProviderKeys({ getKey: async () => { throw new Error("key_unavailable"); } }), [], "the bridge did not answer: unknown, not missing");
-  assert.deepEqual(await knowledge.checkProviderKeys({ getKey: async () => null }), ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"]);
-  // review: a known-missing key stays missing while the bridge cannot answer (paused, updating) — no flapping
-  assert.deepEqual(await knowledge.checkProviderKeys({ getKey: async () => { throw new Error("key_unavailable"); } }), ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"]);
-  assert.match(knowledge.attention()?.reason ?? "", /waits for ANTHROPIC_API_KEY, OPENAI_API_KEY, so recall is keyword-only\. Enter them/u);
-  const none = knowledgeDefinition({ KNOWLEDGE_ENGINE: "hindsight" }, TestError, { drainIntervalMs: 0 }).knowledge;
-  assert.deepEqual(await none.checkProviderKeys({ getKey: async () => null }), [], "no engine: no engine key to wait for");
-  assert.equal(none.attention()?.code, ENGINE_MISSING);
+test("C373: an embeddings binding that differs from the index → embeddings_changed naming both models; only reasoning missing → degraded with the ask hint", async () => {
+  let answer: unknown = modelsAnswer({ state: "changed", source: "role", active: { model: "openai:text-embedding-3-small", dims: 1536 }, wanted: { model: "ollama:nomic-embed-text", dims: 768 } }, { state: "ok", source: "legacy", model: "openai:gpt-6-luna" });
+  const m = await modelSetup(() => answer);
+  try {
+    assert.equal(m.knowledge.attention()?.code, EMBEDDINGS_CHANGED);
+    assert.match(m.knowledge.attention()?.reason ?? "", /changed to ollama:nomic-embed-text\. The memory index keeps openai:text-embedding-3-small until it is re-indexed/u);
+    answer = modelsAnswer({ state: "ok", source: "legacy", active: { model: "openai:text-embedding-3-small", dims: 1536 } }, { state: "unset" });
+    await m.knowledge.checkModels();
+    assert.equal(m.knowledge.attention()?.code, MODEL_ROLE_OPTIONAL);
+    assert.match(m.knowledge.attention()?.reason ?? "", /^Memory works, but no reasoning model is set, so ask cannot answer/u);
+  } finally {
+    m.knowledge.stop();
+  }
 });
 
-test("C296 INFO-2 review: once the key arrives the owner never reads 'cannot be set up'; provisioning starts over at once; each retry re-checks the key", async () => {
+test("C373: the helper answer is read strictly (no URL or key-like text passes); an engine that cannot answer keeps what was known", async () => {
+  assert.equal(readEngineModels({ v: 2, embeddings: { state: "ok" }, reasoning: { state: "ok" } }), null);
+  assert.equal(readEngineModels({ v: 1, embeddings: { state: "great" }, reasoning: { state: "ok" } }), null);
+  const odd = readEngineModels(modelsAnswer({ state: "ok", active: { model: "https://host.example.com/v1", dims: 3 } }, { state: "ok", model: "sk live key with spaces" }));
+  assert.equal(odd?.embeddings.active, null, "an address is not a model label");
+  assert.equal(odd?.reasoning.model, null, "text with spaces is not a model label");
+  let answer: unknown = KEYLESS;
+  const m = await modelSetup(() => answer);
+  try {
+    assert.equal(m.knowledge.attention()?.code, MODEL_ROLE_OPTIONAL);
+    answer = Object.assign(new Error("engine starting"), { code: "engine_starting" });
+    await m.knowledge.checkModels();
+    assert.equal(m.knowledge.attention()?.code, MODEL_ROLE_OPTIONAL, "unknown is not 'fixed': the last answer stays");
+  } finally {
+    m.knowledge.stop();
+  }
+  // an engine image without /models (before 0.1.29): no model attention; the engine probe decides as before
+  const old = await modelSetup(() => Object.assign(new Error("not found"), { code: "not_found" }));
+  try {
+    assert.equal(old.knowledge.engineModels(), null);
+    assert.notEqual(old.knowledge.attention()?.code, MODEL_ROLE_OPTIONAL);
+  } finally {
+    old.knowledge.stop();
+  }
+});
+
+test("C296 INFO-2 review (C373): once keys or roles change the owner never reads 'cannot be set up'; provisioning starts over at once", async () => {
   const db = memoryDb();
   const scopes = new FakeScopes();
   const env = { KNOWLEDGE_ENGINE: "gbrain", KNOWLEDGE_GBRAIN_URL: gbrain.url, KNOWLEDGE_GBRAIN_ADMIN_TOKEN: gbrain.adminToken, KNOWLEDGE_MODEL_PROVIDER: "openai" };
   const { definition, knowledge } = knowledgeDefinition(env, TestError, { drainIntervalMs: 0, engineProbeMs: 0, provisionRetryMs: 1 });
-  let key: string | null | "error" = "error"; // the bridge cannot answer at boot
-  const getKey = async () => {
-    if (key === "error") throw new Error("key_unavailable");
-    return key;
-  };
-  // tb-exec holds GBrain without its key: sources cannot be created until the key is set
-  const callServiceHelper = (async (_service: string, _path: string, body: Json) => {
-    if (key === null || key === "error") throw new Error("upstream_not_started");
+  // the engine waits (starting, or for a key it needs): neither sources nor models answer until keys or roles change
+  let up = false;
+  const callServiceHelper = (async (_service: string, path: string, body: Json) => {
+    if (!up) throw new Error("upstream_not_started");
+    if (path === "/models") return modelsAnswer({ state: "unset" }, { state: "unset" });
     gbrain.sources.add(String((body as Record<string, unknown>).id));
     return {};
   }) as OpContext["callServiceHelper"];
@@ -1106,18 +1261,134 @@ test("C296 INFO-2 review: once the key arrives the owner never reads 'cannot be 
     for (let i = 0; i < 300 && !done(); i++) await new Promise((resolve) => setTimeout(resolve, 5));
   };
   try {
-    await definition.onStart({ db, secrets: memorySecrets(), log: log as never, scopes: scopes.asStore(), getKey, callServiceHelper, statusChanged() {} });
-    assert.notEqual(knowledge.attention()?.code, ENGINE_KEY_MISSING, "unknown at boot: not missing");
-    key = null; // now the bridge answers: unset — a background retry finds it (no event needed)
-    await wait(() => knowledge.attention()?.code === ENGINE_KEY_MISSING);
-    assert.equal(knowledge.attention()?.code, ENGINE_KEY_MISSING, "each retry re-checks the key");
-    await new Promise((resolve) => setTimeout(resolve, 100)); // retries climb past the unreachable threshold meanwhile
-    key = "sk-test-value";
+    await definition.onStart({ db, secrets: memorySecrets(), log: log as never, scopes: scopes.asStore(), getKey: async () => null, callServiceHelper, statusChanged() {} });
+    await wait(() => knowledge.attention()?.code === ENGINE_UNREACHABLE); // retries climb past the unreachable threshold
+    assert.equal(knowledge.attention()?.code, ENGINE_UNREACHABLE);
+    up = true;
     await definition.events?.keysChanged?.(["OPENAI_API_KEY"], { db, scopes: scopes.asStore(), log, callApp: async () => ({}) as never, statusChanged() {}, ownerLink: () => null } as never);
-    assert.notEqual(knowledge.attention()?.code, ENGINE_UNREACHABLE, "never 'cannot be set up' right after the key arrives");
+    assert.notEqual(knowledge.attention()?.code, ENGINE_UNREACHABLE, "never 'cannot be set up' right after keys or roles change");
     await wait(() => knowledge.current()?.areas.get("company")?.sourceReady === true);
     assert.equal(knowledge.current()?.areas.get("company")?.sourceReady, true, "provisioning started over and succeeded");
+    assert.equal(knowledge.attention()?.code, MODEL_ROLE_OPTIONAL, "each retry re-reads the models");
   } finally {
     knowledge.stop();
   }
+});
+
+test("C373 Settings roles: bound / not bound / degraded / unknown in plain words, from the engine's own answer", async () => {
+  const states = (answer: unknown) => roleRows(readEngineModels(answer)).map((r) => [r.role, r.state]);
+  assert.deepEqual(states(null), [["embeddings", "unknown"], ["reasoning", "unknown"]]);
+  assert.deepEqual(states(KEYLESS), [["embeddings", "not_bound"], ["reasoning", "not_bound"]]);
+  const bound = roleRows(readEngineModels(BOUND));
+  assert.deepEqual(bound.map((r) => [r.state, r.model, r.notice]), [["bound", "openai:text-embedding-3-small", null], ["bound", "openrouter:openai/gpt-5.2-chat", null]]);
+  const changed = roleRows(readEngineModels(modelsAnswer({ state: "changed", active: { model: "openai:text-embedding-3-small", dims: 1536 }, wanted: { model: "ollama:nomic-embed-text", dims: 768 } }, { state: "conflict" })));
+  assert.equal(changed[0]?.state, "degraded");
+  assert.match(changed[0]?.notice ?? "", /now ollama:nomic-embed-text, but the memory index was built with openai:text-embedding-3-small/u);
+  assert.equal(changed[1]?.state, "degraded");
+  assert.match(changed[1]?.notice ?? "", /same provider key as embeddings/u);
+  for (const state of ["unsupported", "dims_missing", "failed"]) assert.equal(roleRows(readEngineModels(modelsAnswer({ state }, { state: "ok" })))[0]?.state, "degraded", state);
+  assert.equal(roleRows(readEngineModels(modelsAnswer({ state: "ok", source: "legacy", active: { model: "openai:text-embedding-3-small", dims: 1536 } }, { state: "ok", source: "legacy", model: "openai:gpt-5.2" })))[1]?.notice, "It comes from the older provider keys.");
+});
+
+test("C373 Settings page op: settings_overview carries the roles the engine reports (never a key or an address)", async () => {
+  const m = await modelSetup(() => BOUND);
+  try {
+    await m.definition.events?.agentAdded?.({ id: ADA, name: "Ada", mode: "free", status: "active" }, m.eventCtx);
+    m.scopes.applyDefaults(ADA);
+    const owner = context(m.db, m.scopes, ADA, { callServiceHelper: m.callServiceHelper, caller: { type: "person", id: "per_01OWNER000000000000000000" as `per_${string}`, name: "Owner", mode: null } });
+    const spec = m.definition.handlers.settings_overview as { run: (input: Json, ctx: OpContext) => Promise<Record<string, any>> };
+    const out = await spec.run({}, owner);
+    assert.deepEqual(out.roles.map((r: Record<string, unknown>) => [r.role, r.state, r.model]), [["embeddings", "bound", "openai:text-embedding-3-small"], ["reasoning", "bound", "openrouter:openai/gpt-5.2-chat"]]);
+    assert.ok(!JSON.stringify(out.roles).includes("http"));
+  } finally {
+    m.knowledge.stop();
+  }
+});
+
+const REASONING_UNSET = modelsAnswer({ state: "ok", source: "role", active: { model: "openai:text-embedding-3-small", dims: 1536 }, wanted: { model: "openai:text-embedding-3-small", dims: 1536 } }, { state: "unset" });
+
+test("QA-KN24-1: engine health beats the optional-role notice: key rejected, failing and starting show for an embeddings-only install; the notice only when the engine answers", async () => {
+  const m = await modelSetup(() => REASONING_UNSET);
+  try {
+    const k = m.knowledge;
+    assert.equal(k.attention()?.code, MODEL_ROLE_OPTIONAL, "ok engine, reasoning unset: the notice");
+    k.noteEngine({ state: "degraded", detail: ["embed_unavailable:provider_error"] });
+    assert.equal(k.attention()?.code, KEY_REJECTED);
+    k.noteEngine({ state: "failing", detail: ["gbrain_error"] });
+    assert.equal(k.attention()?.code, "memory_engine_failing");
+    k.noteEngine({ state: "starting", detail: [] });
+    assert.equal(k.attention()?.code, ENGINE_STARTING);
+    k.noteEngine({ state: "degraded", detail: ["keyword_only"] });
+    assert.equal(k.attention()?.code, MODEL_ROLE_OPTIONAL, "a plainly degraded engine reads as the model notice that names the cause");
+    k.noteEngine({ state: "ok", detail: [] });
+    assert.equal(k.attention()?.code, MODEL_ROLE_OPTIONAL);
+  } finally {
+    m.knowledge.stop();
+  }
+  // nothing to say about models (all bound): the health attentions are what they were
+  const bound = await modelSetup(() => BOUND);
+  try {
+    bound.knowledge.noteEngine({ state: "degraded", detail: ["keyword_only"] });
+    assert.equal(bound.knowledge.attention()?.code, DEGRADED);
+    bound.knowledge.noteEngine({ state: "failing", detail: ["gbrain_error"] });
+    assert.equal(bound.knowledge.attention()?.code, "memory_engine_failing");
+  } finally {
+    bound.knowledge.stop();
+  }
+});
+
+test("QA-KN24-3: after the owner binds reasoning the model status is re-read with a backoff until the engine answers; ask works as soon as it does", async () => {
+  let answer: unknown = REASONING_UNSET;
+  const m = await modelSetup(() => answer, { modelsRecheckMs: [20, 40, 80] });
+  try {
+    const checks = () => m.helperPaths.filter((p) => p === "/models").length;
+    const before = checks();
+    // the owner binds reasoning: the engine restarts. The change event reads the OLD engine (unchanged answer)...
+    await m.definition.events?.keysChanged?.([], m.eventCtx);
+    assert.equal(m.knowledge.engineModels()?.reasoning.state, "unset");
+    // ...and the helper answers 503 while the new boot runs, then the new answer
+    answer = Object.assign(new Error("engine starting"), { code: "engine_starting" });
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    assert.equal(m.knowledge.engineModels()?.reasoning.state, "unset", "nothing new yet: the last answer stays");
+    answer = BOUND;
+    for (let i = 0; i < 100 && m.knowledge.engineModels()?.reasoning.state !== "ok"; i++) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(m.knowledge.engineModels()?.reasoning.state, "ok", "the backoff found the new answer without any caller asking");
+    assert.equal(m.knowledge.attention(), null);
+    assert.ok(checks() >= before + 3);
+    // it stops once the answer changed
+    const seen = checks();
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    assert.equal(checks(), seen, "no more re-checks after the answer changed");
+  } finally {
+    m.knowledge.stop();
+  }
+});
+
+test("QA-KN24-3: ask re-reads the models before it refuses, so it works right after the binding even when no re-check ran yet", async () => {
+  let answer: unknown = KEYLESS;
+  const m = await modelSetup(() => answer, { modelsRecheckMs: [] });
+  try {
+    await m.definition.events?.agentAdded?.({ id: ADA, name: "Ada", mode: "free", status: "active" }, m.eventCtx);
+    m.scopes.applyDefaults(ADA);
+    const ask = (m.definition.handlers.ask as { run: (input: Json, ctx: OpContext) => Promise<Record<string, any>> }).run;
+    const ctx = context(m.db, m.scopes, ADA, { callServiceHelper: m.callServiceHelper });
+    await assert.rejects(ask({ question: "what is the zebra project?" }, ctx), (e: unknown) => e instanceof TestError && e.code === "reasoning_model_missing");
+    answer = BOUND; // the engine restarted with the new role; nobody told Knowledge
+    const asked = await ask({ question: "what is the zebra project?" }, ctx);
+    assert.match(JSON.stringify(asked.answer), /answer to what is the zebra project/u);
+    assert.equal(m.knowledge.engineModels()?.reasoning.state, "ok");
+  } finally {
+    m.knowledge.stop();
+  }
+});
+
+test("QA-KN24-7 / residual: Settings says a base URL is not used for a fixed-address provider, and that an unreadable engine setup file left embeddings alone", () => {
+  const rows = roleRows(readEngineModels({ v: 1, embeddings: { state: "unreadable", source: "role", active: null, wanted: { model: "voyage:voyage-3", dims: null }, addressIgnored: true }, reasoning: { state: "ok", source: "role", model: "together:m", addressIgnored: true } }));
+  assert.match(rows[0]?.notice ?? "", /cannot read its own setup file/u);
+  assert.match(rows[0]?.notice ?? "", /fixed address, so the base URL you set is not used/u);
+  assert.equal(rows[0]?.state, "degraded");
+  assert.equal(rows[1]?.notice, "This provider uses its fixed address, so the base URL you set is not used.");
+  assert.equal(rows[1]?.state, "bound");
+  const plain = roleRows(readEngineModels(BOUND));
+  assert.ok(plain.every((r) => !/fixed address/u.test(r.notice ?? "")));
 });
