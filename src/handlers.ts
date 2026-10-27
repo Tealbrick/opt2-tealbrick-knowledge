@@ -616,7 +616,7 @@ export function createHandlers(knowledge: Knowledge, TbError: ErrorFactory, deep
           // C373: think needs the reasoning role (or the legacy provider key); say so instead of an engine error
           // QA-KN24-3: a "not ok" answer may predate the owner's change (the engine restarts), so ask the helper again before refusing
           let reasoning = knowledge.engineModels()?.reasoning;
-          if (!reasoning || reasoning.state !== "ok") reasoning = (await knowledge.checkModels(ctx))?.reasoning ?? reasoning;
+          if (reasoning?.state !== "ok") reasoning = (await knowledge.checkModels(ctx))?.reasoning ?? reasoning;
           if (reasoning && reasoning.state !== "ok") {
             throw fail("reasoning_model_missing", "ask needs a reasoning model: the owner sets the reasoning role on the Keys and models page (open it from Portal)", 409);
           }
@@ -824,7 +824,10 @@ export function createHandlers(knowledge: Knowledge, TbError: ErrorFactory, deep
           const doc = documentFor(s, String(input.documentId));
           await readable(ctx, doc.area, true);
           visible(ctx, doc);
-          return s.store.listLinks(doc.id, tagFilter(ctx)) as unknown as Json;
+          // QA-KN25-2: links stay inside one area, so a tag-limited grant hides linked memories outside its tags (title and tags too)
+          const links = s.store.listLinks(doc.id, tagFilter(ctx));
+          const inLimit = (link: { tags?: unknown }) => !outsideLimit(ctx, doc.area, link.tags as string[]);
+          return { outbound: links.outbound.filter(inLimit), backlinks: links.backlinks.filter(inLimit) } as unknown as Json;
         }),
     },
 

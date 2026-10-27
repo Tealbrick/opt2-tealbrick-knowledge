@@ -210,6 +210,47 @@ test("C373: a tag-limited grant returns only memories with one of the tags; othe
   assert.deepEqual(await recallIds(ADA, "quarterly"), [work.documentId, personal.documentId].sort());
 });
 
+test("QA-KN25-1: tags that clean to nothing (or lose a tag) are refused; a tag-limited grant never becomes a whole-area grant", async () => {
+  const { run, ctx, owner, recallIds } = await setup();
+  const work = await run("remember", { text: "Acme LLC quarterly target", tags: ["work"] }, ctx(ADA));
+  const personal = await run("remember", { text: "Acme LLC quarterly dentist", tags: ["personal"] }, ctx(ADA));
+  for (const tags of [["   "], ["work", "  "], ["  ", "   "]]) {
+    await assert.rejects(run("access_grant_set", { team: "team_sales", person: "ct_anna", tags }, owner()), rejects("invalid_input"), JSON.stringify(tags));
+  }
+  assert.deepEqual(await recallIds(BO, "quarterly"), [], "nothing was stored: still closed");
+  assert.deepEqual((await run("access_overview", {}, owner())).log, [], "a refused grant is not logged");
+  // duplicates that normalise to one tag are fine, and so is the explicit whole-area grant (no tags)
+  const set = await run("access_grant_set", { team: "team_sales", person: "ct_anna", tags: ["work", "Work"] }, owner());
+  assert.deepEqual(set.tags, ["work"]);
+  assert.deepEqual(await recallIds(BO, "quarterly"), [work.documentId]);
+  await assert.rejects(run("access_grant_set", { team: "team_sales", person: "ct_anna", tags: ["   "] }, owner()), rejects("invalid_input"));
+  assert.deepEqual(await recallIds(BO, "quarterly"), [work.documentId], "the earlier limit still holds");
+  assert.equal((await run("access_grant_set", { team: "team_sales", person: "ct_anna" }, owner())).tags, null);
+  assert.deepEqual(await recallIds(BO, "quarterly"), [work.documentId, personal.documentId].sort());
+});
+
+test("QA-KN25-2: links_list in a tag-limited grant area hides linked memories outside the tags (both directions)", async () => {
+  const { run, ctx, owner } = await setup();
+  const work = await run("remember", { text: "Acme LLC quarterly target", tags: ["work"] }, ctx(ADA));
+  const work2 = await run("remember", { text: "Acme LLC roadmap", tags: ["work"] }, ctx(ADA));
+  const personal = await run("remember", { text: "Acme LLC secret dentist visit", tags: ["personal"] }, ctx(ADA));
+  await run("link_add", { sourceId: work.documentId, targetId: personal.documentId }, ctx(ADA));
+  await run("link_add", { sourceId: personal.documentId, targetId: work.documentId }, ctx(ADA));
+  await run("link_add", { sourceId: work.documentId, targetId: work2.documentId }, ctx(ADA));
+  const ids = (list: Record<string, unknown>[]) => list.map((l) => l.documentId);
+  const before = await run("links_list", { documentId: work.documentId }, ctx(ADA));
+  assert.deepEqual(ids(before.outbound).sort(), [personal.documentId, work2.documentId].sort(), "the owner's agent sees all links");
+  assert.deepEqual(ids(before.backlinks), [personal.documentId]);
+  await run("access_grant_set", { team: "team_sales", person: "ct_anna", tags: ["work"] }, owner());
+  const seen = await run("links_list", { documentId: work.documentId }, ctx(BO));
+  assert.deepEqual(ids(seen.outbound), [work2.documentId]);
+  assert.deepEqual(seen.backlinks, []);
+  assert.ok(!JSON.stringify(seen).includes("dentist") && !JSON.stringify(seen).includes("personal"), "no title or tag of an out-of-limit memory");
+  // the owner's agent still sees everything
+  const own = await run("links_list", { documentId: work.documentId }, ctx(ADA));
+  assert.deepEqual(ids(own.outbound).sort(), [personal.documentId, work2.documentId].sort());
+});
+
 test("C373: Rules narrowing still applies on top of person and team access", async () => {
   const { run, ctx, recallIds } = await setup();
   const work = await run("remember", { text: "Acme LLC heron plan", tags: ["work"] }, ctx(ADA));
