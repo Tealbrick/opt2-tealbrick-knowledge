@@ -2,11 +2,12 @@
 import type { Db, Json } from "@opt2-tealbrick/spec/sdk";
 import { type AreaProvisioner, Areas } from "./areas.ts";
 import { type KnowledgeConfig, PROVIDER_KEY, PROVIDER_MODELS } from "./config.ts";
-import { type CallApp, startDirectoryTimer } from "./directory-feed.ts";
+import { type CallApp, onDirectoryModel, startDirectoryTimer } from "./directory-feed.ts";
 import { type ClientStore, GBrainClient, type StoredClient } from "./engines/gbrain/client.ts";
 import { GBrainEngine } from "./engines/gbrain/engine.ts";
 import { NotebookClient } from "./engines/notebook/client.ts";
 import { areaSourceId, SHARED_AREA_ID } from "./ids.ts";
+import { ensureDirectoryAreas } from "./people.ts";
 import { Projector } from "./projection.ts";
 import { DocumentStore } from "./store/documents.ts";
 
@@ -153,6 +154,10 @@ export class Knowledge {
         : null;
     const projector = engine ? new Projector(db, store, areas, engine, now) : null;
     this.services = { db, store, areas, engine, notebook, projector, config: this.config };
+    // C373: a new Governance directory creates its person and team areas; their engine sources follow in the background
+    onDirectoryModel(db, (model) => {
+      if (ensureDirectoryAreas(areas, model) > 0 && this.services?.db === db) this.retryProvision(this.services);
+    });
     const interval = this.opts.drainIntervalMs ?? 30_000;
     if (projector && interval > 0 && !this.timer) {
       this.timer = setInterval(() => void this.services?.projector?.drain().catch(() => undefined), interval);

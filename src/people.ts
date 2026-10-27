@@ -97,6 +97,22 @@ export function viewFor(db: Db, areas: Areas, agentId: string, now: number = Dat
   return view;
 }
 
+/**
+ * C373: the areas of the directory, created when a new directory is read: every team, and every person who owns at least
+ * one agent (other people get theirs on first use). Labels follow the directory. Returns how many areas are new.
+ */
+export function ensureDirectoryAreas(areas: Areas, model: DirectoryModel): number {
+  let created = 0;
+  const ensure = (kind: "person" | "team", id: string, subject: string, label: string) => {
+    if (!areas.get(id)) created++;
+    areas.ensureSubject(kind, id, subject, label);
+  };
+  for (const t of model.teams) ensure("team", teamAreaId(t.id), t.id, teamLabel(t.name));
+  const owners = new Set(model.agents.flatMap((a) => (a.owner ? [a.owner] : [])));
+  for (const p of model.people) if (owners.has(p.id)) ensure("person", personAreaId(p.id), p.id, personLabel(p.id));
+  return created;
+}
+
 export class GrantError extends Error {
   readonly code: string;
   readonly httpStatus: number;

@@ -153,6 +153,12 @@ export function directoryState(db: Db, now: number = Date.now()): DirectoryState
 export type CallApp = (product: string, op: string, input: Json) => Promise<{ status: "ok"; output: unknown } | { status: "held"; holdId: string }>;
 
 const inflight = new WeakMap<Db, Promise<void>>();
+const listeners = new WeakMap<Db, (model: DirectoryModel) => void>();
+
+/** Called after every read that brings a new directory (Knowledge creates the person and team areas there). One per db. */
+export function onDirectoryModel(db: Db, fn: (model: DirectoryModel) => void): void {
+  listeners.set(db, fn);
+}
 
 /** One read of the feed (shared by concurrent callers). Never throws: errors are recorded, a refusal clears the copy. */
 export function syncDirectory(db: Db, callApp: CallApp, now: () => number = Date.now): Promise<void> {
@@ -183,7 +189,14 @@ async function syncOnce(db: Db, callApp: CallApp, now: () => number): Promise<vo
     if (d.unchanged && d.revision !== since) throw feedInvalid(`unchanged answered for revision ${d.revision}, asked ${since ?? "none"}`);
     const t = now();
     if (d.unchanged) db.prepare("UPDATE kn_directory SET synced_at = ?, checked_at = ?, error_code = NULL, error = NULL WHERE id = 1").run(t, t);
-    else db.prepare("UPDATE kn_directory SET revision = ?, synced_at = ?, checked_at = ?, usable = 1, model = ?, error_code = NULL, error = NULL WHERE id = 1").run(d.revision, t, t, JSON.stringify(d.model));
+    else {
+      db.prepare("UPDATE kn_directory SET revision = ?, synced_at = ?, checked_at = ?, usable = 1, model = ?, error_code = NULL, error = NULL WHERE id = 1").run(d.revision, t, t, JSON.stringify(d.model));
+      try {
+        if (d.model) listeners.get(db)?.(d.model);
+      } catch {
+        // creating areas is retried on the next new revision and on first use; the copy itself is good
+      }
+    }
   } catch (e) {
     const code = codeOf(e).slice(0, 64);
     const reason = (e instanceof Error ? e.message : "directory read failed").slice(0, 240);
