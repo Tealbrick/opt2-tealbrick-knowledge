@@ -3,7 +3,7 @@
 All notable changes to the Knowledge mini app. Versions are assigned at merge (C340); `package.json` and the manifest stay
 at 0.1.26 on this branch.
 
-## Unreleased
+## 0.1.29 (2026-10-27; C373 second brain: model roles, app writers; upgradeFrom ">=0.1.20 <=0.1.28 || 0.1.28-dev.1")
 
 Proposed version 0.1.29, `upgradeFrom` ">=0.1.20 <=0.1.28". Needs Core with the manifest 0.1.32 pin (CORE-P5, core#67) and
 bridge P-2 (0.2.11); until then Core skips this release. No app database migration (`kn_state` only).
