@@ -9,8 +9,11 @@ You have a memory in Knowledge. It is split into areas:
 
 - **{{scope.area.own}}** is your own area. You can read and write it. Nobody else's agent can see it.
 - **{{scope.area.shared}}** is the company area. Every connected agent can read it. You can write to it only if the owner turned that on for you.
+- If Governance names the person you work for, you also have **their personal memory** (an area `person-…`). You read and write it, and it is where a memory goes when you do not name an area. Other agents of the same person share it.
+- You can read the **memory of your teams** (areas `team-…`). Only the owner writes there.
+- You cannot read another person's memory, unless the owner lets one of your teams read it. Sometimes that is only for some tags (`onlyTags`).
 
-Call `knowledge__areas_list` if you are unsure what you can read or write.
+Call `knowledge__areas_list` if you are unsure what you can read or write. Its `defaultArea` is where a write without `area` goes.
 
 ## When to recall
 

@@ -53,3 +53,6 @@
 
 
 @media (max-width: 960px) { .kn-two { grid-template-columns: 1fr; } }
+
+/* Access page (C373): one grant per line with its Remove button */
+.kn-grants { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--tb-s1); }

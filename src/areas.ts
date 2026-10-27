@@ -7,11 +7,16 @@ import { agentAreaId, areaSourceId, SHARED_AREA_ID } from "./ids.ts";
 
 export const AREA_SCOPE = "area";
 
+/** C373: `person` and `team` areas are governed by Knowledge from the Governance directory (src/people.ts), not by SDK scope rows. */
+export type AreaKind = "agent" | "shared" | "person" | "team";
+
 export interface Area {
   id: string;
-  kind: "agent" | "shared";
+  kind: AreaKind;
   label: string;
   agentId: string | null;
+  /** Governance contact id (person) or team id (team); null for agent and company areas */
+  subjectId: string | null;
   sourceId: string;
   sourceReady: boolean;
   notebookId: string | null;
@@ -20,9 +25,11 @@ export interface Area {
 type Row = Record<string, unknown>;
 const toArea = (row: Row): Area => ({
   id: String(row.id),
-  kind: row.kind === "shared" ? "shared" : "agent",
+  // migration 0003: a person or team area is stored with kind 'shared' and names its kind in subject_kind
+  kind: row.subject_kind === "person" || row.subject_kind === "team" ? row.subject_kind : row.kind === "shared" ? "shared" : "agent",
   label: String(row.label),
   agentId: row.agent_id === null ? null : String(row.agent_id),
+  subjectId: row.subject_id == null ? null : String(row.subject_id),
   sourceId: String(row.source_id),
   sourceReady: Number(row.source_ready) === 1,
   notebookId: row.notebook_id === null ? null : String(row.notebook_id),
@@ -75,6 +82,17 @@ export class Areas {
     const area = this.insert(id, "agent", label, agent.id);
     await scopes.instances.create(AREA_SCOPE, area.id, area.label, { ownerAgent: agent.id as `agt_${string}` });
     return area;
+  }
+
+  /**
+   * C373: the area of a Governance person or team, created on demand (no SDK scope instance: Knowledge decides who reads it
+   * from the directory copy). The label follows the directory (a renamed team is renamed here).
+   */
+  ensureSubject(kind: "person" | "team", id: string, subjectId: string, label: string): Area {
+    this.db
+      .prepare("INSERT INTO kn_areas (id, kind, label, agent_id, subject_kind, subject_id, source_id, source_ready, notebook_id, created_at) VALUES (?, 'shared', ?, NULL, ?, ?, ?, 0, NULL, ?) ON CONFLICT (id) DO UPDATE SET label = excluded.label WHERE label <> excluded.label")
+      .run(id, label.slice(0, 120), kind, subjectId, areaSourceId(id), this.now());
+    return this.get(id) as Area;
   }
 
   /** Provision engine resources for every area that lacks them; failures are retried on the next pass. */

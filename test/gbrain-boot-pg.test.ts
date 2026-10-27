@@ -215,6 +215,56 @@ describe("GBrain boot on a real Postgres: killed migrations recover", { skip: ha
     await b.exited;
   });
 
+  const statusFile = () => join(home, "knowledge-models.json");
+  const written = () => JSON.parse(readFileSync(statusFile(), "utf8")) as Record<string, any>;
+  const ran = (what: string) => recorded().some((l) => l.startsWith(what));
+  const embeddingRole = { KN_EMBEDDINGS_PROVIDER: "openai", KN_EMBEDDINGS_MODEL: "text-embedding-3-small", KN_EMBEDDINGS_KEY: "sk-test-aaaaaaaaaaaa" };
+
+  test("QA-KN24-3: the model status file of the previous boot is removed at start (the helper answers 503 until this boot wrote its own)", async () => {
+    writeFileSync(statusFile(), JSON.stringify({ v: 1, stale: true }));
+    const holder = upstream({ FAKE_GBRAIN_HOST: "live-peer", FAKE_GBRAIN_REFRESH_MS: "100", FAKE_GBRAIN_WORK_MS: "60000" });
+    await waitFor("holder running", () => ran("start"));
+    const b = await boot({ KNOWLEDGE_MIGRATION_WAIT_S: "0.5", KNOWLEDGE_MIGRATION_LOCK_STALE_S: "1", KNOWLEDGE_MIGRATION_POLL_S: "0.1", KNOWLEDGE_MIGRATION_RETRY_MIN_S: "0.2", KNOWLEDGE_MIGRATION_RETRY_MAX_S: "0.4" });
+    await waitFor("needs_attention", async () => (await health(b.port))?.body.status === "needs_attention");
+    assert.equal(existsSync(statusFile()), false, "no old answer while this boot is still starting");
+    killGroup(holder.child);
+    await holder.exited;
+    await waitFor("GBrain serving", async () => (await health(b.port))?.code === 200);
+    assert.equal(written().stale, undefined);
+    assert.equal(written().v, 1, "this boot wrote its own status");
+    b.child.kill("SIGTERM");
+    await b.exited;
+  });
+
+  test("QA-KN24 residual: a corrupt config.json never crashes the boot: it serves, leaves the brain alone and reports 'unreadable'", async () => {
+    writeFileSync(join(home, ".gbrain", "config.json"), "{not json");
+    const b = await boot(embeddingRole);
+    await waitFor("GBrain serving", async () => (await health(b.port))?.code === 200);
+    assert.ok(b.events().some((e) => e.event === "config_unreadable"));
+    assert.ok(!ran("init") && !ran("embeddings"), "no init, no enable over a brain we cannot read");
+    assert.equal(written().embeddings.state, "unreadable");
+    b.child.kill("SIGTERM");
+    await b.exited;
+  });
+
+  test("QA-KN24 residual: a brain whose config.json names no embedding model is kept as it is (no `embeddings enable`); only an explicit embedding_disabled brain is enabled", async () => {
+    writeFileSync(join(home, ".gbrain", "config.json"), JSON.stringify({ engine: "postgres" }));
+    const kept = await boot(embeddingRole);
+    await waitFor("GBrain serving", async () => (await health(kept.port))?.code === 200);
+    assert.ok(!ran("embeddings"), "an embedded brain is never re-enabled");
+    assert.equal(written().embeddings.state, "ok");
+    kept.child.kill("SIGTERM");
+    await kept.exited;
+
+    writeFileSync(join(home, ".gbrain", "config.json"), JSON.stringify({ engine: "postgres", embedding_disabled: true }));
+    const enabled = await boot(embeddingRole);
+    await waitFor("GBrain serving", async () => (await health(enabled.port))?.code === 200);
+    assert.ok(ran("embeddings-enable"), "the deferred-setup brain gets embeddings in place");
+    assert.equal(written().embeddings.state, "enabled");
+    enabled.child.kill("SIGTERM");
+    await enabled.exited;
+  });
+
   test("SIGTERM during migrations reaches the runner (it releases its lease); a runner ignoring it is killed and its lease removed", async () => {
     const polite = await boot({ FAKE_GBRAIN_WORK_MS: "60000" });
     await waitFor("migration started", () => recorded().some((l) => l.startsWith("start")));

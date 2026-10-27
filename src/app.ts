@@ -20,6 +20,8 @@ export interface StartContext {
   scopes: ScopeStore;
   getKey(name: string): Promise<string | null>;
   callServiceHelper<O = Json>(serviceId: string, path: string, body: Json): Promise<O>;
+  /** SDK C85: app-initiated companion call (the Governance directory feed, C373); absent in hand-built test contexts */
+  callApp?<O = Json>(product: string, op: string, input: Json): Promise<{ status: "ok"; output: O } | { status: "held"; holdId: string }>;
 }
 
 export type KnowledgeDefinition = AppDefinition & { onStart(ctx: StartContext): Promise<void>; attention?(): Promise<{ code: string; reason: string } | null> };
@@ -46,6 +48,7 @@ export function knowledgeDefinition(env: Record<string, string | undefined>, TbE
       },
       // After boot (and the claim): the company area exists, engine resources are provisioned, the outbox drains.
       async onStart(ctx) {
+        knowledge.engineLog = (msg, fields) => ctx.log.warn(msg, fields);
         const services = knowledge.bind(ctx.db, ctx.secrets);
         await services.areas.ensureShared(ctx.scopes);
         await knowledge.provision(services, ctx as never);
@@ -57,6 +60,8 @@ export function knowledgeDefinition(env: Record<string, string | undefined>, TbE
         const requeued = knowledge.requeueAfterRestore(services);
         if (requeued) ctx.log.info("projection requeued after restore", { rows: requeued });
         knowledge.kick(services);
+        // C373: the Governance directory copy (who owns which agent, teams) is read now and every 60 s, outside calls.
+        knowledge.watchDirectory(ctx.db, ctx.callApp);
         // C373: which models the engine runs with (model roles or the legacy provider keys), named at once in the status.
         await knowledge.checkModels(ctx).catch(() => undefined);
         // F89: probe the engine now (and every 10 min) so a degraded engine shows before the first recall.

@@ -42,6 +42,15 @@ const overview = (running: boolean) => ({
     version: running ? "0.60.57.0" : null,
   },
   research: false,
+  roles: running
+    ? [
+        { role: "embeddings", label: "Embeddings (search by meaning)", state: "bound", model: "openai:text-embedding-3-small", notice: null },
+        { role: "reasoning", label: "Reasoning (ask and explain)", state: "not_bound", model: null, notice: "No reasoning model is set, so ask cannot answer. Memory and search still work." },
+      ]
+    : [
+        { role: "embeddings", label: "Embeddings (search by meaning)", state: "degraded", model: "openai:text-embedding-3-large", notice: "The model is now openai:text-embedding-3-large, but the memory index was built with openai:text-embedding-3-small." },
+        { role: "reasoning", label: "Reasoning (ask and explain)", state: "unknown", model: null, notice: "The memory engine has not reported its models yet." },
+      ],
   models: { provider: "openai", chatModel: "m", embeddingProvider: "openai", embeddingModel: "text-embedding-3-small", keys: ["OPENAI_API_KEY"] },
   documents: { total: 52, inEngine: running ? 52 : 0, waiting: running ? 0 : 52, failed: 0 },
   embeddings: { chunks: running ? 366 : null, embedded: running ? 366 : null, pages: running ? 52 : null, readiness: running ? { state: "ok", reason: "configured" } : null, error: null },
@@ -110,6 +119,12 @@ describe("Settings page (C296)", () => {
     assert.match(text, /OPENAI_API_KEY\s*missing/u);
     assert.match(text, /Needs VOYAGE_API_KEY/u);
     assert.match(text, /Company/u);
+    // C373: the two roles come first, in plain words; the old provider keys sit under their own heading
+    const roleRows = [...m.host.querySelectorAll('section[aria-label="Model roles"] tr')].map((r) => (r.textContent ?? "").trim());
+    assert.ok(roleRows.some((r) => /^Embeddings \(search by meaning\)\s*bound\s*openai:text-embedding-3-small$/u.test(r)), roleRows.join("|"));
+    assert.ok(roleRows.some((r) => /^Reasoning \(ask and explain\)\s*not bound$/u.test(r)), roleRows.join("|"));
+    assert.match(text, /No reasoning model is set, so ask cannot answer/u);
+    assert.ok(m.host.querySelector('section[aria-label="Older provider keys"]'), "legacy keys kept under their own heading");
     assert.ok(!text.includes(SECRET));
     await m.unmount();
   });
@@ -124,6 +139,11 @@ describe("Settings page (C296)", () => {
     assert.match(text, /OPENAI_API_KEY\s*set/u);
     assert.match(text, /0 of 52/u);
     assert.match(text, /engine tools could not be read/u);
+    const roleRows = [...m.host.querySelectorAll('section[aria-label="Model roles"] tr')].map((r) => (r.textContent ?? "").trim());
+    assert.ok(roleRows.some((r) => /^Embeddings \(search by meaning\)\s*degraded/u.test(r)), roleRows.join("|"));
+    assert.ok(roleRows.some((r) => /^Reasoning \(ask and explain\)\s*unknown$/u.test(r)), roleRows.join("|"));
+    assert.match(text, /index was built with openai:text-embedding-3-small/u);
+    assert.match(text, /has not reported its models yet/u);
     await m.unmount();
   });
 });

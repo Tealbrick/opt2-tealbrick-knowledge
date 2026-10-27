@@ -1,19 +1,24 @@
 // Operation handlers, registered by operation id (the manifest is the only route/schema source).
 // Authorization: the SDK has already run gate() at the bridge and authorize() in the app
 // (grant CRUD ∩ op CRUD ∩ best area access). Handlers bind each call to concrete areas and check
-// access per area with ctx.scope; an area the caller may not read answers like a missing one.
+// access per area through `areaAccess` (SDK scope rows + the person and team areas of C373, src/people.ts); an area the
+// caller may not read answers like a missing one.
 import type { CrudAction, DynamicCatalogEntry, DynamicResolution } from "@opt2-tealbrick/spec/manifest";
 import type { AppEvents, Caller, DynamicHandlers, HandlerSpec, HookContext, Json, OpContext } from "@opt2-tealbrick/spec/sdk";
+import { createAccessHandlers } from "./access.ts";
+import { type AreaAccess, areaAccess } from "./area-access.ts";
 import { AREA_SCOPE, type Area } from "./areas.ts";
+import { syncDirectory } from "./directory-feed.ts";
 import { deterministicRequestId } from "./engines/gbrain/client.ts";
 import { documentIdFromSlug, EngineCallError, engineError, type RecallRow } from "./engines/gbrain/engine.ts";
 import { resolveEntry as engineResolve } from "./engines/gbrain/exposure.ts";
 import { NotebookError } from "./engines/notebook/client.ts";
-import { agentAreaId } from "./ids.ts";
+import { agentAreaId, SHARED_AREA_ID } from "./ids.ts";
 import type { AppSecrets, Knowledge, Services } from "./knowledge.ts";
 import { createLibraryHandlers } from "./library.ts";
 import { fanOut, mergeRanked } from "./merge.ts";
 import { NARROWING_UNSUPPORTED, NARROWING_VIOLATION, type Narrowing, NarrowingError, readNarrowing, type TagFilter, tagsPass, untaggedPass } from "./narrowing.ts";
+import { isGovernedArea } from "./people.ts";
 import { type Citation, cleanTags, documentCitation, memoryDigest, StoreError } from "./store/documents.ts";
 
 /** The SDK's error class (CORE §8 envelope); injected so this module only depends on frozen types. */
@@ -24,8 +29,24 @@ type In = Record<string, any>;
 export function ownArea(caller: Caller): string | null {
   return caller.type === "agent" ? agentAreaId(caller.id) : null;
 }
-const writeScope = (input: In, caller: Caller) => (typeof input.area === "string" ? input.area : ownArea(caller));
-const readScope = (input: In) => (typeof input.area === "string" ? input.area : null);
+
+/**
+ * C373 app writers (Observer deliveries). A companion APP caller (`caller.type === "app"`, e.g. Observer with its companion
+ * grant for these ops) may use only these ops: list the areas it can read, and create or update documents in a SHARED area
+ * (the company area). Never an agent's private area, never a person or team area, never any other read, whatever scope rows say.
+ *
+ * Its write permission is the SDK `own` default grant, which the SDK gives every first-seen caller: read_write on an
+ * instance named after the app (SDK store only; Knowledge has no area for it). The SDK gate checks that row (`writeScope`
+ * below), so the owner can turn app writes off with `tb.scopes_set` (level `read`) on it; Knowledge then writes into the
+ * shared area the app names (default: company), which it must also be able to read (the `shared` default grant).
+ */
+export const APP_CALLER_OPS: ReadonlySet<string> = new Set(["areas_list", "document_create", "document_update"]);
+const isApp = (caller: Caller) => caller.type === "app";
+// C373 person memory: a person or team area has no SDK scope row (Knowledge governs it from the directory): the SDK checks
+// the caller's best area access (null target) and the handler decides that area through areaAccess.
+const sdkTarget = (area: string) => (isGovernedArea(area) ? null : area);
+const writeScope = (input: In, caller: Caller) => (isApp(caller) ? caller.id : typeof input.area === "string" ? sdkTarget(input.area) : ownArea(caller));
+const readScope = (input: In) => (typeof input.area === "string" ? sdkTarget(input.area) : null);
 const anyScope = () => null;
 
 const FAN_OUT_LIMIT = 4;
@@ -150,15 +171,31 @@ export function createHandlers(knowledge: Knowledge, TbError: ErrorFactory) {
     return {
       ...spec,
       run: async (input, ctx) => {
+        if (isApp(ctx.caller) && !APP_CALLER_OPS.has(id)) throw fail("scope_denied", "an app may only list areas and create or update documents in the company area", 403);
         admit(NARROWING_POLICY[id] ?? "unsupported", ctx);
         return run(input, ctx);
       },
     };
   }
-  /** True when the call's narrowing hides the document (§18.1 tagsMatch). */
-  const hidden = (ctx: OpContext) => (doc: { tags: string[] }) => !tagsPass(doc.tags, tagFilter(ctx));
+  /** C373: the area access of this call (memoized per call; the directory copy is read once per call). */
+  const accessMemo = new WeakMap<object, AreaAccess>();
+  const accessOf = (ctx: OpContext): AreaAccess => {
+    let access = accessMemo.get(ctx);
+    if (!access) {
+      access = areaAccess(ctx, services(ctx).areas);
+      accessMemo.set(ctx, access);
+    }
+    return access;
+  };
+  /** C373: a granted person area limited to tags hides every memory without one of them (like a missing one). */
+  const outsideLimit = (ctx: OpContext, area: string, tags: readonly string[]) => {
+    const limit = accessOf(ctx).limit(area);
+    return limit !== null && !tags.some((tag) => limit.includes(tag));
+  };
+  /** True when the call's narrowing (or a tag-limited grant on its area) hides the document (§18.1 tagsMatch). */
+  const hidden = (ctx: OpContext) => (doc: { tags: string[]; area?: string }) => !tagsPass(doc.tags, tagFilter(ctx)) || (doc.area !== undefined && outsideLimit(ctx, doc.area, doc.tags));
   /** A document the narrowing hides answers like a missing one (reads, and writes that address it: §18.4 a). */
-  function visible(ctx: OpContext, doc: { tags: string[] }): void {
+  function visible(ctx: OpContext, doc: { tags: string[]; area?: string }): void {
     if (hidden(ctx)(doc)) throw notFound();
   }
   /** §18.4 b: a write never produces an item the caller could not then read (nothing is written). */
@@ -189,22 +226,37 @@ export function createHandlers(knowledge: Knowledge, TbError: ErrorFactory) {
   const secretsOf = (ctx: object) => (ctx as { secrets?: AppSecrets }).secrets;
   const services = (ctx: OpContext) => knowledge.bind(ctx.db, secretsOf(ctx));
 
-  async function readable(ctx: OpContext, area: string): Promise<void> {
-    if (!(await ctx.scope.can(AREA_SCOPE, area, "read"))) throw notFound();
+  /** C373: an app caller sees only shared areas (an agent's, person's or team's area answers like a missing one). */
+  const appSees = (ctx: OpContext, area: string) => !isApp(ctx.caller) || services(ctx).areas.get(area)?.kind === "shared";
+  /** `items`: the op filters item by item, so a tag-limited grant area may be read (others answer it like a missing area). */
+  async function readable(ctx: OpContext, area: string, items = false): Promise<void> {
+    const access = accessOf(ctx);
+    if (!appSees(ctx, area) || !(await access.can(area, "read"))) throw notFound();
+    if (!items && access.limit(area) !== null) throw notFound();
   }
   async function writable(ctx: OpContext, area: string, crud: CrudAction): Promise<void> {
     await readable(ctx, area);
-    if (!(await ctx.scope.can(AREA_SCOPE, area, crud))) throw fail("scope_denied", `no ${crud} access to area ${area}`, 403);
+    // an app writes into a shared area under its own write row (APP_CALLER_OPS), an agent under its access to that area
+    const allowed = isApp(ctx.caller) ? await ctx.scope.can(AREA_SCOPE, ctx.caller.id, crud) : await accessOf(ctx).can(area, crud);
+    if (!allowed) throw fail("scope_denied", `no ${crud} access to area ${area}`, 403);
+    if (isApp(ctx.caller)) {
+      // QA-KN24-4: `listed` is false once the companion edge was removed (or the slice expired) but the grant is still valid.
+      // Conformance (A12.caller_name) lets such a caller run, so the write is allowed and left in the app log.
+      if (ctx.caller.listed === false) ctx.log.warn("app write by a caller that is not listed (companion edge removed?)", { caller: ctx.caller.id });
+      knowledge.noteCaller(services(ctx), ctx.caller);
+    }
   }
+  /** Areas of an item-filtering read (recall, search, context, documents_search). */
   async function targetAreas(ctx: OpContext, area: unknown): Promise<string[]> {
     if (typeof area === "string") {
-      await readable(ctx, area);
+      await readable(ctx, area, true);
       return [area];
     }
-    return ctx.scope.readable(AREA_SCOPE);
+    return accessOf(ctx).readable(true);
   }
+  /** C373: without `area` a write goes to the owner's person area when the agent has an owner, else its own agent area. */
   function defaultArea(ctx: OpContext, area: unknown): string {
-    const id = typeof area === "string" ? area : ownArea(ctx.caller);
+    const id = typeof area === "string" ? area : isApp(ctx.caller) ? SHARED_AREA_ID : (accessOf(ctx).defaultArea() ?? ownArea(ctx.caller));
     // A caller with no memory area of its own (a companion app, not an agent) has nothing to default to: scope_denied (0.1.12 conformance A12.companion_inbound).
     if (!id) throw fail("scope_denied", "name an area you can access: this caller has no area of its own", 403);
     return id;
@@ -261,15 +313,19 @@ export function createHandlers(knowledge: Knowledge, TbError: ErrorFactory) {
     const keyword = (area: string): TaggedRow[] =>
       s.store
         .search({ areas: [area], query, limit, tags: filter })
+        .filter((hit) => !outsideLimit(ctx, area, hit.tags))
         .map((hit) => ({ area: hit.area, documentId: hit.id, slug: "", title: hit.title, text: hit.excerpt, score: null, tags: hit.tags, ref: { kind: "document", id: hit.id }, source: hit.citation }));
     for (const outcome of outcomes) {
       if (outcome.ok && outcome.value) {
         const { rows, degraded } = outcome.value;
         const known = s.store.citationsOf(rows.flatMap((row) => (row.documentId ? [row.documentId] : [])));
+        const limited = accessOf(ctx).limit(outcome.area) !== null;
         let uncited = 0;
         const tagged = rows.flatMap((row): TaggedRow[] => {
           const doc = row.documentId ? known.get(row.documentId) : undefined;
           if (filter && (!doc || !tagsPass(doc.tags, filter))) return [];
+          // C373: a tag-limited grant area returns only canonical documents with one of the granted tags
+          if (limited && (!doc || outsideLimit(ctx, outcome.area, doc.tags))) return [];
           if (doc && row.documentId) return [{ ...row, tags: doc.tags, ref: { kind: "document", id: row.documentId }, source: doc.citation }];
           // QA-KNOW17-1: a saved fact of the engine is cited by its id (and read again with `get` through its lookup)
           if (row.factId) {
@@ -300,7 +356,7 @@ export function createHandlers(knowledge: Knowledge, TbError: ErrorFactory) {
     const fallbacks = statuses.filter((status) => status.via === "keyword");
     const engineDegraded = statuses.flatMap((status) => status.degraded ?? []);
     if (engine) {
-      const failed = fallbacks.filter((f) => f.error && f.error !== "area_not_ready" && f.error !== "no_engine");
+      const failed = fallbacks.filter((f) => f.error && f.error !== "area_not_ready" && f.error !== "no_engine" && f.error !== "gbrain_starting");
       knowledge.noteEngine(failed.length ? { state: "failing", detail: [...new Set(failed.map((f) => f.error as string))] } : engineDegraded.length ? { state: "degraded", detail: [...new Set(engineDegraded)] } : statuses.some((st) => st.via === "engine") ? { state: "ok", detail: [] } : null);
     }
     if (engine && (fallbacks.length || engineDegraded.length)) {
@@ -465,7 +521,7 @@ export function createHandlers(knowledge: Knowledge, TbError: ErrorFactory) {
           }
           if (!documentId) throw fail("invalid_input", "a document ref needs id", 400);
           const doc = documentFor(s, documentId);
-          await readable(ctx, doc.area);
+          await readable(ctx, doc.area, true);
           visible(ctx, doc);
           return { ref: { kind: "document", id: doc.id }, area: doc.area, title: doc.title, text: doc.body, tags: doc.tags, version: doc.version, source: documentCitation(doc) } as unknown as Json;
         }),
@@ -488,8 +544,9 @@ export function createHandlers(knowledge: Knowledge, TbError: ErrorFactory) {
           // Entities and no tag narrowing: the engine's zero-LLM context pack (core memory, entity cards, hot facts) for the
           // caller's own area (or the one named); then memories that match, cited.
           if (entities.length && s.engine && !tagFilter(ctx)) {
-            const own = typeof input.area === "string" ? input.area : ownArea(ctx.caller);
-            if (own && areas.includes(own)) {
+            const own = typeof input.area === "string" ? input.area : (accessOf(ctx).defaultArea() ?? ownArea(ctx.caller));
+            // never for a tag-limited grant area: the pack is built from engine pages Knowledge cannot match to tags
+            if (own && areas.includes(own) && accessOf(ctx).limit(own) === null) {
               try {
                 const area = await readyArea(ctx, s, own, "source");
                 const pack = (await s.engine.call(area.sourceId, "gb_context_pack", { entities: entities.join(","), budget_tokens: Math.floor(maxChars / 4) }, ctx.caller.id)) as In;
@@ -528,7 +585,7 @@ export function createHandlers(knowledge: Knowledge, TbError: ErrorFactory) {
               refs.push(row.ref as unknown as Json);
             }
           } else if (!lines.length) {
-            for (const hit of s.store.search({ areas, limit: 8, tags: tagFilter(ctx) })) {
+            for (const hit of s.store.search({ areas, limit: 8, tags: tagFilter(ctx) }).filter((h) => !outsideLimit(ctx, h.area, h.tags))) {
               lines.push(`- ${hit.title}: ${hit.excerpt.replace(/\s+/gu, " ").slice(0, 300)} [${hit.citation.ref}]`);
               refs.push({ kind: "document", id: hit.id });
             }
@@ -551,7 +608,9 @@ export function createHandlers(knowledge: Knowledge, TbError: ErrorFactory) {
           // model cost runs only in an area the caller may write (as the engine's own think)
           await writable(ctx, id, "read");
           // C373: think needs the reasoning role (or the legacy provider key); say so instead of an engine error
-          const reasoning = knowledge.engineModels()?.reasoning ?? (await knowledge.checkModels(ctx))?.reasoning;
+          // QA-KN24-3: a "not ok" answer may predate the owner's change (the engine restarts), so ask the helper again before refusing
+          let reasoning = knowledge.engineModels()?.reasoning;
+          if (!reasoning || reasoning.state !== "ok") reasoning = (await knowledge.checkModels(ctx))?.reasoning ?? reasoning;
           if (reasoning && reasoning.state !== "ok") {
             throw fail("reasoning_model_missing", "ask needs a reasoning model: the owner sets the reasoning role on the Keys and models page (open it from Portal)", 409);
           }
@@ -570,14 +629,38 @@ export function createHandlers(knowledge: Knowledge, TbError: ErrorFactory) {
       run: (_input, ctx) =>
         wrap(async () => {
           const s = services(ctx);
+          const access = accessOf(ctx);
           const own = ownArea(ctx.caller);
+          // C373: the default write area (the owner's person area, else the own agent area) is named, with why each area is readable
+          const fallback = isApp(ctx.caller) ? SHARED_AREA_ID : (access.defaultArea() ?? own);
+          const readable = new Set(await access.readable(true));
           const out = [];
           for (const area of s.areas.list()) {
-            if (!(await ctx.scope.can(AREA_SCOPE, area.id, "read"))) continue;
-            const write = await ctx.scope.can(AREA_SCOPE, area.id, "create");
-            out.push({ id: area.id, label: area.label, kind: area.kind, own: area.id === own, access: write ? "read_write" : "read" });
+            if (!readable.has(area.id) || !appSees(ctx, area.id)) continue;
+            // QA-KN24-10: the real level; `contribute` can create and update but not delete, so it is not "read_write".
+            // An app answers with its own write row; an agent with its access (SDK rows, or C373 person and team areas).
+            const can = (crud: "create" | "delete") => (isApp(ctx.caller) ? ctx.scope.can(AREA_SCOPE, ctx.caller.id, crud) : access.can(area.id, crud));
+            const level = (await can("delete")) ? "read_write" : (await can("create")) ? "contribute" : "read";
+            const governed = access.governed(area.id);
+            const limit = access.limit(area.id);
+            out.push({
+              id: area.id,
+              label: area.label,
+              kind: area.kind,
+              own: area.id === own || governed?.via === "owner",
+              ...(area.id === fallback && !isApp(ctx.caller) ? { default: true } : {}),
+              access: level,
+              ...(governed ? { via: governed.via } : {}),
+              ...(limit ? { onlyTags: limit } : {}),
+            });
           }
-          return { areas: out };
+          const view = access.view;
+          return {
+            areas: out,
+            // plain words for the agent: where a write without `area` goes, and whether the directory decided it
+            defaultArea: fallback,
+            directory: view ? (view.directory ? (view.owner ? "owner_known" : "no_owner") : "unavailable") : "not_applicable",
+          };
         }),
     },
 
@@ -608,7 +691,9 @@ export function createHandlers(knowledge: Knowledge, TbError: ErrorFactory) {
       run: (input, ctx) =>
         wrap(async () => {
           const areas = await targetAreas(ctx, input.area);
-          const hits = services(ctx).store.search({ areas, query: input.query, collectionId: input.collectionId, limit: input.limit, tags: tagFilter(ctx) });
+          const hits = services(ctx)
+            .store.search({ areas, query: input.query, collectionId: input.collectionId, limit: input.limit, tags: tagFilter(ctx) })
+            .filter((hit) => !outsideLimit(ctx, hit.area, hit.tags));
           return { hits: hits as unknown as Json };
         }),
     },
@@ -618,7 +703,7 @@ export function createHandlers(knowledge: Knowledge, TbError: ErrorFactory) {
       run: (input, ctx) =>
         wrap(async () => {
           const doc = documentFor(services(ctx), String(input.id));
-          await readable(ctx, doc.area);
+          await readable(ctx, doc.area, true);
           visible(ctx, doc);
           return doc as unknown as Json;
         }),
@@ -693,7 +778,7 @@ export function createHandlers(knowledge: Knowledge, TbError: ErrorFactory) {
         wrap(async () => {
           const s = services(ctx);
           const doc = documentFor(s, String(input.id));
-          await readable(ctx, doc.area);
+          await readable(ctx, doc.area, true);
           visible(ctx, doc);
           return { revisions: s.store.revisions(doc.id, input.limit, tagFilter(ctx)) as unknown as Json };
         }),
@@ -705,7 +790,7 @@ export function createHandlers(knowledge: Knowledge, TbError: ErrorFactory) {
         wrap(async () => {
           const s = services(ctx);
           const doc = documentFor(s, String(input.documentId));
-          await readable(ctx, doc.area);
+          await readable(ctx, doc.area, true);
           visible(ctx, doc);
           return { comments: s.store.listComments(doc.id) as unknown as Json };
         }),
@@ -731,7 +816,7 @@ export function createHandlers(knowledge: Knowledge, TbError: ErrorFactory) {
         wrap(async () => {
           const s = services(ctx);
           const doc = documentFor(s, String(input.documentId));
-          await readable(ctx, doc.area);
+          await readable(ctx, doc.area, true);
           visible(ctx, doc);
           return s.store.listLinks(doc.id, tagFilter(ctx)) as unknown as Json;
         }),
@@ -998,6 +1083,8 @@ export function createHandlers(knowledge: Knowledge, TbError: ErrorFactory) {
     },
     call: (tool, args, ctx) =>
       wrap(async () => {
+        // QA-KN24-2: engine tools are not among APP_CALLER_OPS (`narrowed` guards only the static ops): an app never calls them
+        if (isApp(ctx.caller)) throw fail("scope_denied", "an app may only list areas and create or update documents in the company area", 403);
         const s = services(ctx);
         const engine = s.engine;
         if (!engine) throw fail("engine_capability_unavailable", "no memory engine in this deployment", 404);
@@ -1028,7 +1115,8 @@ export function createHandlers(knowledge: Knowledge, TbError: ErrorFactory) {
           else await readable(ctx, id);
           return (await call(id)) as Json;
         }
-        const areas = await ctx.scope.readable(AREA_SCOPE);
+        // C373: the caller's readable areas (person and team areas included for agents), never one an app may not see
+        const areas = (await accessOf(ctx).readable(false)).filter((id) => appSees(ctx, id));
         const outcomes = await fanOut(areas, FAN_OUT_LIMIT, call);
         return {
           results: outcomes.filter((outcome) => outcome.ok).map((outcome) => ({ area: outcome.area, data: outcome.value })),
@@ -1043,6 +1131,8 @@ export function createHandlers(knowledge: Knowledge, TbError: ErrorFactory) {
       const s = knowledge.bind(ctx.db);
       await s.areas.ensureShared(ctx.scopes);
       await s.areas.ensureAgentArea(agent, ctx.scopes);
+      // C373: Governance may name the new agent's owner now: read the directory again (an event, never inside a call)
+      if (ctx.callApp) void syncDirectory(ctx.db, ctx.callApp as never);
       // C296 review: a new agent area gets its engine source in the background too (not only on the agent's first call).
       knowledge.retryProvision(s);
     },
@@ -1055,7 +1145,8 @@ export function createHandlers(knowledge: Knowledge, TbError: ErrorFactory) {
   };
 
   const library = createLibraryHandlers({ knowledge, services, wrap, fail, notFound, recallAcross, readyArea, notebookOf, tagFilter });
-  const all = Object.fromEntries(Object.entries({ ...handlers, ...library }).map(([id, spec]) => [id, narrowed(id, spec)]));
+  const access = createAccessHandlers({ services, wrap, fail });
+  const all = Object.fromEntries(Object.entries({ ...handlers, ...library, ...access }).map(([id, spec]) => [id, narrowed(id, spec)]));
   return { handlers: all, dynamic: { engine: engineDynamic }, events };
 }
 

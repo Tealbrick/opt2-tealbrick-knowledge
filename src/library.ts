@@ -9,7 +9,7 @@ import { PROVIDER_MODELS } from "./config.ts";
 import type { EngineSettings } from "./engines/gbrain/engine.ts";
 import { ENTRY_PREFIX } from "./engines/gbrain/exposure.ts";
 import type { NotebookClient } from "./engines/notebook/client.ts";
-import type { Knowledge, Services } from "./knowledge.ts";
+import { type Knowledge, roleRows, type Services } from "./knowledge.ts";
 import type { TagFilter } from "./narrowing.ts";
 
 type In = Record<string, any>;
@@ -111,6 +111,7 @@ export function createLibraryHandlers(d: LibraryDeps): Record<string, HandlerSpe
           return json({
             engine: { configured: config.engine, running: s.engine !== null, choices: ENGINE_CHOICES, state: health.state, detail: health.detail, attention: knowledge.attention(), version: report?.counts?.version ?? null },
             research: config.research,
+            roles: roleRows(knowledge.engineModels() ?? (await knowledge.checkModels(ctx).catch(() => null))),
             models: { provider: config.modelProvider, chatModel: models.chatModel, embeddingProvider: models.embeddingProvider, embeddingModel: models.embeddingModel, keys: models.keys },
             documents: { total: sum("documents"), inEngine: sum("ready"), waiting: sum("pending"), failed: sum("failed") },
             embeddings: {
@@ -180,7 +181,11 @@ export function createLibraryHandlers(d: LibraryDeps): Record<string, HandlerSpe
         wrap(async () => {
           const s = services(ctx);
           const document = doc(s, input.id);
-          return json({ document, revisions: s.store.revisions(document.id, 100), comments: s.store.listComments(document.id), links: s.store.listLinks(document.id) });
+          const revisions = s.store.revisions(document.id, 100);
+          const comments = s.store.listComments(document.id);
+          // C373: app writers by name ("Observer"), never a bare instance id
+          const authors = knowledge.callerNames(s, [document.createdBy, document.updatedBy, ...revisions.map((r) => r.createdBy), ...comments.map((c) => c.createdBy)]);
+          return json({ document, revisions, comments, links: s.store.listLinks(document.id), authors });
         }),
     },
 

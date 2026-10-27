@@ -103,6 +103,43 @@ test("bindings GBrain cannot use are named, never guessed: no size for a generic
 test("builtFrom reads GBrain's config.json; applyEnv removes what the plan nulls", () => {
   assert.deepEqual(builtFrom({ embedding_model: "openai:text-embedding-3-small", embedding_dimensions: 1536 }), LEGACY_BRAIN);
   assert.deepEqual(builtFrom({ embedding_disabled: true }), { embeddingModel: null, dims: null, disabled: true });
-  assert.deepEqual(builtFrom("garbage"), { embeddingModel: null, dims: null, disabled: true });
+  assert.deepEqual(builtFrom("garbage"), { embeddingModel: null, dims: null, disabled: false, keep: "unreadable" });
+  // QA-KN24: a file that names no model and does not say "disabled" is a brain of unknown build: kept, never enabled
+  assert.deepEqual(builtFrom({}), { embeddingModel: null, dims: null, disabled: false, keep: "unknown" });
+  assert.deepEqual(builtFrom({ engine: "postgres" }), { embeddingModel: null, dims: null, disabled: false, keep: "unknown" });
+  assert.deepEqual(builtFrom([]), { embeddingModel: null, dims: null, disabled: false, keep: "unreadable" });
   assert.deepEqual(applyEnv({ A: "1", B: "2", C: undefined }, { B: null, D: "4" }), { A: "1", D: "4" });
+});
+
+test("QA-KN24 residual: a built brain whose config.json names no model is kept as it is (no init, no `embeddings enable`)", () => {
+  const unknown = builtFrom({ engine: "postgres" });
+  for (const env of [{}, { OPENAI_API_KEY: KEY_A }, role.embeddings("openai", "text-embedding-3-small", { KN_EMBEDDINGS_KEY: KEY_A })]) {
+    const plan = planModels(env, unknown);
+    assert.equal(plan.init, null);
+    assert.equal(plan.enable, null, "it may hold vectors already: never enabled over them");
+    assert.equal(plan.status.embeddings.active, null, "nothing claimed about the build");
+    assert.equal(plan.status.embeddings.state, "ok");
+  }
+  // the bound key still reaches GBrain, so a kept brain that does run that model can embed queries
+  assert.equal(planModels(role.embeddings("openai", "text-embedding-3-small", { KN_EMBEDDINGS_KEY: KEY_A }), unknown).env.OPENAI_API_KEY, KEY_A);
+  // the same file with an explicit `embedding_disabled: true` is the deferred-setup brain and does get enabled in place
+  assert.deepEqual(planModels(role.embeddings("openai", "text-embedding-3-small", { KN_EMBEDDINGS_KEY: KEY_A }), builtFrom({ embedding_disabled: true })).enable, ["--embedding-model", "openai:text-embedding-3-small"]);
+});
+
+test("QA-KN24 residual: a corrupt config.json is a plain 'unreadable' status, not a crash and not a re-init", () => {
+  const plan = planModels({ OPENAI_API_KEY: KEY_A }, builtFrom(undefined));
+  assert.equal(plan.init, null);
+  assert.equal(plan.enable, null);
+  assert.equal(plan.status.embeddings.state, "unreadable");
+});
+
+test("QA-KN24-7: a base URL bound for a provider with a fixed address is reported as not used, not as applied", () => {
+  const plan = planModels({ ...role.reasoning("together", "m", { KN_REASONING_KEY: KEY_A, KN_REASONING_BASE_URL: "http://localhost:1/v1" }), ...role.embeddings("voyage", "voyage-3", { KN_EMBEDDINGS_KEY: KEY_B, KN_EMBEDDINGS_BASE_URL: "http://localhost:2/v1" }) }, null);
+  assert.equal(plan.status.reasoning.addressIgnored, true);
+  assert.equal(plan.status.embeddings.addressIgnored, true);
+  assert.ok(!Object.values(plan.env).some((v) => typeof v === "string" && v.includes("localhost")), "no address reaches the engine env");
+  // a provider whose address can be set, and a binding without an address, carry no such flag
+  const fine = planModels({ ...role.reasoning("openrouter", "m", { KN_REASONING_KEY: KEY_A, KN_REASONING_BASE_URL: "https://openrouter.ai/api/v1" }), ...role.embeddings("together", "m2", { KN_EMBEDDINGS_KEY: KEY_B }) }, null);
+  assert.equal("addressIgnored" in fine.status.reasoning, false);
+  assert.equal("addressIgnored" in fine.status.embeddings, false);
 });
