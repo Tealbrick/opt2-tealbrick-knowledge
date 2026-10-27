@@ -34,8 +34,9 @@ Knowledge is a normalization wrapper over engines. Canonical documents stay in K
 
 - **App callers (C373):** Observer writes through `areas_list`, `document_create`, `document_update` (`APP_CALLER_OPS`); any other op from an app is `scope_denied`. An app sees and writes only `kind: shared` areas. Its write right is the SDK `own` default row of its instance (the SDK 0.1.41 default grants give an app only `read` on the shared area; spec and manifest need two disjoint `shared` entries to fix this cleanly). The owner switches it off with `tb.scopes_set` on that row. `kn_state` key `caller/<ins>` keeps the display name. Tags are stored as sent (lower-case, at most 20, 40 characters each); Knowledge derives none.
 - **Scopes:** `area` (access `read`, `contribute` = read, create, update, `read_write`). Default grants: own area read_write, shared area read. The shared company area is read for every connected agent; write is off until the owner turns it on per agent (C1). Events `agentAdded` (creates the company area and that agent's area) and `keysChanged`.
+- **Person and team memory (C373):** areas `person-<24 hex>` (a Governance person) and `team-<24 hex>` (a Governance team) are NOT SDK scope instances; Knowledge decides them per call from its copy of the Governance directory (`src/people.ts`, `src/area-access.ts`) on top of the bridge edge grant, the SDK rows above and Rules narrowing. An agent owned by person P: read and write on P's area (its default write area), read on the areas of teams it or P is in, read on another person Q's area only through an owner grant "team T may read Q" (`kn_team_grants`, optionally tag-limited; a tag-limited area is readable only by item-filtering ops). No directory or no owner = own agent area + company only (fail closed). Scope functions return `null` for these ids, so the SDK gate checks the caller's best area row. The owner manages grants on the Access page.
 - **Hooks:** None.
-- **Companion grants it asks for:** None asked. It calls GBrain at `/mcp` (stateless JSON-RPC POST, no redirects, 2 MB response cap) and Open Notebook REST (4 MB cap).
+- **Companion grants it asks for:** `fleet` `directory_feed` (read): the Governance directory (contract `fleet.directory_feed/1`, vendored in `src/contracts/`, provenance in `test/contracts/PROVENANCE.md`), read by `src/directory-feed.ts` at start, every 60 s, after `agentAdded` and from the Access page; never inside an agent call. Governance 0.3.0 or newer serves it to Knowledge; an older one answers `no_access` and Knowledge keeps today's access. Before C373 no grant was asked. It calls GBrain at `/mcp` (stateless JSON-RPC POST, no redirects, 2 MB response cap) and Open Notebook REST (4 MB cap).
 
 ## Settings, keys and environment
 
@@ -45,7 +46,7 @@ Companion services (built from `services/<id>/Dockerfile`, started with the SDK 
 
 ## Data
 
-- **Stored:** Migration 0001: `kn_areas`, `kn_collections`, `kn_documents` (title, slug, summary, body, status), `kn_revisions`, `kn_comments`, `kn_links`, `kn_documents_fts` (FTS5), `kn_projection` (outbox to the engine), `kn_state`. Sealed: registered engine client credentials. Engine data lives on the service volumes.
+- **Stored:** Migration 0001: `kn_areas`, `kn_collections`, `kn_documents` (title, slug, summary, body, status), `kn_revisions`, `kn_comments`, `kn_links`, `kn_documents_fts` (FTS5), `kn_projection` (outbox to the engine), `kn_state`. Migration 0003 (C373): `kn_areas.subject_kind` / `subject_id` (person and team areas, stored with kind `shared`), `kn_directory` (the reduced Governance directory copy: ids, owner, active and blocked flags, team names and members; no handles, no trust), `kn_team_grants`, `kn_access_log` (append-only). Sealed: registered engine client credentials. Engine data lives on the service volumes.
 - **Never stored:** Attachments (no table, no op), model keys outside the bridge key store.
 
 ## External calls and background work
@@ -55,7 +56,7 @@ Companion services (built from `services/<id>/Dockerfile`, started with the SDK 
 
 ## Person UI
 
-Memory (Library, Recall, Memory status), Research, Holds, Receipts, Agents and scopes, Keys, Backups and export (`src/ui/main.tsx`).
+Memory (Library, Recall, Memory status), Research, Access (C373: people, teams, grants), Holds, Receipts, Agents and scopes, Keys, Backups and export (`src/ui/main.tsx`).
 
 ## Requirements and runtime hints
 

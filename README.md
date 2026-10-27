@@ -25,6 +25,7 @@ Knowledge gives agents memory and documents, with data in the customer's own dep
 - Document bodies are projected into the memory engine as GBrain pages. The engine can be rebuilt from Knowledge (`afterRestore` requeues everything). Engines are pinned, unmodified upstream services: GBrain (memory) and Open Notebook (research, optional). The Hindsight engine is disabled.
 - Engine tools are exposed 1:1 under a dynamic `engine` list, bounded by a pinned surface; anything else fails closed. Without an engine, recall degrades to keyword search (`degraded: true`).
 - Areas are grant scopes: one private memory area per agent and one shared company area.
+- With Governance 0.3.0+ (C373): a personal area per directory person, shared by that person's agents (their default write area), and a team area per team (read by members' agents). Another person's area is readable only when the owner lets a team read it (Access page). No directory = the two areas above only.
 - Companion apps (Observer) may write into the company area as app callers: `areas_list`, `document_create`, `document_update` only, never an agent's private area. The document page names the app ("Observer").
 - Auth, grants, receipts, settings and backups come from the Miniapp SDK. Knowledge has no own auth.
 
