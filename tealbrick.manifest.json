@@ -5,7 +5,7 @@
   "name": "Knowledge",
   "summary": "Memory and documents for your agents: a private memory area per agent, a shared company area, research notebooks.",
   "description": "Knowledge gives every connected agent its own memory area and a shared company area. With Governance, the agents of one person share that person's memory and team members' agents read their team's memory; the owner decides which team may read whose memory. Agents remember and recall through memory tools; documents keep revisions, comments and links. Memory runs on GBrain, research on Open Notebook, both inside your own deployment.",
-  "version": "0.1.29",
+  "version": "0.1.30",
   "sdkMajor": 1,
   "publisher": {
     "name": "Tealbrick"
@@ -210,7 +210,8 @@
           "port": 3140,
           "paths": [
             "/sources",
-            "/models"
+            "/models",
+            "/embed-check"
           ]
         }
       },
@@ -3090,7 +3091,7 @@
           ]
         },
         "step": "models",
-        "help": "Older installs only: used while no model role is set on the Keys and models page."
+        "help": "The memory engine uses this key while no model role is set on the Keys and models page. One valid key here is enough for Knowledge."
       },
       {
         "name": "ANTHROPIC_API_KEY",
@@ -3106,7 +3107,7 @@
           "model_provider": "anthropic"
         },
         "step": "models",
-        "help": "Older installs only: used while no model role is set on the Keys and models page."
+        "help": "The memory engine uses this key while no model role is set on the Keys and models page. One valid key here is enough for Knowledge."
       },
       {
         "name": "GOOGLE_GENERATIVE_AI_API_KEY",
@@ -3122,7 +3123,7 @@
           "model_provider": "google"
         },
         "step": "models",
-        "help": "Older installs only: used while no model role is set on the Keys and models page."
+        "help": "The memory engine uses this key while no model role is set on the Keys and models page. One valid key here is enough for Knowledge."
       }
     ],
     "modelRoles": [

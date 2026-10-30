@@ -2,6 +2,29 @@
 
 All notable changes to the Knowledge mini app. Versions are assigned at merge (C340).
 
+## 0.1.30 (2026-10-30; KN-EMBED embedding failures name their true cause, recovery without a redeploy; upgradeFrom ">=0.1.20 <=0.1.29 || 0.1.28-dev.1")
+
+`upgradeFrom` ">=0.1.20 <=0.1.29 || 0.1.28-dev.1". No app database migration. Core's update rule passes a degraded app only with the same
+attention code, so an instance whose embedding calls fail for another reason than a bad key (it reports `memory_engine_key_rejected` on
+0.1.29) rolls back this update until the provider problem is fixed. Fix the cause first, then update.
+
+### Fixed
+
+- A failed embedding call no longer reads as "Key rejected" by itself. GBrain reports 401, 403, 400, 404 and a wrong vector size all as
+  `embed_unavailable:provider_error`, and 429, 5xx and no answer as `embed_timeout:timeout`. Knowledge now asks the engine for one real
+  test call (helper path `/embed-check`, at most one a minute, no retries, only while embedding calls fail) and names the cause:
+  `memory_engine_key_rejected` (401, 403), `memory_engine_provider_quota`, `memory_engine_provider_busy`, `memory_engine_model_refused`,
+  `memory_engine_provider_unreachable`, `memory_engine_provider_failing`. The rejected-key text names the field to replace.
+- A replaced key clears the attention within minutes: after a key change the engine is probed at 30 s, 2 min and 5 min, not only by the
+  10 min timer. The engine itself restarts on the new key without a redeploy (`tb-exec`, unchanged).
+- Documents written while embedding calls failed get their vectors: each engine boot with a working key runs `gbrain embed --stale --yes
+  --max-usd 1` in the background. The earlier enable path ran it without `--yes`, which GBrain refuses in a non-interactive run, so it never
+  filled anything. This spends the owner's provider credit, at most 1 USD per boot.
+- Notes about one query (`keyword_zero`, `keyword_relaxed_carried` and the like) are no longer engine faults, so the status check no longer
+  reads "memory engine degraded" for them.
+- Keys and Settings pages: a rejected key reads "rejected by provider" also when the key is optional (every Knowledge key is).
+- Manifest: the app-key help says what the key does now (one valid key is enough for Knowledge), not "older installs only".
+
 ## 0.1.29 (2026-10-27; C373 second brain: model roles, app writers, person and team memory; upgradeFrom ">=0.1.20 <=0.1.28 || 0.1.28-dev.1")
 
 `upgradeFrom` ">=0.1.20 <=0.1.28 || 0.1.28-dev.1". Needs Core with the manifest 0.1.32 pin (CORE-P5, core#67) and

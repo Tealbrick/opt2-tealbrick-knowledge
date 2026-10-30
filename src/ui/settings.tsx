@@ -77,7 +77,7 @@ export function Settings() {
   const keyState = (name: string) => {
     const row = keys?.find((k) => k.name === name);
     if (!row) return <Tag status="busy">unknown</Tag>;
-    if (row.present && row.required && rejected) return <Tag status="needs-you">rejected by provider</Tag>;
+    if (row.present && rejected) return <Tag status="needs-you">rejected by provider</Tag>;
     if (row.present) return <Tag status="live">set</Tag>;
     return row.required ? <Tag status="needs-you">missing</Tag> : <Tag>not needed</Tag>;
   };

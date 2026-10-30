@@ -56,3 +56,11 @@ refuses the model), a built brain that keeps its model (a different binding is r
 built brain without embeddings (`gbrain embeddings enable …`, then `gbrain embed --stale` in the background). All `KN_*` are
 removed from GBrain's env. `$GBRAIN_HOME/knowledge-models.json` holds labels only (no key, no address) and is served at
 `POST /models`. An older Core or bridge resolves roles to nothing: the legacy provider keys then drive the same plan.
+
+## Embedding failures and backfill (KN-EMBED, knowledge 0.1.30)
+
+`tb-exec` starts the helper without keys, so `boot.ts` (which holds the engine's env) serves one loopback port, 3142, `POST /check`: it runs
+`embed-check.ts` under bun, one real call through GBrain's gateway with no retries, and answers labels only (`embed-cause.ts`: `auth`, `quota`,
+`rate_limited`, `model`, `unreachable`, `provider_failing`, `unknown`; never upstream text, stderr is dropped). The helper relays it at
+`POST /embed-check`. One answer lasts a minute. After each boot with an active embeddings model the same check runs once, and when it works
+`gbrain embed --stale --yes --max-usd 1` fills the vectors that failed calls left empty.

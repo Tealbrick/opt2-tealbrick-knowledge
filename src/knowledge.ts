@@ -82,6 +82,38 @@ export const ENGINE_STARTING_MAX_MS = 10 * 60_000;
 export const ENGINE_STARTING = "memory_engine_starting";
 /** QA R-2: attention code when the provider refuses the engine's embedding calls (the key is set but rejected). */
 export const KEY_REJECTED = "memory_engine_key_rejected";
+/**
+ * What a fresh test call shows when the provider refuses the engine's embedding calls (KN-EMBED; services/gbrain/embed-cause.ts). GBrain
+ * reports them all as `embed_unavailable:provider_error` or `embed_timeout:timeout`, so only that call tells them apart.
+ */
+export const PROVIDER_QUOTA = "memory_engine_provider_quota";
+export const PROVIDER_BUSY = "memory_engine_provider_busy";
+export const MODEL_REFUSED = "memory_engine_model_refused";
+export const PROVIDER_UNREACHABLE = "memory_engine_provider_unreachable";
+export const PROVIDER_FAILING = "memory_engine_provider_failing";
+/** At most one test call per this time from the app (the engine side also keeps its answer for a minute). */
+export const EMBED_CHECK_MIN_MS = 60_000;
+/**
+ * GBrain stages that describe one query's answer, not a part of the engine that does not work. A status check that finds no exact
+ * keyword match is not a fault (qa1 2026-10: `keyword_relaxed_carried` read as "memory engine degraded" for days).
+ */
+const QUERY_NOTES: ReadonlySet<string> = new Set(["keyword_zero", "keyword_relaxed_carried", "budget_truncated", "budget_dropped_all", "cache_prestamp", "reranker_skipped", "rerank_passthrough", "projection_pending", "projection_by_design", "safe_index_pending"]);
+const isFault = (d: string): boolean => !QUERY_NOTES.has(d.split(":", 1)[0] as string);
+/** The stages a failed embedding call gives; a missing key or embeddings turned off give others (`no_provider`, `embedding_disabled`). */
+const embedCallsFail = (detail: readonly string[]): boolean => detail.some((d) => d.startsWith("embed_timeout") || (d.startsWith("embed") && d.endsWith(":provider_error")));
+
+export type EmbedCause = "auth" | "quota" | "rate_limited" | "model" | "unreachable" | "provider_failing" | "unknown";
+export const EMBED_CAUSES: readonly EmbedCause[] = ["auth", "quota", "rate_limited", "model", "unreachable", "provider_failing", "unknown"];
+/** The engine's answer at helper path `/embed-check` (services/gbrain/embed-cause.ts EmbedCheck), labels only. */
+export type EmbedCheck = { result: "ok" | "not_ready" } | { result: "failed"; cause: EmbedCause; status: number | null };
+
+export function readEmbedCheck(raw: unknown): EmbedCheck | null {
+  const o = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : null;
+  if (o?.result === "ok" || o?.result === "not_ready") return { result: o.result };
+  if (o?.result !== "failed" || !EMBED_CAUSES.includes(o.cause as EmbedCause)) return null;
+  return { result: "failed", cause: o.cause as EmbedCause, status: typeof o.status === "number" ? o.status : null };
+}
+
 /** C296: background provisioning retry while an area lacks its engine source (the engine service may start after Knowledge). */
 export const PROVISION_RETRY_MS = 5_000;
 export const PROVISION_RETRY_MAX_MS = 5 * 60_000;
@@ -247,6 +279,10 @@ export class Knowledge {
   private modelsRecheckTimer: ReturnType<typeof setTimeout> | null = null;
   private provisionInFlight = false;
   private provisionLog: ((msg: string, fields: Record<string, string>) => void) | null = null;
+  /** KN-EMBED: the last embedding test call while embedding calls fail (null: not asked yet, or they do not fail) */
+  private embedCheck: EmbedCheck | null = null;
+  private embedCheckAt = 0;
+  private embedCheckInFlight = false;
   private stopped = false;
   private stopDirectory: (() => void) | null = null;
 
@@ -324,11 +360,14 @@ export class Knowledge {
   /** Record what the engine just showed; a change pushes the app status at once (SDK `statusChanged`). */
   noteEngine(next: { state: EngineHealth["state"]; detail: string[] } | null): void {
     if (!next) return;
-    const detail = [...new Set(next.detail)].sort();
-    const changed = next.state !== this.engineHealth.state || detail.join(",") !== this.engineHealth.detail.join(",");
-    this.engineHealth = { state: next.state, detail, at: (this.opts.now ?? Date.now)() };
+    const detail = [...new Set(next.detail.filter(isFault))].sort();
+    const state = next.state === "degraded" && detail.length === 0 ? "ok" : next.state;
+    const changed = state !== this.engineHealth.state || detail.join(",") !== this.engineHealth.detail.join(",");
+    this.engineHealth = { state, detail, at: (this.opts.now ?? Date.now)() };
+    if (embedCallsFail(detail)) void this.askEmbedCheck();
+    else this.embedCheck = null;
     if (changed) this.statusChanged?.();
-    if (next.state === "ok" || next.state === "degraded") {
+    if (state === "ok" || state === "degraded") {
       this.reprobeDelay = 0;
       this.startingSince = null;
       if (this.reprobeTimer) clearTimeout(this.reprobeTimer);
@@ -371,14 +410,8 @@ export class Knowledge {
     const { state, detail } = this.engineHealth;
     const list = detail.join(", ").slice(0, 80);
     if (state === "degraded") {
-      // QA R-2: the key is set but the provider refuses the embedding calls (qa1: a 401 surfaces as provider_error, the
-      // engine's closed vocabulary has no finer code). The Keys page reads this same attention, so both screens agree.
-      if (detail.some((d) => d.startsWith("embed") && d.endsWith(":provider_error"))) {
-        return {
-          code: KEY_REJECTED,
-          reason: `Key rejected by the provider: the memory engine’s embedding calls fail (${list}), so recall is keyword-only. Enter a valid key on the Keys and models page.`.slice(0, 200),
-        };
-      }
+      // KN-EMBED: never read a failed embedding call as a bad key by itself: the test call below names the cause.
+      if (embedCallsFail(detail)) return this.embedFailureAttention(list);
       const embeddings = detail.some((d) => d.startsWith("embed") || d.startsWith("keyword_only") || d.includes("no_provider") || d.includes("provider_error") || d.includes("no_key"));
       return {
         code: DEGRADED,
@@ -392,6 +425,52 @@ export class Knowledge {
     }
     if (state === "failing") return { code: "memory_engine_failing", reason: `Memory engine answers fail (${list}): recall uses keyword search only.`.slice(0, 200) };
     return null;
+  }
+
+  /** Embedding calls fail: what the owner must do, from the last test call. Same words on the Keys page and in Portal. */
+  private embedFailureAttention(list: string): Attention {
+    const check = this.embedCheck;
+    if (check?.result === "failed" && check.cause !== "unknown") {
+      const http = check.status === null ? "no answer" : `HTTP ${check.status}`;
+      const model = this.models?.embeddings.active?.model ?? "the embeddings model";
+      const role = this.models?.embeddings.source === "role";
+      const provider = model.split(":", 1)[0];
+      const keyName = provider === "google" ? "Google Gemini API key" : provider === "openai" ? "OpenAI API key" : "API key";
+      const where = role ? "the provider key chosen for Embeddings" : `"${keyName}" under App keys`;
+      const fixModel = role ? "Check the Embeddings row on the Keys and models page." : "Check that the key has access to it, or set Embeddings on the Keys and models page.";
+      const by: Record<Exclude<EmbedCause, "unknown">, [string, string]> = {
+        auth: [KEY_REJECTED, `The provider rejected the embeddings key (${http}), so recall is keyword-only. Replace ${where} on the Keys and models page.`],
+        quota: [PROVIDER_QUOTA, `The embeddings provider has no quota or credit left on this account (${http}), so recall is keyword-only. Add credit at the provider. The key stays.`],
+        rate_limited: [PROVIDER_BUSY, `The embeddings provider is limiting calls (${http}), so recall is keyword-only for now. This clears by itself.`],
+        model: [MODEL_REFUSED, `The embeddings provider refuses ${model} (${http}), so recall is keyword-only. ${fixModel}`],
+        unreachable: [PROVIDER_UNREACHABLE, `The memory engine gets no answer from the embeddings provider, so recall is keyword-only. Check the provider's address on the Keys and models page and the network.`],
+        provider_failing: [PROVIDER_FAILING, `The embeddings provider has a fault (${http}), so recall is keyword-only. This clears when the provider recovers.`],
+      };
+      const [code, reason] = by[check.cause];
+      return { code, reason: reason.slice(0, 200) };
+    }
+    if (check?.result === "ok") return { code: DEGRADED, reason: `Embedding calls failed in a recall (${list}), but a new test call works. Recall adds keyword search until the next check.`.slice(0, 200) };
+    return { code: DEGRADED, reason: `The memory engine’s embedding calls fail (${list}), so recall is keyword-only. The cause is being checked.`.slice(0, 200) };
+  }
+
+  /** KN-EMBED: one real embedding call on the engine side, to name why embedding calls fail. An engine that cannot answer yet leaves it unknown. */
+  private async askEmbedCheck(): Promise<void> {
+    const access = this.provisionAccess;
+    const now = (this.opts.now ?? Date.now)();
+    if (!access || this.embedCheckInFlight || now - this.embedCheckAt < EMBED_CHECK_MIN_MS) return;
+    this.embedCheckInFlight = true;
+    this.embedCheckAt = now;
+    try {
+      const next = readEmbedCheck(await access.callServiceHelper("gbrain", "/embed-check", {} as never));
+      if (!next || !embedCallsFail(this.engineHealth.detail)) return;
+      const changed = JSON.stringify(next) !== JSON.stringify(this.embedCheck);
+      this.embedCheck = next;
+      if (changed) this.statusChanged?.();
+    } catch {
+      this.embedCheckAt = 0; // engine restarting or an old image: ask again at the next look
+    } finally {
+      this.embedCheckInFlight = false;
+    }
   }
 
   /** One engine probe on the company area (no agent principal): a one-row query, recorded with `noteEngine`. */
@@ -604,13 +683,20 @@ export class Knowledge {
   /** C373: keys or model roles changed (keysRev): the engine restarts with them; ask its helper again and provision at once. */
   async modelsChanged(): Promise<void> {
     this.restartProvisioning();
+    // a new key or binding: the last test call says nothing about it
+    this.embedCheck = null;
+    this.embedCheckAt = 0;
     const before = this.models ? JSON.stringify(this.models) : null;
     await this.checkModels();
     // QA-KN24-3: that answer probably came from the engine that is about to restart; look again until it changes
-    if ((this.models ? JSON.stringify(this.models) : null) === before) this.armModelsRecheck(before, 0);
+    // KN-EMBED: a replaced key changes no model label, and its effect shows only in the engine's health: always look again
+    this.armModelsRecheck(before, 0);
   }
 
-  /** Re-reads the engine's models after each delay of the schedule, until the answer differs from `before` (the last schedule step is the end). */
+  /**
+   * Probes the engine (health and models) after each delay of the schedule. It ends early only when the models changed and the engine
+   * is ok: a replaced key changes no label, and the first look may still reach the engine that is about to restart.
+   */
   private armModelsRecheck(before: string | null, step: number): void {
     if (this.modelsRecheckTimer) clearTimeout(this.modelsRecheckTimer);
     this.modelsRecheckTimer = null;
@@ -620,10 +706,11 @@ export class Knowledge {
     this.modelsRecheckTimer = setTimeout(() => {
       this.modelsRecheckTimer = null;
       if (this.stopped) return;
-      void this.checkModels()
+      const services = this.services;
+      void (services ? this.probeEngine(services) : this.checkModels())
         .catch(() => undefined)
         .then(() => {
-          if ((this.models ? JSON.stringify(this.models) : null) !== before) return;
+          if ((this.models ? JSON.stringify(this.models) : null) !== before && this.engineHealth.state === "ok") return;
           this.armModelsRecheck(before, step + 1);
         });
     }, delay);
