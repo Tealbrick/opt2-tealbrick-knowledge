@@ -262,7 +262,8 @@ test("revoke: a wrong digest changes nothing; areas and unknown kinds are not re
   assert.deepEqual((await revoke(subject, [{ id: item.id, digest: zero }])).results, [{ id: item.id, outcome: "changed", code: "digest_differs" }]);
   assert.equal(Number(db.prepare("SELECT count(*) AS n FROM kn_team_grants").get()?.n), 1, "a changed item removes nothing");
   assert.deepEqual((await revoke({ kind: "agent", id: ADA }, [{ id: item.id, digest: item.digest }])).results, [{ id: item.id, outcome: "not_revocable", code: "wrong_subject" }]);
-  assert.deepEqual((await revoke({ kind: "person", id: "ct_ben" }, [{ id: item.id, digest: item.digest }])).results[0]?.outcome, "already_gone", "a grant about another person is not this subject's");
+  assert.deepEqual((await revoke({ kind: "person", id: "ct_ben" }, [{ id: item.id, digest: item.digest }])).results, [{ id: item.id, outcome: "not_revocable", code: "wrong_subject" }], "a grant about another person is not this subject's, and is not reported gone");
+  assert.equal(Number(db.prepare("SELECT count(*) AS n FROM kn_team_grants").get()?.n), 1);
   const mixed = await revoke(subject, [
     { id: `agent_area:${ADA}`, digest: zero },
     { id: `person_area:${ADA}:${ANNA}`, digest: zero },
@@ -273,6 +274,17 @@ test("revoke: a wrong digest changes nothing; areas and unknown kinds are not re
     mixed.results.map((r: { outcome: string; code?: string }) => [r.outcome, r.code]),
     [["not_revocable", "areas_never_touched"], ["not_revocable", "areas_never_touched"], ["not_revocable", "unknown_kind"], ["revoked", undefined]],
   );
+});
+
+test("revoke: an item that throws is reported failed, the grant stays, and the other items still get their answer", async () => {
+  const { list, revoke, grant, db } = await setup();
+  await grant("team_sales", "ct_anna");
+  const item = (await list([{ kind: "person", id: "ct_anna", handles: [] }])).items[0];
+  const zero = `sha256:${"0".repeat(64)}`;
+  db.exec("DROP TABLE kn_access_log"); // the audit write fails: the removal rolls back with it (one transaction)
+  const out = await revoke({ kind: "person", id: "ct_anna" }, [{ id: item.id, digest: item.digest }, { id: `agent_area:${ADA}`, digest: zero }]);
+  assert.deepEqual(out.results, [{ id: item.id, outcome: "failed", code: "internal_error" }, { id: `agent_area:${ADA}`, outcome: "not_revocable", code: "areas_never_touched" }]);
+  assert.equal(Number(db.prepare("SELECT count(*) AS n FROM kn_team_grants").get()?.n), 1, "no audit row, no removal");
 });
 
 test("revoke works without a directory copy (removing only narrows) and with the schema's limit of 10 items", async () => {

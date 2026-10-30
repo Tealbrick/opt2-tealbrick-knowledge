@@ -122,12 +122,13 @@ export function wanted(subjects: unknown, fail: ErrorFactory): Wanted {
 }
 
 /** Every item for the wanted subjects, in id order. Reads only local data (areas, the directory copy, grants): never Governance. */
-export function collect(db: Db, areas: Areas, want: Wanted, now: number): { items: AccessItem[]; directory: boolean } {
+export function collect(db: Db, areas: Areas, want: Wanted, now: number): { items: Omit<AccessItem, "digest">[]; directory: boolean } {
   const state = directoryState(db, now);
   const model: DirectoryModel | null = state.available ? state.model : null;
   const grants = listGrants(db);
-  const items: AccessItem[] = [];
-  const push = (i: Omit<AccessItem, "digest" | "state">) => items.push({ ...i, state: "active", digest: digestOf(i) });
+  const items: Omit<AccessItem, "digest">[] = [];
+  // the digest is added to the page only (sha256 + JCS per item would make every page of a sweep cost the whole list)
+  const push = (i: Omit<AccessItem, "digest" | "state">) => items.push({ ...i, state: "active" });
 
   const agentIds = want.agents ?? new Set<string>([...areas.list().flatMap((a) => (a.kind === "agent" && a.agentId ? [a.agentId] : [])), ...(model?.agents.map((a) => a.id) ?? [])]);
   for (const agent of agentIds) {
@@ -191,7 +192,7 @@ export function createTbAccessHandlers(d: AccessDeps): Record<string, HandlerSpe
         const now = clock();
         const { items, directory } = collect(ctx.db, services(ctx).areas, want, now);
         const rest = after === null ? items : items.filter((i) => i.id > after);
-        const page = rest.slice(0, limit);
+        const page = rest.slice(0, limit).map((i) => ({ ...i, digest: digestOf(i) }));
         const last = page.at(-1);
         const notShown = [...STATIC_NOT_SHOWN, ...(directory ? [] : [DIRECTORY_NOT_SHOWN])].map((n) => ({ ...n }));
         return {
@@ -217,16 +218,26 @@ export function createTbAccessHandlers(d: AccessDeps): Record<string, HandlerSpe
         const now = clock();
         const actor = `fleet plan ${String(input.plan).slice(0, 40)} attempt ${Number(input.attempt)}`;
         // No await between reading a grant and removing it (one synchronous pass), so a check cannot go stale.
+        const one = (item: { id: string; digest: string }) => {
+          const id = String(item.id);
+          const kind = id.split(":", 1)[0];
+          if (kind !== "team_grant") return { id, outcome: "not_revocable", code: kind === "agent_area" || kind === "person_area" ? "areas_never_touched" : "unknown_kind" };
+          if (subject.kind !== "person" || typeof subject.id !== "string") return { id, outcome: "not_revocable", code: "wrong_subject" };
+          const grant = listGrants(ctx.db).find((g) => grantItemId(g) === id);
+          if (!grant) return { id, outcome: "already_gone" };
+          // a grant about another person is not this subject's: say so, never "gone" about something still active
+          if (grant.person !== subject.id) return { id, outcome: "not_revocable", code: "wrong_subject" };
+          const current = digestOf({ id, kind: "team_grant", subject: { kind: "person", id: grant.person }, resource: personAreaId(grant.person), level: "read" });
+          if (current !== item.digest) return { id, outcome: "changed", code: "digest_differs" };
+          return removeGrant(ctx.db, { team: grant.team, person: grant.person, actor }, now) ? { id, outcome: "revoked" } : { id, outcome: "already_gone" };
+        };
+        // One item failing must not hide the others: earlier items are already removed and audited, so the answer says which one failed.
         const results = asked.map((item) => {
-            const id = String(item.id);
-            const kind = id.split(":", 1)[0];
-            if (kind !== "team_grant") return { id, outcome: "not_revocable", code: kind === "agent_area" || kind === "person_area" ? "areas_never_touched" : "unknown_kind" };
-            if (subject.kind !== "person" || typeof subject.id !== "string") return { id, outcome: "not_revocable", code: "wrong_subject" };
-            const grant = listGrants(ctx.db).find((g) => g.person === subject.id && grantItemId(g) === id);
-            if (!grant) return { id, outcome: "already_gone" };
-            const current = digestOf({ id, kind: "team_grant", subject: { kind: "person", id: grant.person }, resource: personAreaId(grant.person), level: "read" });
-            if (current !== item.digest) return { id, outcome: "changed", code: "digest_differs" };
-            return removeGrant(ctx.db, { team: grant.team, person: grant.person, actor }, now) ? { id, outcome: "revoked" } : { id, outcome: "already_gone" };
+          try {
+            return one(item);
+          } catch {
+            return { id: String(item.id), outcome: "failed", code: "internal_error" };
+          }
         });
         return { v: 1, asOf: new Date(now).toISOString(), results } as unknown as Json;
       },
