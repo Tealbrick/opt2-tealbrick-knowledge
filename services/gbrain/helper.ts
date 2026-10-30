@@ -2,10 +2,13 @@
 // (upstream refuses `sources_add` over MCP). Listens on loopback only; tb-exec exposes it on the
 // manifest helper port after verifying the Knowledge instance assertion, for the declared paths only.
 // C373: `POST /models` answers which models this boot runs with (boot.ts writes the labels-only status file).
+// `POST /embed-check` asks boot.ts for one real embedding call and answers why it failed, as labels. This helper holds no provider
+// key (tb-exec starts it without keys), so boot.ts, which holds the engine's env, makes the call on its loopback port.
 import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { createServer } from "node:http";
 
+const EMBED_CHECK_URL = "http://127.0.0.1:3142/check";
 const SOURCE = /^ka-[a-f0-9]{24}$/u;
 const NAME = /^[a-z0-9][a-z0-9-]{1,63}$/u;
 const root = process.env.GBRAIN_ROOT ?? "/opt/gbrain";
@@ -33,6 +36,15 @@ const server = createServer(async (req, res) => {
     try {
       // labels only (models.ts ModelStatus): never a key or a base URL
       return reply(200, JSON.parse(await readFile(`${home}/knowledge-models.json`, "utf8")));
+    } catch {
+      return reply(503, { error: { code: "engine_starting", message: "the memory engine has not started yet" } });
+    }
+  }
+  if (req.method === "POST" && req.url === "/embed-check") {
+    req.resume(); // the body is empty: drain it
+    try {
+      const answer = await fetch(EMBED_CHECK_URL, { method: "POST", signal: AbortSignal.timeout(28_000) });
+      return reply(answer.status, await answer.json());
     } catch {
       return reply(503, { error: { code: "engine_starting", message: "the memory engine has not started yet" } });
     }

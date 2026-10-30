@@ -7,6 +7,7 @@ import { type ChildProcess, spawn } from "node:child_process";
 import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { constants, hostname } from "node:os";
+import type { EmbedCheck } from "./embed-cause.ts";
 import { AbortedError, type BootStatus, type Log, migrateCrashSafe } from "./migration-lock.ts";
 import { applyEnv, type BuiltBrain, builtFrom, type ModelStatus, planModels } from "./models.ts";
 import { connectPg, pgOptionsFromEnv } from "./pg-lock-session.ts";
@@ -18,6 +19,78 @@ function writeStatus(home: string, status: ModelStatus): void {
   const path = `${home}/${MODEL_STATUS_FILE}`;
   writeFileSync(`${path}.tmp`, `${JSON.stringify({ ...status, at: new Date().toISOString() })}\n`, { mode: 0o644 });
   renameSync(`${path}.tmp`, path);
+}
+
+/** Loopback port of the embedding check; only the helper in this container calls it (helper.ts EMBED_CHECK_URL). */
+export const EMBED_CHECK_PORT = 3142;
+/** A check answers from its last result for this long: at most one provider call per minute, whoever asks. */
+export const EMBED_CHECK_FRESH_MS = 60_000;
+const EMBED_CHECK_TIMEOUT_MS = 26_000;
+/** The most one boot's backfill may spend on the owner's key (`gbrain embed --max-usd`); the next boot continues the rest. */
+export const EMBED_BACKFILL_MAX_USD = "1";
+
+/** Runs embed-check.ts once. Only its one JSON line on stdout is read; stderr is dropped because upstream text can carry a key. */
+export function runEmbedCheck(argv: readonly string[], env: NodeJS.ProcessEnv, timeoutMs = EMBED_CHECK_TIMEOUT_MS): Promise<EmbedCheck | null> {
+  return new Promise((resolve) => {
+    const [file, ...args] = argv as [string, ...string[]];
+    const child = spawn(file, args, { stdio: ["ignore", "pipe", "ignore"], env });
+    let out = "";
+    const timer = setTimeout(() => child.kill("SIGKILL"), timeoutMs);
+    child.stdout.on("data", (chunk: Buffer) => {
+      out += chunk.toString("utf8");
+    });
+    child.once("error", () => {
+      clearTimeout(timer);
+      resolve(null);
+    });
+    child.once("close", () => {
+      clearTimeout(timer);
+      try {
+        const parsed = JSON.parse(out.trim().split("\n").at(-1) ?? "") as EmbedCheck;
+        resolve(parsed && typeof parsed.result === "string" ? parsed : null);
+      } catch {
+        resolve(null);
+      }
+    });
+  });
+}
+
+/** One check at a time, and none within `freshMs` of the last answer. */
+export function embedChecker(run: () => Promise<EmbedCheck | null>, freshMs = EMBED_CHECK_FRESH_MS, now: () => number = Date.now): () => Promise<EmbedCheck | null> {
+  let last: { value: EmbedCheck; at: number } | null = null;
+  let running: Promise<EmbedCheck | null> | null = null;
+  return () => {
+    if (last && now() - last.at < freshMs) return Promise.resolve(last.value);
+    running ??= run()
+      .then((value) => {
+        if (value) last = { value, at: now() };
+        return value;
+      })
+      .finally(() => {
+        running = null;
+      });
+    return running;
+  };
+}
+
+function embedCheckServer(check: () => Promise<EmbedCheck | null>, port = EMBED_CHECK_PORT): Server {
+  const server = createServer((req, res) => {
+    req.resume();
+    const reply = (status: number, body: unknown) => {
+      res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store" });
+      res.end(JSON.stringify(body));
+    };
+    if (req.method !== "POST" || req.url !== "/check") return reply(404, { error: { code: "not_found", message: "not found" } });
+    void check().then(
+      (value) => (value ? reply(200, value) : reply(503, { error: { code: "embed_check_failed", message: "the check gave no answer" } })),
+      () => reply(503, { error: { code: "embed_check_failed", message: "the check gave no answer" } }),
+    );
+  });
+  // a second boot on the port cannot happen in one container; a failed listen only loses the check, never the engine
+  server.once("error", (e) => log("warn", "embed_check_unavailable", { message: e instanceof Error ? e.message : String(e) }));
+  server.listen(port, "127.0.0.1");
+  server.unref();
+  return server;
 }
 
 const STOP_SIGNALS: readonly NodeJS.Signals[] = ["SIGTERM", "SIGINT", "SIGQUIT"];
@@ -128,7 +201,6 @@ export async function main(env: Record<string, string | undefined> = process.env
   }
   let plan = planModels(env, readBuilt());
   let gbEnv = applyEnv(env, plan.env);
-  let enabled = false;
   const server = await statusServer(port, bind, () => status);
   try {
     const pg = pgOptionsFromEnv(env);
@@ -162,8 +234,7 @@ export async function main(env: Record<string, string | undefined> = process.env
         if (code !== 0 || !plan.enable) return code;
         // a brain built without embeddings and a binding now: enable in place (refuses, changing nothing, when it cannot fit)
         const enable = await runChild([...gbrain, "embeddings", "enable", ...plan.enable], signal, undefined, gbEnv);
-        enabled = enable === 0;
-        if (!enabled) {
+        if (enable !== 0) {
           log("warn", "embeddings_enable_failed", { model: plan.status.embeddings.wanted?.model ?? null, code: enable });
           plan.status.embeddings = { ...plan.status.embeddings, state: "failed", active: null };
         }
@@ -189,15 +260,27 @@ export async function main(env: Record<string, string | undefined> = process.env
   // Private-network shape from upstream docs/mcp/DEPLOY.md ("Plain HTTP"): no --public-url, so the OAuth issuer stays
   // the default http://localhost:<port> (the MCP SDK refuses a non-HTTPS issuer on any other host). Knowledge's
   // client_credentials tokens are bound to that default resource and verified without reading the request host.
-  const [file, ...args] = [...gbrain, "serve", "--http", "--bind", bind, "--port", String(port), "--suppress-bootstrap-token", "--fail-fast"] as [string, ...string[]];
+  const [file, ...args] = [...gbrain, "serve", "--http", "--bind", bind, "--port", String(port), "--suppress-bootstrap-token", "--fail-fast"] as unknown as [string, ...string[]];
   log("info", "serve_starting", { port });
   const child = spawn(file, args, { stdio: "inherit", env: gbEnv });
   serve = child;
-  if (enabled) {
-    // embeddings were just enabled: vectors for the existing chunks, beside serve (Postgres; per-source upstream locks)
+  // Why embedding calls fail (helper path /embed-check), asked when recall reports them failing. And after each boot: a key was
+  // replaced or embeddings were enabled, so fill the vectors the documents lack. A failed embed leaves its chunks without vectors,
+  // and with no autopilot here nothing else fills them later. `--yes`: the owner entered this key for exactly this; `embed` refuses
+  // without it in a non-interactive run (before 0.1.30 the enable path never backfilled). Skipped while the key does not work.
+  const checkScript = `${import.meta.dirname}/embed-check.ts`;
+  const launcher = (env.KNOWLEDGE_GBRAIN_LAUNCHER ?? "bun run").split(" ").filter(Boolean);
+  const check = embedChecker(() => runEmbedCheck([...launcher, checkScript], gbEnv));
+  embedCheckServer(check);
+  if (plan.status.embeddings.active) {
     const embed = new AbortController();
     child.once("exit", () => embed.abort());
-    void runChild([...gbrain, "embed", "--stale"], embed.signal, undefined, gbEnv).then((code) => log(code === 0 ? "info" : "warn", "embed_stale_done", { code }));
+    void check().then(async (result) => {
+      log("info", "embed_check", { result: result?.result ?? null, cause: result?.result === "failed" ? result.cause : null, status: result?.result === "failed" ? result.status : null });
+      if (result?.result !== "ok" || embed.signal.aborted) return;
+      const code = await runChild([...gbrain, "embed", "--stale", "--yes", "--max-usd", EMBED_BACKFILL_MAX_USD], embed.signal, undefined, gbEnv);
+      log(code === 0 ? "info" : "warn", "embed_stale_done", { code });
+    });
   }
   return new Promise((resolve) => {
     child.once("error", () => resolve(127));

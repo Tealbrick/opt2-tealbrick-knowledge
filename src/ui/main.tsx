@@ -236,7 +236,7 @@ function Keys() {
               <tr key={key.name}>
                 <td className="mono">{key.name}</td>
                 <td>
-                  {key.present && key.required && rejected ? (
+                  {key.present && rejected ? (
                     <Tag status="needs-you">rejected by provider</Tag>
                   ) : key.present ? (
                     <Tag status="live">present</Tag>

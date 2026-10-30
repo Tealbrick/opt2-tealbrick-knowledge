@@ -38,5 +38,5 @@ test("C373: model roles embeddings + reasoning are optional, standard, fed to th
   for (const r of roles) for (const name of Object.values(r.env)) assert.ok(!name.startsWith("GBRAIN_"), name);
   assert.deepEqual(activeModelRoles(manifest, { engine: "gbrain" } as never, "gbrain").map((r: { role: string }) => r.role), ["embeddings", "reasoning"]);
   const gbrain = manifest.runtime.services.find((x: { id: string }) => x.id === "gbrain");
-  assert.deepEqual(gbrain.helper.paths, ["/sources", "/models"]);
+  assert.deepEqual(gbrain.helper.paths, ["/sources", "/models", "/embed-check"]);
 });

@@ -8,7 +8,7 @@ import type { Json, OpContext } from "@opt2-tealbrick/spec/sdk";
 import { knowledgeDefinition } from "../src/app.ts";
 import { NARROWING_POLICY } from "../src/handlers.ts";
 import { areaSourceId } from "../src/ids.ts";
-import { DEGRADED, EMBEDDINGS_CHANGED, ENGINE_MISSING, ENGINE_STARTING, ENGINE_UNREACHABLE, KEY_REJECTED, type KnowledgeOptions, MODEL_ROLE_OPTIONAL, memorySecrets, readEngineModels, roleRows, SECRET_NAME } from "../src/knowledge.ts";
+import { DEGRADED, EMBED_CHECK_MIN_MS, EMBEDDINGS_CHANGED, ENGINE_MISSING, ENGINE_STARTING, ENGINE_UNREACHABLE, KEY_REJECTED, type KnowledgeOptions, MODEL_REFUSED, MODEL_ROLE_OPTIONAL, memorySecrets, PROVIDER_BUSY, PROVIDER_FAILING, PROVIDER_QUOTA, PROVIDER_UNREACHABLE, readEngineModels, roleRows, SECRET_NAME } from "../src/knowledge.ts";
 import { DocumentStore } from "../src/store/documents.ts";
 import { context, type FakeGBrain, FakeScopes, fakeGBrain, memoryDb, TestError } from "./helpers.ts";
 
@@ -823,15 +823,30 @@ test("F89: the engine probe reports a degraded engine through attention and push
   assert.equal(overview.engine.state, "ok");
 });
 
-test("R-2: a provider_error on the embedding stage reads as a rejected key (fires); other degraded stages keep the generic reason (quiet)", async () => {
+test("KN-EMBED: a failed embedding call is not a rejected key by itself; a missing key and query notes keep their own reading", async () => {
   const { knowledge } = await taggedMemories();
   knowledge.noteEngine({ state: "degraded", detail: ["embed_unavailable:provider_error"] });
-  assert.equal(knowledge.attention()?.code, KEY_REJECTED);
-  assert.match(knowledge.attention()?.reason ?? "", /^Key rejected by the provider: .*embed_unavailable:provider_error.*Enter a valid key on the Keys and models page\.$/u);
+  assert.equal(knowledge.attention()?.code, DEGRADED, "no test call yet: the cause is not known");
+  assert.match(knowledge.attention()?.reason ?? "", /embed_unavailable:provider_error.*The cause is being checked\.$/u);
   knowledge.noteEngine({ state: "degraded", detail: ["embed_unavailable:no_provider"] });
-  assert.equal(knowledge.attention()?.code, "memory_engine_degraded");
+  assert.equal(knowledge.attention()?.code, DEGRADED);
+  assert.match(knowledge.attention()?.reason ?? "", /Check the embeddings model on the Keys and models page/u);
   knowledge.noteEngine({ state: "ok", detail: [] });
   assert.equal(knowledge.attention(), null);
+});
+
+test("KN-EMBED: notes about one query are not engine faults (qa1: keyword_relaxed_carried read as degraded); real faults stay", async () => {
+  const { knowledge } = await taggedMemories();
+  for (const note of ["keyword_relaxed_carried", "keyword_zero", "budget_truncated", "reranker_skipped:no_key", "rerank_passthrough:timeout"]) {
+    knowledge.noteEngine({ state: "degraded", detail: [note] });
+    assert.equal(knowledge.engineStatus().state, "ok", note);
+    assert.equal(knowledge.attention(), null, note);
+  }
+  knowledge.noteEngine({ state: "degraded", detail: ["keyword_zero", "vector_arm_failed:provider_error"] });
+  assert.equal(knowledge.engineStatus().state, "degraded");
+  assert.deepEqual(knowledge.engineStatus().detail, ["vector_arm_failed:provider_error"]);
+  assert.equal(knowledge.attention()?.code, DEGRADED);
+  knowledge.noteEngine({ state: "ok", detail: [] });
 });
 
 test("C296: no memory engine is never silent: engine_missing for a setting that is not available and for a missing service (fires); quiet with GBrain", async () => {
@@ -1149,7 +1164,7 @@ const KEYLESS = modelsAnswer({ state: "unset" }, { state: "unset" });
 const BOUND = modelsAnswer({ state: "ok", source: "role", active: { model: "openai:text-embedding-3-small", dims: 1536 }, wanted: { model: "openai:text-embedding-3-small", dims: 1536 } }, { state: "ok", source: "role", model: "openrouter:openai/gpt-5.2-chat" });
 
 /** A Knowledge with GBrain whose helper answers `/models` with `models()` (an Error is thrown) and creates sources. */
-async function modelSetup(models: () => unknown, extra: KnowledgeOptions = {}) {
+async function modelSetup(models: () => unknown, extra: KnowledgeOptions = {}, embedCheck: () => unknown = () => ({ result: "failed", cause: "auth", status: 401 })) {
   const db = memoryDb();
   const scopes = new FakeScopes();
   const env = { KNOWLEDGE_ENGINE: "gbrain", KNOWLEDGE_GBRAIN_URL: gbrain.url, KNOWLEDGE_GBRAIN_ADMIN_TOKEN: gbrain.adminToken, KNOWLEDGE_MODEL_PROVIDER: "openai" };
@@ -1159,6 +1174,11 @@ async function modelSetup(models: () => unknown, extra: KnowledgeOptions = {}) {
     helperPaths.push(path);
     if (path === "/models") {
       const answer = models();
+      if (answer instanceof Error) throw answer;
+      return answer;
+    }
+    if (path === "/embed-check") {
+      const answer = embedCheck();
       if (answer instanceof Error) throw answer;
       return answer;
     }
@@ -1313,6 +1333,7 @@ test("QA-KN24-1: engine health beats the optional-role notice: key rejected, fai
     const k = m.knowledge;
     assert.equal(k.attention()?.code, MODEL_ROLE_OPTIONAL, "ok engine, reasoning unset: the notice");
     k.noteEngine({ state: "degraded", detail: ["embed_unavailable:provider_error"] });
+    for (let i = 0; i < 100 && k.attention()?.code !== KEY_REJECTED; i++) await new Promise((resolve) => setTimeout(resolve, 5));
     assert.equal(k.attention()?.code, KEY_REJECTED);
     k.noteEngine({ state: "failing", detail: ["gbrain_error"] });
     assert.equal(k.attention()?.code, "memory_engine_failing");
@@ -1334,6 +1355,97 @@ test("QA-KN24-1: engine health beats the optional-role notice: key rejected, fai
     assert.equal(bound.knowledge.attention()?.code, "memory_engine_failing");
   } finally {
     bound.knowledge.stop();
+  }
+});
+
+const LEGACY_OPENAI = modelsAnswer({ state: "ok", source: "legacy", active: { model: "openai:text-embedding-3-small", dims: 1536 }, wanted: { model: "openai:text-embedding-3-small", dims: 1536 } }, { state: "ok", source: "legacy", model: "openai:gpt-6-luna" });
+
+async function untilCode(k: { attention(): { code: string } | null }, code: string): Promise<void> {
+  for (let i = 0; i < 200 && k.attention()?.code !== code; i++) await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal(k.attention()?.code, code);
+}
+
+test("KN-EMBED: the attention names the true cause from one test call, and the field to fix", async () => {
+  const rows: [unknown, string, RegExp][] = [
+    [{ result: "failed", cause: "auth", status: 401 }, KEY_REJECTED, /rejected the embeddings key \(HTTP 401\).*Replace "OpenAI API key" under App keys on the Keys and models page\.$/u],
+    [{ result: "failed", cause: "quota", status: 429 }, PROVIDER_QUOTA, /no quota or credit left.*\(HTTP 429\).*Add credit at the provider\. The key stays\.$/u],
+    [{ result: "failed", cause: "rate_limited", status: 429 }, PROVIDER_BUSY, /limiting calls.*clears by itself/u],
+    [{ result: "failed", cause: "model", status: 404 }, MODEL_REFUSED, /refuses openai:text-embedding-3-small \(HTTP 404\)/u],
+    [{ result: "failed", cause: "unreachable", status: null }, PROVIDER_UNREACHABLE, /no answer from the embeddings provider/u],
+    [{ result: "failed", cause: "provider_failing", status: 503 }, PROVIDER_FAILING, /has a fault \(HTTP 503\)/u],
+    [{ result: "failed", cause: "unknown", status: null }, DEGRADED, /The cause is being checked/u],
+    [{ result: "ok" }, DEGRADED, /a new test call works/u],
+  ];
+  for (const [check, code, reason] of rows) {
+    const m = await modelSetup(() => LEGACY_OPENAI, {}, () => check);
+    try {
+      await m.knowledge.checkModels();
+      m.knowledge.noteEngine({ state: "degraded", detail: ["embed_unavailable:provider_error", "keyword_zero"] });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      await untilCode(m.knowledge, code);
+      assert.match(m.knowledge.attention()?.reason ?? "", reason);
+      assert.ok((m.knowledge.attention()?.reason ?? "").length <= 200);
+    } finally {
+      m.knowledge.stop();
+    }
+  }
+});
+
+test("KN-EMBED: a provider that keeps timing out (GBrain embed_timeout: retries on 429 and 5xx) is checked too; a bound role names its provider key", async () => {
+  const role = modelsAnswer({ state: "ok", source: "role", active: { model: "openai:text-embedding-3-small", dims: 1536 }, wanted: { model: "openai:text-embedding-3-small", dims: 1536 } }, { state: "ok", source: "role", model: "openai:gpt-6-luna" });
+  const m = await modelSetup(() => role);
+  try {
+    await m.knowledge.checkModels();
+    m.knowledge.noteEngine({ state: "degraded", detail: ["embed_timeout:timeout"] });
+    await untilCode(m.knowledge, KEY_REJECTED);
+    assert.match(m.knowledge.attention()?.reason ?? "", /Replace the provider key chosen for Embeddings/u);
+  } finally {
+    m.knowledge.stop();
+  }
+});
+
+test("KN-EMBED: at most one test call a minute, a helper that cannot answer leaves the cause open, and no call when embedding calls do not fail", async () => {
+  let now = 1_000_000;
+  let answer: unknown = new Error("engine starting");
+  const m = await modelSetup(() => LEGACY_OPENAI, { now: () => now }, () => answer);
+  const calls = () => m.helperPaths.filter((p) => p === "/embed-check").length;
+  try {
+    m.knowledge.noteEngine({ state: "degraded", detail: ["embed_unavailable:no_provider"] });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.equal(calls(), 0, "a missing key needs no test call");
+    m.knowledge.noteEngine({ state: "degraded", detail: ["embed_unavailable:provider_error"] });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.equal(calls(), 1);
+    assert.equal(m.knowledge.attention()?.code, DEGRADED, "old image or restarting engine: not called a bad key");
+    answer = { result: "failed", cause: "auth", status: 401 };
+    m.knowledge.noteEngine({ state: "degraded", detail: ["embed_unavailable:provider_error"] });
+    await untilCode(m.knowledge, KEY_REJECTED);
+    assert.equal(calls(), 2, "the failed ask is repeated at the next look");
+    m.knowledge.noteEngine({ state: "degraded", detail: ["embed_unavailable:provider_error"] });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.equal(calls(), 2, "within the minute: no second provider call");
+    now += EMBED_CHECK_MIN_MS;
+    m.knowledge.noteEngine({ state: "degraded", detail: ["embed_unavailable:provider_error"] });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.equal(calls(), 3);
+  } finally {
+    m.knowledge.stop();
+  }
+});
+
+test("KN-EMBED: a replaced key clears the attention without a redeploy and without waiting for the 10 min probe", async () => {
+  const m = await modelSetup(() => LEGACY_OPENAI, { modelsRecheckMs: [20, 40, 80] });
+  try {
+    await m.knowledge.checkModels();
+    m.knowledge.noteEngine({ state: "degraded", detail: ["embed_unavailable:provider_error"] });
+    await untilCode(m.knowledge, KEY_REJECTED);
+    // the model labels do not change with a new key value; only the engine's health shows it
+    await m.definition.events?.keysChanged?.([], m.eventCtx);
+    for (let i = 0; i < 100 && m.knowledge.engineStatus().state !== "ok"; i++) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(m.knowledge.engineStatus().state, "ok");
+    assert.equal(m.knowledge.attention(), null);
+  } finally {
+    m.knowledge.stop();
   }
 });
 
