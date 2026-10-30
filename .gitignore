@@ -36,3 +36,4 @@ secrets/
 .conformance/
 gen/
 .data/
+conformance.manifest.json

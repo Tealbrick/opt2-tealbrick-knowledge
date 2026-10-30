@@ -3,6 +3,7 @@
 // services run here: recall answers from keyword search (`degraded: true`), engine-backed ops answer `area_not_ready`.
 import { applyLevelCrud, LEVEL_CRUD_ENV, parseLevelCrud } from "@opt2-tealbrick/conformance";
 import { defineApp, startApp, TbError } from "@opt2-tealbrick/miniapp-sdk";
+import { conformanceManifest, GUARDED_OPS } from "./conformance.strip.ts";
 import { knowledgeDefinition, manifest } from "./src/app.ts";
 
 // Harness-only stub engine (conformance 0.1.12 `dynamic.<op>.resolveTools`): with TBCONF_STUB_ENGINE=1 two stub tools
@@ -19,7 +20,7 @@ export default async function start(env: Record<string, string>): Promise<{ url:
   const full = { ...SETTINGS, ...env };
   const { definition: base, knowledge } = knowledgeDefinition(full, TbError);
   const engine = base.dynamic?.engine;
-  const definition =
+  const stubbed =
     (env.TBCONF_STUB_ENGINE ?? process.env.TBCONF_STUB_ENGINE) === "1" && engine
       ? {
           ...base,
@@ -46,6 +47,12 @@ export default async function start(env: Record<string, string>): Promise<{ url:
           },
         }
       : base;
+  // C380: the harness serves the shipped manifest without the guarded companion ops (conformance.strip.ts), the file the suite reads.
+  const definition = {
+    ...stubbed,
+    manifest: conformanceManifest(stubbed.manifest),
+    handlers: Object.fromEntries(Object.entries(stubbed.handlers).filter(([id]) => !GUARDED_OPS.includes(id))),
+  } as typeof stubbed;
   // Test roots (C63; suite default since spec 0.1.12): the suite passes TEST Portal Root Keys in TBCONF_PORTAL_ROOT_KEYS;
   // only this harness reads it and hands them to startApp. Production never reads that variable.
   // Port: the suite's free port (TBCONF_PORT, conformance ≥ 0.1.13; 0 = any free port), else manifest runtime.port.
