@@ -2,6 +2,17 @@
 
 All notable changes to the Knowledge mini app. Versions are assigned at merge (C340).
 
+## 0.1.31-dev.1 (2026-10-30; C380 B6 Governance access ops, dev channel only; upgradeFrom ">=0.1.20 <=0.1.30 || 0.1.28-dev.1")
+
+No app database migration. Two new agent operations, `access_list` and `access_revoke` (tb.access/1, spec 0.1.89), appended last in the manifest.
+Only the Governance app (verified product `fleet`, listed) may call them; every other caller is refused with no data.
+
+### Added
+
+- `access_list`: what each agent holds (own memory area, the people's memory it reaches) and which teams may read a person's memory. Reads local data only.
+  It names what it cannot list (team memory by membership, Portal scope rows, held calls), so it is never read as "nothing".
+- `access_revoke`: ends a team's read grant on a person's memory (the `access_grant_remove` logic, logged in `kn_access_log`). Areas, documents and scope rows are never changed.
+
 ## 0.1.30 (2026-10-30; KN-EMBED embedding failures name their true cause, recovery without a redeploy; upgradeFrom ">=0.1.20 <=0.1.29 || 0.1.28-dev.1")
 
 `upgradeFrom` ">=0.1.20 <=0.1.29 || 0.1.28-dev.1". No app database migration. Core's update rule passes a degraded app only with the same
