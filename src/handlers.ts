@@ -20,6 +20,7 @@ import { fanOut, mergeRanked } from "./merge.ts";
 import { NARROWING_UNSUPPORTED, NARROWING_VIOLATION, type Narrowing, NarrowingError, readNarrowing, type TagFilter, tagsPass, untaggedPass } from "./narrowing.ts";
 import { isGovernedArea } from "./people.ts";
 import { type Citation, cleanTags, documentCitation, memoryDigest, StoreError } from "./store/documents.ts";
+import { createTbAccessHandlers, GUARDED_OPS } from "./tb-access.ts";
 
 /** The SDK's error class (CORE §8 envelope); injected so this module only depends on frozen types. */
 export type ErrorFactory = new (code: string, message: string, httpStatus?: number) => Error;
@@ -99,6 +100,9 @@ export const NARROWING_POLICY: Readonly<Record<string, "items" | "untagged" | "n
   research_chat_start: "untagged",
   research_ask: "untagged",
   research_source_delete: "untagged",
+  // C380 Governance ops (app caller `fleet` only): no memory item is read or returned, so a tag narrowing has nothing to limit
+  access_list: "none",
+  access_revoke: "none",
   // §18.4 c/e (not listed → unsupported): collection_delete (would remove hidden documents), library_* writes, engine tools
 };
 
@@ -171,7 +175,8 @@ export function createHandlers(knowledge: Knowledge, TbError: ErrorFactory) {
     return {
       ...spec,
       run: async (input, ctx) => {
-        if (isApp(ctx.caller) && !APP_CALLER_OPS.has(id)) throw fail("scope_denied", "an app may only list areas and create or update documents in the company area", 403);
+        // C380: the Governance ops (src/tb-access.ts) are for the Governance app only; their own guard refuses every other caller
+        if (isApp(ctx.caller) && !APP_CALLER_OPS.has(id) && !GUARDED_OPS.includes(id)) throw fail("scope_denied", "an app may only list areas and create or update documents in the company area", 403);
         admit(NARROWING_POLICY[id] ?? "unsupported", ctx);
         return run(input, ctx);
       },
@@ -1149,7 +1154,8 @@ export function createHandlers(knowledge: Knowledge, TbError: ErrorFactory) {
 
   const library = createLibraryHandlers({ knowledge, services, wrap, fail, notFound, recallAcross, readyArea, notebookOf, tagFilter });
   const access = createAccessHandlers({ services, wrap, fail });
-  const all = Object.fromEntries(Object.entries({ ...handlers, ...library, ...access }).map(([id, spec]) => [id, narrowed(id, spec)]));
+  const tbAccess = createTbAccessHandlers({ services, fail });
+  const all = Object.fromEntries(Object.entries({ ...handlers, ...library, ...access, ...tbAccess }).map(([id, spec]) => [id, narrowed(id, spec)]));
   return { handlers: all, dynamic: { engine: engineDynamic }, events };
 }
 

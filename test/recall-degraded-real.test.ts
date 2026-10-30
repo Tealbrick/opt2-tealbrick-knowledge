@@ -13,6 +13,7 @@ import { type AppClient, appEnv, createFakeBridge, type FakeBridge, TEST_ROOTS_E
 import type { Manifest } from "@opt2-tealbrick/spec/manifest";
 import type { Json } from "@opt2-tealbrick/spec/sdk";
 import start from "../conformance.start.ts";
+import { conformanceManifest } from "../conformance.strip.ts";
 import manifestJson from "../tealbrick.manifest.json" with { type: "json" };
 import { type FakeGBrain, fakeGBrain } from "./helpers.ts";
 
@@ -46,7 +47,8 @@ before(async () => {
     });
   });
   await new Promise<void>((resolve) => helper.listen(HELPER_PORT, "127.0.0.1", resolve));
-  bridge = await createFakeBridge({ manifest });
+  // C380: the harness serves the manifest without the guarded Governance ops (conformance.strip.ts), so the fake bridge serves that one
+  bridge = await createFakeBridge({ manifest: conformanceManifest(manifest) });
   await bridge.control.publishKeySet();
   dataDir = mkdtempSync(join(tmpdir(), "knowledge-f88-"));
   const env = appEnv(bridge, dataDir, {
