@@ -19,10 +19,11 @@ export const filterKey = (page: string) => {
 const AREAS: FilterNoun = { one: "memory area", many: "memory areas" };
 
 /** Rows that pass a remembered text filter, and the bar that says a filter is on. `bar` is null for a short list. */
-export function useRowFilter<T>(page: string, rows: readonly T[], textOf: (row: T) => string, label: string, noun: FilterNoun = AREAS): { shown: T[]; bar: ReactNode } {
+export function useRowFilter<T>(page: string, rows: readonly T[], textOf: (row: T) => string[], label: string, noun: FilterNoun = AREAS): { shown: T[]; bar: ReactNode } {
   const [query, setQuery] = useAccessFilter(filterKey(page));
   const filter = accessFilter(query);
-  const shown = rows.filter((r) => filter.test(textOf(r)));
+  // each part alone (so ^ and $ work on the name), or all parts together
+  const shown = rows.filter((r) => textOf(r).some((t) => filter.test(t)) || filter.test(textOf(r).join(" ")));
   const on = query.trim() !== "";
   const bar =
     rows.length >= FILTER_FROM || on ? <ListFilter label={label} value={query} onChange={setQuery} filter={filter} noun={noun} shown={shown.length} total={rows.length} onClear={() => setQuery("")} /> : null;
@@ -52,7 +53,7 @@ export function AreaPicker({
   onChange: (value: string) => void;
   extra?: { value: string; label: string }[];
 }) {
-  const { shown, bar } = useRowFilter(`${page}:area`, areas, (a) => a.label, `Filter the ${label.toLowerCase()}s`);
+  const { shown, bar } = useRowFilter(`${page}:area`, areas, (a) => [a.label], `Filter the ${label.toLowerCase()}s`);
   const options = [...extra, ...areas.filter((a) => a.id === value || shown.includes(a)).map((a) => ({ value: a.id, label: a.label }))];
   return (
     <div className="tb-stack kn-areapick">

@@ -221,7 +221,7 @@ describe("Areas tables", () => {
     await type(filterInput(m.host) as HTMLInputElement, "preparing");
     assert.equal(rows(m.host), 5);
     assert.match(text(m.host), /Showing 5 of 10 memory areas\./);
-    await type(filterInput(m.host) as HTMLInputElement, "Area 02");
+    await type(filterInput(m.host) as HTMLInputElement, "^Area 02$");
     assert.equal(rows(m.host), 1);
     await click(buttons(m.host, "Clear filter")[0] as Element);
     assert.equal(rows(m.host), 10);
