@@ -25,6 +25,7 @@
 
 /* toolbar fields */
 .kn-area { width: min(100%, 260px); }
+.kn-areapick { flex: 1 1 260px; min-width: 0; max-width: 560px; }
 .kn-grow { flex: 1; min-width: 220px; }
 .kn-form { align-items: flex-end; }
 .kn-recall { max-width: calc(var(--tb-s16) * 11 + var(--tb-s4)); } /* mockup 720px, no token */

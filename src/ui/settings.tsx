@@ -4,6 +4,7 @@
 import { callOp } from "@opt2-tealbrick/miniapp-sdk/client";
 import { Button, Notice, Table, Tag } from "@opt2-tealbrick/ui";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useRowFilter } from "./area-filter.tsx";
 import { errText, PageHead } from "./common.tsx";
 
 interface Choice {
@@ -49,6 +50,40 @@ const roleTag = (state: SettingsOverview["roles"][number]["state"]) =>
   state === "bound" ? <Tag status="live">bound</Tag> : state === "degraded" ? <Tag status="needs-you">degraded</Tag> : state === "not_bound" ? <Tag>not bound</Tag> : <Tag status="busy">unknown</Tag>;
 
 const onOff = (state: "on" | "off" | "unknown") => (state === "on" ? <Tag status="live">on</Tag> : state === "off" ? <Tag>off</Tag> : <Tag status="busy">unknown</Tag>);
+
+/** The memory areas, with a filter on the rows (C382 batch 4). The areas load in full, so the filter reads all of them. */
+function AreasTable({ areas }: { areas: SettingsOverview["areas"] }) {
+  const { shown, bar } = useRowFilter("settings", areas, (a) => `${a.label} ${a.id} ${a.kind} ${a.engineReady ? "ready" : "preparing"}`, "Filter the memory areas");
+  return (
+    <>
+      {bar}
+      <Table>
+        <thead>
+          <tr>
+            <th>Area</th>
+            <th>Engine source</th>
+            <th>Documents</th>
+            <th>In memory</th>
+            <th>Waiting</th>
+            <th>Failed</th>
+          </tr>
+        </thead>
+        <tbody>
+          {shown.map((a) => (
+            <tr key={a.id}>
+              <td className="strong">{a.label}</td>
+              <td>{a.engineReady ? <Tag status="live">ready</Tag> : <Tag status="busy">preparing</Tag>}</td>
+              <td className="num">{a.documents}</td>
+              <td className="num">{a.ready}</td>
+              <td className="num">{a.pending}</td>
+              <td className="num">{a.failed ? <Tag status="needs-you">{a.failed}</Tag> : 0}</td>
+            </tr>
+          ))}
+        </tbody>
+      </Table>
+    </>
+  );
+}
 
 export function Settings() {
   const [data, setData] = useState<SettingsOverview | null>(null);
@@ -212,30 +247,7 @@ export function Settings() {
 
           <section className="tb-stack" aria-label="Memory areas">
             <h2>Memory areas</h2>
-            <Table>
-              <thead>
-                <tr>
-                  <th>Area</th>
-                  <th>Engine source</th>
-                  <th>Documents</th>
-                  <th>In memory</th>
-                  <th>Waiting</th>
-                  <th>Failed</th>
-                </tr>
-              </thead>
-              <tbody>
-                {data.areas.map((a) => (
-                  <tr key={a.id}>
-                    <td className="strong">{a.label}</td>
-                    <td>{a.engineReady ? <Tag status="live">ready</Tag> : <Tag status="busy">preparing</Tag>}</td>
-                    <td className="num">{a.documents}</td>
-                    <td className="num">{a.ready}</td>
-                    <td className="num">{a.pending}</td>
-                    <td className="num">{a.failed ? <Tag status="needs-you">{a.failed}</Tag> : 0}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </Table>
+            <AreasTable areas={data.areas} />
           </section>
         </div>
       )}
