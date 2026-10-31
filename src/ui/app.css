@@ -28,10 +28,6 @@
 .kn-grow { flex: 1; min-width: 220px; }
 .kn-form { align-items: flex-end; }
 .kn-recall { max-width: calc(var(--tb-s16) * 11 + var(--tb-s4)); } /* mockup 720px, no token */
-.kn-cell { min-width: calc(var(--tb-s16) * 2 + var(--tb-s8)); display: flex; justify-content: flex-end; } /* 160px = the kit Select minimum */
-.kn-cell > .tb-field { width: 100%; }
-/* labels wrap to different line counts per cell: bottom-align so every Select sits on a whole pixel (C128) and the row lines up */
-.tb-table td.kn-access { vertical-align: bottom; }
 .kn-measure { max-width: var(--tb-measure); }
 .kn-between { justify-content: space-between; }
 

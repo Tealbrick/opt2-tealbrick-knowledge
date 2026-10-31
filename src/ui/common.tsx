@@ -172,3 +172,17 @@ export function PageHead({ title, lede }: { title: string; lede?: ReactNode }) {
     </div>
   );
 }
+
+/** A failed load is an error with Try again, never an empty page (RUL-14). */
+export function LoadError({ message, onRetry }: { message: string; onRetry: () => void }) {
+  return (
+    <Notice tone="needs-you" role="alert">
+      <span className="tb-row">
+        <span>{message}</span>
+        <Button size="sm" onClick={onRetry}>
+          Try again
+        </Button>
+      </span>
+    </Notice>
+  );
+}
