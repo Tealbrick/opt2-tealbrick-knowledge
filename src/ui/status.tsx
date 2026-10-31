@@ -16,7 +16,7 @@ export interface AreaStatus {
 
 export function Status({ areas }: { areas: { areas: AreaStatus[] | null; error: string | null; reload: () => void } }) {
   // The filter reads the name, the kind and the engine state in words ("ready", "preparing"). The areas load in full.
-  const { shown, bar } = useRowFilter("status", areas.areas ?? [], (a) => [a.label, a.id, a.kind, a.engineReady ? "ready" : "preparing"], "Filter the memory areas");
+  const { shown, bar } = useRowFilter("status", areas.areas ?? [], (a) => [a.label, a.kind, a.engineReady ? "ready" : "preparing"], "Filter the memory areas");
   if (areas.error) return <LoadError message={areas.error} onRetry={areas.reload} />;
   if (!areas.areas) return <p className="tb-soft" role="status">Loading memory areas.</p>;
   return (

@@ -22,8 +22,8 @@ const AREAS: FilterNoun = { one: "memory area", many: "memory areas" };
 export function useRowFilter<T>(page: string, rows: readonly T[], textOf: (row: T) => string[], label: string, noun: FilterNoun = AREAS): { shown: T[]; bar: ReactNode } {
   const [query, setQuery] = useAccessFilter(filterKey(page));
   const filter = accessFilter(query);
-  // each part alone (so ^ and $ work on the name), or all parts together
-  const shown = rows.filter((r) => textOf(r).some((t) => filter.test(t)) || filter.test(textOf(r).join(" ")));
+  // a query with ^, $ or (? is about the name (first part) alone; any other text is searched in all parts
+  const shown = rows.filter((r) => (/[\^$]|\(\?/u.test(query) ? filter.test(textOf(r)[0] ?? "") : filter.test(textOf(r).join(" "))));
   const on = query.trim() !== "";
   const bar =
     rows.length >= FILTER_FROM || on ? <ListFilter label={label} value={query} onChange={setQuery} filter={filter} noun={noun} shown={shown.length} total={rows.length} onClear={() => setQuery("")} /> : null;
@@ -56,7 +56,14 @@ export function AreaPicker({
   const { shown, bar } = useRowFilter(`${page}:area`, areas, (a) => [a.label], `Filter the ${label.toLowerCase()}s`);
   const options = [...extra, ...areas.filter((a) => a.id === value || shown.includes(a)).map((a) => ({ value: a.id, label: a.label }))];
   return (
-    <div className="tb-stack kn-areapick">
+    // Enter in the filter field must not send the form the picker sits in (Recall runs a search on Enter)
+    // biome-ignore lint/a11y/noStaticElementInteractions: the handler only stops Enter from submitting the form
+    <div
+      className="tb-stack kn-areapick"
+      onKeyDown={(e) => {
+        if (e.key === "Enter" && e.target instanceof HTMLInputElement) e.preventDefault();
+      }}
+    >
       {bar}
       <div className="kn-area">
         <Field label={label}>

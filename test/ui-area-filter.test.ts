@@ -124,6 +124,20 @@ describe("Area picker filter", () => {
     await m.unmount();
   });
 
+  it("a negative regex is about the name: ^(?!Area 0) hides the rows whatever their other columns say; Enter in the field sends no form", async () => {
+    reset();
+    let submitted = 0;
+    const m = await mount(h("form", { onSubmit: (e: { preventDefault: () => void }) => { e.preventDefault(); submitted++; } }, h(Picker)));
+    await type(filterInput(m.host) as HTMLInputElement, "^(?!Area 0)");
+    assert.match(text(m.host), /Showing 0 of 10 memory areas\./);
+    const input = filterInput(m.host) as HTMLInputElement;
+    await act(async () => {
+      input.dispatchEvent(new win.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }) as unknown as Event);
+    });
+    assert.equal(submitted, 0);
+    await m.unmount();
+  });
+
   it("narrows the choices, says N of M memory areas, keeps the chosen area, and Clear restores", async () => {
     reset();
     const m = await mount(h(Picker));

@@ -53,7 +53,7 @@ const onOff = (state: "on" | "off" | "unknown") => (state === "on" ? <Tag status
 
 /** The memory areas, with a filter on the rows (C382 batch 4). The areas load in full, so the filter reads all of them. */
 function AreasTable({ areas }: { areas: SettingsOverview["areas"] }) {
-  const { shown, bar } = useRowFilter("settings", areas, (a) => [a.label, a.id, a.kind, a.engineReady ? "ready" : "preparing"], "Filter the memory areas");
+  const { shown, bar } = useRowFilter("settings", areas, (a) => [a.label, a.kind, a.engineReady ? "ready" : "preparing"], "Filter the memory areas");
   return (
     <>
       {bar}
