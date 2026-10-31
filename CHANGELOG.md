@@ -2,6 +2,10 @@
 
 All notable changes to the Knowledge mini app. Versions are assigned at merge (C340).
 
+## 0.1.31-dev.3 (2026-10-31; C382, dev channel only; upgradeFrom adds 0.1.31-dev.2)
+
+ui 0.4.1: on Agents & scopes the level buttons no longer move under the pointer. No operation, no migration.
+
 ## 0.1.31-dev.2 (2026-10-31; C382, dev channel only; upgradeFrom adds 0.1.31-dev.1)
 
 Screen change only: no operation, no migration, no CLI change.
