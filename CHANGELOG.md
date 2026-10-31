@@ -2,6 +2,12 @@
 
 All notable changes to the Knowledge mini app. Versions are assigned at merge (C340).
 
+## 0.1.31-dev.4 (2026-11-01)
+
+C382 batch 4, DEV only. No function or CLI change; ui 0.7.0.
+
+- Holds and Receipts: a filter by agent and by text. A filter always shows "Showing N of M" and Clear. Receipts filters by agent on the server; the text filter reads the loaded rows and says so while more are not loaded, with Show older in reach. Held approvals that a filter hides are counted above the list.
+
 ## 0.1.31-dev.3 (2026-10-31; C382, dev channel only; upgradeFrom adds 0.1.31-dev.2)
 
 ui 0.4.1: on Agents & scopes the level buttons no longer move under the pointer. No operation, no migration.

@@ -5,7 +5,7 @@
   "name": "Knowledge",
   "summary": "Memory and documents for your agents: a private memory area per agent, a shared company area, research notebooks.",
   "description": "Knowledge gives every connected agent its own memory area and a shared company area. With Governance, the agents of one person share that person's memory and team members' agents read their team's memory; the owner decides which team may read whose memory. Agents remember and recall through memory tools; documents keep revisions, comments and links. Memory runs on GBrain, research on Open Notebook, both inside your own deployment.",
-  "version": "0.1.31-dev.3",
+  "version": "0.1.31-dev.4",
   "sdkMajor": 1,
   "publisher": {
     "name": "Tealbrick"
