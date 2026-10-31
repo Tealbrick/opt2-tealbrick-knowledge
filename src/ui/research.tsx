@@ -1,6 +1,7 @@
 // Research page: per area, the sources and notes held by the research engine. Read, and remove sources.
-import { Button, Card, Field, Notice, Select, Tag } from "@opt2-tealbrick/ui";
+import { Button, Card, Notice, Tag } from "@opt2-tealbrick/ui";
 import { useCallback, useEffect, useState } from "react";
+import { AreaPicker } from "./area-filter.tsx";
 import { ConfirmDelete, dayMonth, ErrorNotice, errText, Loading, run, useOverview, when } from "./common.tsx";
 
 interface ResearchResponse {
@@ -71,11 +72,7 @@ export function Research() {
   return (
     <div className="tb-stack">
       <div className="toolbar">
-        <div className="kn-area">
-          <Field label="Research area">
-            <Select options={(areas ?? []).map((a) => ({ value: a.id, label: a.label }))} value={area} onValueChange={setArea} />
-          </Field>
-        </div>
+        <AreaPicker page="research" label="Research area" areas={areas ?? []} value={area} onChange={setArea} />
       </div>
       <ErrorNotice error={overviewError ?? error} />
       {area && !overviewError && !data && !error ? <Loading what="research" /> : null}

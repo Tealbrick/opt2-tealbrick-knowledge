@@ -12,6 +12,7 @@ import { Recall } from "./recall.tsx";
 import { Research } from "./research.tsx";
 import { Settings } from "./settings.tsx";
 import { AgentsPage, BackupsPage, errorMessage, HoldsPage, portalHref, ReceiptsPage, standardRoutes, useHoldList, useNav } from "./standard.tsx";
+import { type AreaStatus, Status } from "./status.tsx";
 
 const NAME = "Knowledge";
 /** Where scripts/build-ui.ts puts this app's still (`stills/`, next to this module in the hashed asset directory). */
@@ -35,17 +36,6 @@ function initialTab(): MemoryTab {
   return rest === "recall" ? "recall" : rest === "status" ? "status" : "library";
 }
 
-interface AreaStatus {
-  id: string;
-  label: string;
-  kind: "agent" | "shared" | "person" | "team";
-  engineReady: boolean;
-  researchReady: boolean;
-  pending: number;
-  ready: number;
-  failed: number;
-}
-
 function useAreas() {
   const [areas, setAreas] = useState<AreaStatus[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -60,40 +50,6 @@ function useAreas() {
 }
 
 type Areas = ReturnType<typeof useAreas>;
-
-function Status({ areas }: { areas: Areas }) {
-  if (areas.error) return <LoadError message={areas.error} onRetry={areas.reload} />;
-  if (!areas.areas) return <p className="tb-soft" role="status">Loading memory areas.</p>;
-  return (
-    <div className="tb-stack">
-      <div className="toolbar">
-        <Button onClick={areas.reload}>Refresh</Button>
-      </div>
-      <Table>
-        <thead>
-          <tr>
-            <th>Area</th>
-            <th>Memory engine</th>
-            <th>Documents in memory</th>
-            <th>Waiting</th>
-            <th>Failed</th>
-          </tr>
-        </thead>
-        <tbody>
-          {areas.areas.map((area) => (
-            <tr key={area.id}>
-              <td className="strong">{area.label}</td>
-              <td>{area.engineReady ? <Tag status="live">ready</Tag> : <Tag status="busy">preparing</Tag>}</td>
-              <td className="num">{area.ready}</td>
-              <td className="num">{area.pending}</td>
-              <td className="num">{area.failed ? <Tag status="needs-you">{area.failed}</Tag> : 0}</td>
-            </tr>
-          ))}
-        </tbody>
-      </Table>
-    </div>
-  );
-}
 
 function Memory({ tab, setTab, areas, library, setLibrary, onOpen }: { tab: MemoryTab; setTab: (tab: MemoryTab) => void; areas: Areas; library: LibraryNav; setLibrary: (patch: Partial<LibraryNav>) => void; onOpen: (documentId: string) => void }) {
   return (
