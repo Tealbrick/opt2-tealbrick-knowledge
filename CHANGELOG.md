@@ -2,6 +2,14 @@
 
 All notable changes to the Knowledge mini app. Versions are assigned at merge (C340).
 
+## 0.1.31-dev.2 (2026-10-31; C382, dev channel only; upgradeFrom adds 0.1.31-dev.1)
+
+Screen change only: no operation, no migration, no CLI change.
+
+### Changed
+
+- Agents & scopes no longer draws one dropdown per agent and memory area. It shows the defaults once, then only what differs from them, with "Back to default" and a one-line add. "Add or change many" opens the bulk editor: agents, memory areas, one click per level (ui 0.4.0 `AccessEditor`, through `tb.scopes_set`).
+
 ## 0.1.31-dev.1 (2026-10-30; C380 B6 Governance access ops, dev channel only; upgradeFrom ">=0.1.20 <=0.1.30 || 0.1.28-dev.1")
 
 No app database migration. Two new agent operations, `access_list` and `access_revoke` (tb.access/1, spec 0.1.89), appended last in the manifest.

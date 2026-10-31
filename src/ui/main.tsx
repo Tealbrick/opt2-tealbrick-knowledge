@@ -1,16 +1,17 @@
 // Knowledge person UI inside the ONE app shell (@opt2-tealbrick/ui AppShell): Memory (Library, Recall, Memory status),
 // Research, then the standard pages (Holds, Receipts, Agents & scopes, Backups & export, from ./standard.tsx) and Keys.
-import { callOp, TbProvider, useScopes, useSession } from "@opt2-tealbrick/miniapp-sdk/client";
-import { AppShell, appArt, appColour, Button, Field, Notice, Select, STANDARD_PAGES, Table, Tabs, Tag } from "@opt2-tealbrick/ui";
+import { callOp, TbProvider, useSession } from "@opt2-tealbrick/miniapp-sdk/client";
+import { AppShell, appArt, appColour, Button, Notice, STANDARD_PAGES, Table, Tabs, Tag } from "@opt2-tealbrick/ui";
 import { StrictMode, useCallback, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { Access } from "./access.tsx";
-import { ErrorNotice, errText, PageHead, useOverview } from "./common.tsx";
+import { errText, LoadError, PageHead, useOverview } from "./common.tsx";
+import { Configure } from "./configure.tsx";
 import { Library, type LibraryNav } from "./library.tsx";
 import { Recall } from "./recall.tsx";
 import { Research } from "./research.tsx";
 import { Settings } from "./settings.tsx";
-import { type Agent, AgentsPage, BackupsPage, errorMessage, HoldsPage, portalHref, ReceiptsPage, standardRoutes, useHoldList, useNav } from "./standard.tsx";
+import { AgentsPage, BackupsPage, errorMessage, HoldsPage, portalHref, ReceiptsPage, standardRoutes, useHoldList, useNav } from "./standard.tsx";
 
 const NAME = "Knowledge";
 /** Where scripts/build-ui.ts puts this app's still (`stills/`, next to this module in the hashed asset directory). */
@@ -59,91 +60,6 @@ function useAreas() {
 }
 
 type Areas = ReturnType<typeof useAreas>;
-
-/** A failed load is an error with Try again, never an empty page (RUL-14). */
-function LoadError({ message, onRetry }: { message: string; onRetry: () => void }) {
-  return (
-    <Notice tone="needs-you" role="alert">
-      <span className="tb-row">
-        <span>{message}</span>
-        <Button size="sm" onClick={onRetry}>
-          Try again
-        </Button>
-      </span>
-    </Notice>
-  );
-}
-
-const ACCESS_OPTIONS = [
-  { value: "", label: "No access" },
-  { value: "read", label: "Read" },
-  { value: "contribute", label: "Read, add and edit" },
-  { value: "read_write", label: "Read and write" },
-];
-
-/** Who may read or write which memory area: one row per agent, one column per area. Shown inside the standard Agents & scopes page. */
-function Configure({ agents, areas }: { agents: readonly Agent[]; areas: Areas }) {
-  const { access, set } = useScopes();
-  const [busy, setBusy] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  if (areas.error) return <LoadError message={areas.error} onRetry={areas.reload} />;
-  if (!areas.areas) return <p className="tb-soft" role="status">Loading memory areas.</p>;
-  // C373: person and team areas follow the Governance directory and the grants on the Access page, not per-agent rows here
-  const columns = areas.areas.filter((area) => area.kind === "agent" || area.kind === "shared");
-  const level = (agent: string, area: string) => access.find((row) => row.agent === agent && row.type === "area" && row.instanceId === area)?.access ?? "";
-  const change = async (agent: string, area: string, value: string) => {
-    setBusy(`${agent}|${area}`);
-    setError(null);
-    try {
-      await set(agent as never, "area", area, value === "" ? null : value);
-    } catch (e) {
-      setError(errText(e));
-    } finally {
-      setBusy(null);
-    }
-  };
-  return (
-    <div className="tb-stack">
-      <ErrorNotice error={error} />
-      <Table>
-        <thead>
-          <tr>
-            <th>Agent</th>
-            {columns.map((area) => (
-              <th key={area.id}>{area.label}</th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {agents.map((agent) => (
-            <tr key={agent.id}>
-              <td className="strong">
-                <span className="tb-row">
-                  {agent.name}
-                  {agent.status === "paused" ? <Tag status="needs-you">paused</Tag> : null}
-                </span>
-              </td>
-              {columns.map((area) => (
-                <td key={area.id} className="kn-access">
-                  <div className="kn-cell">
-                    <Field label={`${agent.name} access to ${area.label}`}>
-                      <Select
-                        options={ACCESS_OPTIONS}
-                        value={level(agent.id, area.id)}
-                        disabled={busy === `${agent.id}|${area.id}`}
-                        onValueChange={(value) => void change(agent.id, area.id, value)}
-                      />
-                    </Field>
-                  </div>
-                </td>
-              ))}
-            </tr>
-          ))}
-        </tbody>
-      </Table>
-    </div>
-  );
-}
 
 function Status({ areas }: { areas: Areas }) {
   if (areas.error) return <LoadError message={areas.error} onRetry={areas.reload} />;
@@ -322,7 +238,7 @@ function App() {
         <AgentsPage
           empty="No agent is connected to Knowledge yet. Draw a line from an agent to Knowledge on the canvas."
           lede="Each agent has its own memory area. Everyone can read the company area; turn on “Read and write” to let an agent add company knowledge. Personal and team memory is set on the Access page."
-          render={(agents) => <Configure agents={agents} areas={areas} />}
+          render={() => <Configure areas={areas} />}
         />
       ) : nav.page === "holds" ? (
         <HoldsPage list={holds} only={nav.hold} empty="Nothing waits for your approval." />
