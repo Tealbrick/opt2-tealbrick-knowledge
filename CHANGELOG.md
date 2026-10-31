@@ -4,7 +4,7 @@ All notable changes to the Knowledge mini app. Versions are assigned at merge (C
 
 ## 0.1.31-dev.4 (2026-11-01)
 
-C382 batch 4, DEV only. No function or CLI change; ui 0.7.0.
+C382 batch 4, DEV only. No function or CLI change; ui 0.7.1.
 
 - Holds and Receipts: a filter by agent and by text. A filter always shows "Showing N of M" and Clear. Receipts filters by agent on the server; the text filter reads the loaded rows and says so while more are not loaded, with Show older in reach. Held approvals that a filter hides are counted above the list.
 - Memory area pickers (Library, Recall, Research): a filter on the choices, plain text or a regex. The chosen area always stays in the list. The filter is remembered and says "Showing N of M memory areas".
