@@ -2,6 +2,10 @@
 
 All notable changes to the Knowledge mini app. Versions are assigned at merge (C340).
 
+## 0.1.31-dev.5 (2026-11-01)
+
+C383, DEV only. miniapp-sdk 0.1.46, manifest 0.1.35: an app caller can read the status of a hold on this app, and an approval of an app caller's hold serves only that call's key (audit holes 5, 6). No other change.
+
 ## 0.1.31-dev.4 (2026-11-01)
 
 C382 batch 4, DEV only. No function or CLI change; ui 0.7.1.
