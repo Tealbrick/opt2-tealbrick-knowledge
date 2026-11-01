@@ -87,15 +87,15 @@ before(async () => {
 after(() => rmSync(outDir, { recursive: true, force: true }));
 
 describe("Access page (C373)", () => {
-  it("lists people by id with their agents, teams with members and grants, agents with no owner, and the change log", async () => {
+  it("lists people by their agents (no raw id), teams with members and grants, agents with no owner, and the change log", async () => {
     stub.overview = ready;
     const m = await mount(mod.Access);
     const text = m.host.textContent ?? "";
     assert.match(text, /Knowledge follows the Governance directory/u);
-    assert.match(text, /ct_anna/u);
-    assert.match(text, /Ada/u);
+    assert.doesNotMatch(text, /ct_anna|ct_ben/u, "no raw person id on the page");
+    assert.match(text, /A person \(Ada\)/u);
     assert.match(text, /Sales \(only memories tagged work\)/u, "who else reads Anna's memory");
-    assert.match(text, /ct_ben \(Bo\)/u, "a team member shows as id + agent names");
+    assert.match(text, /A person \(Bo\)/u, "a team member shows as a person + agent names");
     assert.match(text, /not used yet/u);
     assert.match(text, /Agents with no owner/u);
     assert.match(text, /Cy/u);

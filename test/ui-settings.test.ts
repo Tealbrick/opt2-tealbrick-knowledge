@@ -59,7 +59,11 @@ const overview = (running: boolean) => ({
     { id: "entities", label: "Entities (people, companies)", state: running ? "on" : "off", reason: "No model key needed." },
     { id: "reranker", label: "Reranker", state: "off", reason: "Needs VOYAGE_API_KEY, which is not a Knowledge key yet." },
   ],
-  areas: [{ id: "company", label: "Company", kind: "shared", engineReady: running, documents: 3, ready: running ? 3 : 0, pending: running ? 0 : 3, failed: 0 }],
+  areas: [
+    { id: "company", label: "Company", kind: "shared", engineReady: running, documents: 3, ready: running ? 3 : 0, pending: running ? 0 : 3, failed: 0 },
+    { id: "person-a", label: "Person ct_anna (personal memory)", kind: "person", engineReady: running, documents: 1, ready: 1, pending: 0, failed: 0 },
+    { id: "person-z", label: "Person ct_zed (personal memory)", kind: "person", engineReady: running, documents: 0, ready: 0, pending: 0, failed: 0 },
+  ],
 });
 const stub = { running: true, keyPresent: false };
 const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -70,6 +74,7 @@ globalThis.fetch = (async (input: string | URL | Request) => {
   const op = /^ops\/(.+)$/.exec(path)?.[1];
   if (op === "settings_overview") return json(200, { status: "ok", output: overview(stub.running) });
   // a stray value field: the page must never render it
+  if (op === "access_overview") return json(200, { status: "ok", output: { people: [{ id: "ct_anna", active: true, area: "person-a", areaExists: true, documents: 1, agents: [{ id: "agt_a", name: "Ada" }], readBy: [] }] } });
   if (op === "tb.keys_status") return json(200, { status: "ok", output: [{ name: "OPENAI_API_KEY", required: true, present: stub.keyPresent, source: null, value: SECRET }] });
   return json(404, { error: { code: "not_found", message: String(op) } });
 }) as typeof fetch;
@@ -119,6 +124,9 @@ describe("Settings page (C296)", () => {
     assert.match(text, /OPENAI_API_KEY\s*missing/u);
     assert.match(text, /Needs VOYAGE_API_KEY/u);
     assert.match(text, /Company/u);
+    assert.match(text, /A person \(Ada\): personal memory/u, "a person's area is named by its agents");
+    assert.match(text, /A person: personal memory/u, "a person with no known agents reads as a person");
+    assert.doesNotMatch(text, /ct_anna|ct_zed/u, "no raw person id");
     // C373: the two roles come first, in plain words; the old provider keys sit under their own heading
     const roleRows = [...m.host.querySelectorAll('section[aria-label="Model roles"] tr')].map((r) => (r.textContent ?? "").trim());
     assert.ok(roleRows.some((r) => /^Embeddings \(search by meaning\)\s*bound\s*openai:text-embedding-3-small$/u.test(r)), roleRows.join("|"));
