@@ -2,6 +2,10 @@
 
 All notable changes to the Knowledge mini app. Versions are assigned at merge (C340).
 
+## 0.1.31 (2026-11-01)
+
+The final version of the 0.1.31-dev series. See the dev entries below for what is in it. New in this cut: Access and Settings name a person by their agents and never show a raw id (C383). `upgradeFrom` now admits every 0.1.31-dev.N.
+
 ## 0.1.31-dev.5 (2026-11-01)
 
 C383, DEV only. miniapp-sdk 0.1.46, manifest 0.1.35: an app caller can read the status of a hold on this app, and an approval of an app caller's hold serves only that call's key (audit holes 5, 6). No other change.
