@@ -143,3 +143,27 @@ test("QA-KN24-7: a base URL bound for a provider with a fixed address is reporte
   assert.equal("addressIgnored" in fine.status.reasoning, false);
   assert.equal("addressIgnored" in fine.status.embeddings, false);
 });
+
+test("C389: a brain built without embeddings is enabled at its own column width, never at a default width (Eyal, PROD)", () => {
+  const keyless = builtFrom({ embedding_disabled: true });
+  // the key arrives through the legacy provider setting: 0.1.31 passed the legacy 1536 and GBrain refused (column 1024)
+  const legacy = planModels({ KNOWLEDGE_MODEL_PROVIDER: "openai", OPENAI_API_KEY: KEY_A }, keyless);
+  assert.deepEqual(legacy.enable, ["--embedding-model", "openai:text-embedding-3-small"]);
+  assert.equal(legacy.status.embeddings.state, "enabled");
+  assert.deepEqual(legacy.status.embeddings.active, { model: "openai:text-embedding-3-small", dims: null });
+  // a role binding that carries the model's default width: the same, GBrain sizes this model itself
+  const bound = planModels(role.embeddings("openai", "text-embedding-3-small", { KN_EMBEDDINGS_KEY: KEY_A, KN_EMBEDDINGS_DIMS: "1536" }), keyless);
+  assert.deepEqual(bound.enable, ["--embedding-model", "openai:text-embedding-3-small"]);
+  // a model GBrain cannot size passes its real width (GBrain refuses it when it does not fit the column)
+  const local = planModels(role.embeddings("llama-server", "qwen3-embed", { KN_EMBEDDINGS_BASE_URL: "http://10.0.0.5:8080/v1", KN_EMBEDDINGS_DIMS: "768" }), keyless);
+  assert.deepEqual(local.enable, ["--embedding-model", "llama-server:qwen3-embed", "--embedding-dimensions", "768"]);
+  // the next boot: the brain now says 1024; the legacy 1536 default is no change and nothing runs again
+  const after = planModels({ KNOWLEDGE_MODEL_PROVIDER: "openai", OPENAI_API_KEY: KEY_A }, builtFrom({ embedding_model: "openai:text-embedding-3-small", embedding_dimensions: 1024 }));
+  assert.equal(after.init, null);
+  assert.equal(after.enable, null);
+  assert.equal(after.status.embeddings.state, "ok");
+  assert.deepEqual(after.status.embeddings.active, { model: "openai:text-embedding-3-small", dims: 1024 });
+  // a different model is still a change, whatever the width
+  const other = planModels(role.embeddings("openai", "text-embedding-3-large", { KN_EMBEDDINGS_KEY: KEY_A }), builtFrom({ embedding_model: "openai:text-embedding-3-small", embedding_dimensions: 1024 }));
+  assert.equal(other.status.embeddings.state, "changed");
+});

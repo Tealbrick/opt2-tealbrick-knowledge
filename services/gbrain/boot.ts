@@ -237,6 +237,10 @@ export async function main(env: Record<string, string | undefined> = process.env
         if (enable !== 0) {
           log("warn", "embeddings_enable_failed", { model: plan.status.embeddings.wanted?.model ?? null, code: enable });
           plan.status.embeddings = { ...plan.status.embeddings, state: "failed", active: null };
+        } else {
+          // C389: GBrain picked the width (the brain's column): the status reports what config.json now says
+          const now = readBuilt();
+          if (now?.embeddingModel) plan.status.embeddings = { ...plan.status.embeddings, active: { model: now.embeddingModel, dims: now.dims } };
         }
         return 0;
       },

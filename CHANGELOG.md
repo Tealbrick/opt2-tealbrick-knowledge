@@ -2,6 +2,14 @@
 
 All notable changes to the Knowledge mini app. Versions are assigned at merge (C340).
 
+## 0.1.32-dev.1 (2026-11-04)
+
+C389, DEV first. Embeddings on a brain built without them: GBrain makes that brain's vector column 1024 wide, and 0.1.31 enabled
+embeddings at the legacy default 1536, which GBrain refused (`embedding_width_mismatch`), so search stayed keyword-only. A model whose
+width GBrain knows is now enabled at the column's own width (no `--embedding-dimensions`); only a model GBrain cannot size passes its
+width. A default or bound width for such a model is no longer reported as a model change. Area provisioning failures also log the
+HTTP status of the helper error (503: the helper port does not answer; 502: the helper process behind it does not).
+
 ## 0.1.31 (2026-11-01)
 
 The final version of the 0.1.31-dev series. See the dev entries below for what is in it. New in this cut: Access and Settings name a person by their agents and never show a raw id (C383). `upgradeFrom` now admits every 0.1.31-dev.N.
