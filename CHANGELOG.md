@@ -2,6 +2,10 @@
 
 All notable changes to the Knowledge mini app. Versions are assigned at merge (C340).
 
+## 0.1.32 (2026-11-04)
+
+The final version of 0.1.32-dev.1 (C389): embeddings on a brain built without them are enabled at the brain's own width. No other change. `upgradeFrom` admits 0.1.32-dev.1.
+
 ## 0.1.32-dev.1 (2026-11-04)
 
 C389, DEV first. Embeddings on a brain built without them: GBrain makes that brain's vector column 1024 wide, and 0.1.31 enabled
