@@ -15,14 +15,46 @@ const root = process.env.GBRAIN_ROOT ?? "/opt/gbrain";
 const home = process.env.GBRAIN_HOME ?? "/data";
 let queue: Promise<unknown> = Promise.resolve();
 
+/**
+ * C390 (knowledge#38): below the SDK's helper timeout (30 s), so a slow CLI answers 502 `cli_timeout` with a cause and
+ * never shows up as an unreachable helper (503). stdin is closed: the CLI can never wait for an answer.
+ */
+export const SOURCES_ADD_TIMEOUT_MS = 25_000;
+
+/** One log line per `sources add` (stderr reaches the service log): labels and numbers only, never CLI output. */
+function logLine(fields: Record<string, string | number | null>): void {
+  console.error(JSON.stringify({ ts: new Date().toISOString(), component: "gbrain-helper", ...fields }));
+}
+
+class SourceAddError extends Error {
+  readonly label: string;
+  constructor(label: string) {
+    super("sources add failed");
+    this.label = label;
+  }
+}
+
 function addSource(id: string, name: string): Promise<"created" | "exists"> {
+  const started = Date.now();
   return new Promise((resolve, reject) => {
-    execFile("bun", ["run", `${root}/src/cli.ts`, "sources", "add", id, "--name", name], { timeout: 60_000 }, (error, stdout, stderr) => {
+    const child = execFile("bun", ["run", `${root}/src/cli.ts`, "sources", "add", id, "--name", name], { timeout: SOURCES_ADD_TIMEOUT_MS, killSignal: "SIGKILL" }, (error, stdout, stderr) => {
       const out = `${stdout}${stderr}`;
-      if (!error) return resolve("created");
-      if (out.includes("source_id_taken")) return resolve("exists");
-      reject(new Error("sources add failed"));
+      const ms = Date.now() - started;
+      if (!error) {
+        logLine({ event: "sources_add", outcome: "created", ms });
+        return resolve("created");
+      }
+      if (out.includes("source_id_taken")) {
+        logLine({ event: "sources_add", outcome: "exists", ms });
+        return resolve("exists");
+      }
+      const e = error as { killed?: boolean; signal?: string | null; code?: unknown };
+      // labels only: the CLI output is never logged or scanned (it can carry the database address)
+      const cause = e.killed ? "cli_timeout" : typeof e.code === "string" && /^E[A-Z]{2,30}$/u.test(e.code) ? e.code : typeof e.code === "number" ? `cli_exit_${e.code}` : e.signal ? `cli_signal_${e.signal}` : "cli_failed";
+      logLine({ event: "sources_add", outcome: "failed", cause, exitCode: typeof e.code === "number" ? e.code : null, signal: e.signal ?? null, ms });
+      reject(new SourceAddError(cause));
     });
+    child.stdin?.end();
   });
 }
 
@@ -67,8 +99,9 @@ const server = createServer(async (req, res) => {
   queue = run.catch(() => undefined);
   try {
     reply(200, { status: await run });
-  } catch {
-    reply(502, { error: { code: "source_add_failed", message: "the engine could not create the source" } });
+  } catch (e) {
+    const cause = e instanceof SourceAddError ? e.label : "cli_failed";
+    reply(502, { error: { code: "source_add_failed", message: "the engine could not create the source", details: { cause } } });
   }
 });
-server.listen(3141, "127.0.0.1");
+server.listen(3141, "127.0.0.1", () => logLine({ event: "helper_listening", port: 3141 }));

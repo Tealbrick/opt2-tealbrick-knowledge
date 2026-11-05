@@ -121,3 +121,19 @@ test("C389: a failed area provisioning logs the code and the HTTP status (503 po
   await areas.provisionPending({ createSource: async () => Promise.reject(new Error("plain")) }, (_msg, fields) => void lines.push(fields));
   assert.deepEqual(Object.keys(lines[0] ?? {}).sort(), ["area", "error"]);
 });
+
+test("C390: the SDK cause label (details.cause) is logged too; a cause that is not a label is left out", async () => {
+  const db = memoryDb();
+  const scopes = new FakeScopes();
+  const areas = new Areas(db);
+  await areas.ensureShared(scopes.asStore());
+  const lines: Record<string, string>[] = [];
+  const refused = Object.assign(new Error("service helper gbrain not reachable (ECONNREFUSED)"), { code: "helper_unavailable", httpStatus: 503, details: { cause: "ECONNREFUSED" } });
+  await areas.provisionPending({ createSource: async () => Promise.reject(refused) }, (_msg, fields) => void lines.push(fields));
+  assert.deepEqual(lines[0], { area: lines[0]?.area, error: "helper_unavailable", status: "503", cause: "ECONNREFUSED" });
+  lines.length = 0;
+  const odd = Object.assign(new Error("x"), { code: "source_add_failed", httpStatus: 502, details: { cause: "postgres://user:pw@host/db" } });
+  await areas.provisionPending({ createSource: async () => Promise.reject(odd) }, (_msg, fields) => void lines.push(fields));
+  assert.equal(lines[0]?.cause, undefined);
+  assert.ok(!JSON.stringify(lines).includes("postgres://"));
+});

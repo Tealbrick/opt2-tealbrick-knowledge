@@ -2,6 +2,15 @@
 
 All notable changes to the Knowledge mini app. Versions are assigned at merge (C340).
 
+## 0.1.33 (2026-11-05)
+
+C390 (knowledge#38), diagnostics: a memory area that cannot get its engine source now says why.
+
+- The GBrain helper logs `helper_listening` at start and one line per `sources add` (outcome, cause, duration; labels only, never CLI output). It closes the CLI's stdin and stops a CLI run after 25 s, below the SDK's 30 s, so a slow CLI is `502 source_add_failed cause=cli_timeout`, not `503 helper_unavailable`.
+- `area provisioning failed` logs a cause label when the error carries one (`details.cause`; the SDK adds it from miniapp-sdk 0.1.48).
+- Not in this version (next, with miniapp-sdk 0.1.48): tb-exec on `::`, and the backup of `gbrain-db` / `notebook-db`.
+- `upgradeFrom` `>=0.1.20 <=0.1.32`.
+
 ## 0.1.32 (2026-11-04)
 
 The final version of 0.1.32-dev.1 (C389): embeddings on a brain built without them are enabled at the brain's own width. No other change. `upgradeFrom` admits 0.1.32-dev.1.
