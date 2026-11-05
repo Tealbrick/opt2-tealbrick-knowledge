@@ -116,11 +116,14 @@ export class Areas {
         // The error code and HTTP status only: a helper message can carry the upstream response body (C296 review). C389: the
         // status tells the two `helper_unavailable` cases apart (503: the helper port does not answer; 502: the port answers, the
         // helper process behind it does not).
-        const e = error && typeof error === "object" ? (error as { code?: unknown; httpStatus?: unknown }) : {};
+        const e = error && typeof error === "object" ? (error as { code?: unknown; httpStatus?: unknown; details?: { cause?: unknown } }) : {};
+        // C390 (knowledge#38): the SDK's cause label (ECONNREFUSED, timeout, ENOTFOUND, cli_timeout, …), a label only
+        const cause = typeof e.details?.cause === "string" && /^[A-Za-z][A-Za-z0-9_]{1,47}$/u.test(e.details.cause) ? e.details.cause : null;
         log?.("area provisioning failed; retrying later", {
           area: area.id,
           error: "code" in e ? String(e.code).slice(0, 64) : "provision_failed",
           ...(typeof e.httpStatus === "number" ? { status: String(e.httpStatus) } : {}),
+          ...(cause ? { cause } : {}),
         });
       }
     }
