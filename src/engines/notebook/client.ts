@@ -327,11 +327,17 @@ export class NotebookClient {
     return { id, title: text(body.title), modelId: text(body.model_override), messages: asList(body.messages ?? []).map(parseMessage) };
   }
 
-  /** Execute one turn. `/api/chat/execute` returns the whole history: the answer is recovered by an exact diff. */
+  /**
+   * Execute one turn. `/api/chat/execute` returns the whole history: the answer is recovered by an exact diff.
+   * INC-20261106-02 (0.1.39): upstream puts `context` into the chat prompt as given. It must be the BUILT context (the
+   * sources' and notes' content from `/api/chat/context`, as Open Notebook's own UI sends it); before 0.1.39 Knowledge sent
+   * the selection map (ids -> "full content"), so the model saw ids only and never the notebook's text.
+   */
   async ask(notebookId: string, sessionId: string, modelId: string, message: string): Promise<ChatMessage> {
     const session = await this.getSession(notebookId, sessionId);
     if (session.modelId !== modelId) throw new NotebookError("model_policy_mismatch", "rejected");
-    const context = await this.contextConfig(notebookId);
+    const built = await this.context(notebookId);
+    const context = { sources: built.sources, notes: built.notes };
     const body = await this.request("POST", "/api/chat/execute", { session_id: session.id, message, context, model_override: modelId }, 300_000);
     if (!isObject(body) || body.session_id !== session.id || !Array.isArray(body.messages)) throw new NotebookError("response_mismatch", "ambiguous");
     const messages = body.messages.map(parseMessage);

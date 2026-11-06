@@ -30,8 +30,9 @@ const server = createServer(async (req, res) => {
     return res.end();
   }
   if (u.pathname === "/api/chat/context") {
+    // upstream: "full content" sources come back with their text (Source.get_context("long"))
     const ids = Object.keys(body.context_config.sources);
-    return json(200, { context: { sources: ids.map((id) => ({ id, insights: [] })), notes: [] }, token_count: 42, char_count: 100 });
+    return json(200, { context: { sources: ids.map((id) => ({ id, title: sources.get(id)?.title, full_text: sources.get(id)?.full_text, insights: [] })), notes: [] }, token_count: 42, char_count: 100 });
   }
   if (u.pathname.startsWith("/api/sources/") && req.method === "GET") {
     const id = decodeURIComponent(u.pathname.slice("/api/sources/".length));
@@ -47,7 +48,10 @@ const server = createServer(async (req, res) => {
   if (u.pathname === `/api/chat/sessions/${encodeURIComponent(session.id)}`) return json(200, session);
   if (u.pathname === "/api/chat/execute") {
     if (failExecute) return json(500, {});
-    session.messages.push({ id: "m-h", type: "human", content: body.message }, { id: "m-a", type: "ai", content: "grounded answer" });
+    // upstream puts `context` into the prompt as given: the fake model answers only from source text in it (INC-20261106-02)
+    const texts = (Array.isArray(body.context?.sources) ? body.context.sources : []).map((src: { full_text?: unknown }) => String(src.full_text ?? ""));
+    const month = texts.join(" ").match(/renews in (\w+)/u)?.[1];
+    session.messages.push({ id: "m-h", type: "human", content: body.message }, { id: "m-a", type: "ai", content: month ? `grounded answer: ${month}` : "Unknown" });
     return json(200, { session_id: session.id, messages: session.messages });
   }
   json(404, {});
@@ -69,7 +73,8 @@ test("text source add verifies membership; chat answer recovered by exact histor
   const id = await client.addTextSource(NB, "Acme notes", "Acme renews in May");
   assert.equal((await client.getSource(NB, id)).fullText, "Acme renews in May");
   const answer = await client.ask(NB, session.id, "model:m1", "When does Acme renew?");
-  assert.deepEqual(answer, { id: "m-a", type: "ai", content: "grounded answer" });
+  // INC-20261106-02: the answer comes from the source text (the built context), not from ids
+  assert.deepEqual(answer, { id: "m-a", type: "ai", content: "grounded answer: May" });
   await assert.rejects(client.getSession(OTHER, session.id), (e: unknown) => e instanceof NotebookError && e.code === "not_found");
 });
 
