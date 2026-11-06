@@ -19,7 +19,6 @@ import { createLibraryHandlers } from "./library.ts";
 import { fanOut, mergeRanked } from "./merge.ts";
 import { NARROWING_UNSUPPORTED, NARROWING_VIOLATION, type Narrowing, NarrowingError, readNarrowing, type TagFilter, tagsPass, untaggedPass } from "./narrowing.ts";
 import { isGovernedArea } from "./people.ts";
-import { createRelationshipHandlers } from "./relationship-ops.ts";
 import { type Citation, cleanTags, documentCitation, memoryDigest, StoreError } from "./store/documents.ts";
 import { createTbAccessHandlers, GUARDED_OPS } from "./tb-access.ts";
 
@@ -104,18 +103,6 @@ export const NARROWING_POLICY: Readonly<Record<string, "items" | "untagged" | "n
   // C380 Governance ops (app caller `fleet` only): no memory item is read or returned, so a tag narrowing has nothing to limit
   access_list: "none",
   access_revoke: "none",
-  // C392 R1 relationships: third-party people, proposals and history carry no memory tags and return no memory item
-  relationships_list: "none",
-  relationship_get: "none",
-  relationship_propose: "none",
-  relationships_overview: "none",
-  relationship_confirm: "none",
-  relationship_set: "none",
-  // C392 R2 forget: the scan reads and the forget hard-deletes documents of every area whatever their tags, so a tag
-  // narrowing cannot limit it (a hidden document would be named or purged): refused (`narrowing_unsupported`), stated here
-  // so nobody adds it to `none` later by mistake
-  relationship_forget_scan: "unsupported",
-  relationship_forget: "unsupported",
   // §18.4 c/e (not listed → unsupported): collection_delete (would remove hidden documents), library_* writes, engine tools
 };
 
@@ -1168,8 +1155,7 @@ export function createHandlers(knowledge: Knowledge, TbError: ErrorFactory) {
   const library = createLibraryHandlers({ knowledge, services, wrap, fail, notFound, recallAcross, readyArea, notebookOf, tagFilter });
   const access = createAccessHandlers({ services, wrap, fail });
   const tbAccess = createTbAccessHandlers({ services, fail });
-  const relationships = createRelationshipHandlers({ wrap, fail, services, knowledge });
-  const all = Object.fromEntries(Object.entries({ ...handlers, ...library, ...access, ...relationships, ...tbAccess }).map(([id, spec]) => [id, narrowed(id, spec)]));
+  const all = Object.fromEntries(Object.entries({ ...handlers, ...library, ...access, ...tbAccess }).map(([id, spec]) => [id, narrowed(id, spec)]));
   return { handlers: all, dynamic: { engine: engineDynamic }, events };
 }
 

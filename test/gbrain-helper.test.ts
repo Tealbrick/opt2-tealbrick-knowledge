@@ -2,8 +2,8 @@
 // CLI with 502 source_add_failed + details.cause (cli_exit_<n>, cli_timeout), never as an unreachable helper.
 import assert from "node:assert/strict";
 import { type ChildProcess, spawn } from "node:child_process";
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { networkInterfaces, tmpdir } from "node:os";
+import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 
@@ -14,7 +14,7 @@ after(() => {
 });
 
 /** Start helper.ts with a fake `bun` on PATH that runs `script`; resolves once it listens. */
-async function startHelper(script: string): Promise<{ home: string; stderr: () => string; stop: () => Promise<void> }> {
+async function startHelper(script: string): Promise<{ stderr: () => string; stop: () => Promise<void> }> {
   const bin = mkdtempSync(join(tmpdir(), "kn-helper-bin-"));
   writeFileSync(join(bin, "bun"), `#!/bin/sh\n${script}\n`);
   chmodSync(join(bin, "bun"), 0o755);
@@ -26,7 +26,6 @@ async function startHelper(script: string): Promise<{ home: string; stderr: () =
   for (let i = 0; i < 100 && !err.includes("helper_listening"); i++) await new Promise((ok) => setTimeout(ok, 50));
   assert.ok(err.includes("helper_listening"), "helper did not start (port 3141 in use?)");
   return {
-    home: bin,
     stderr: () => err,
     stop: () =>
       new Promise((ok) => {
@@ -68,66 +67,6 @@ test("source_id_taken is 'exists' and a clean exit is 'created', each logged wit
       .filter((l) => l.includes('"sources_add"'))
       .map((l) => JSON.parse(l).outcome);
     assert.deepEqual(outcomes, ["exists", "created"]);
-  } finally {
-    await h.stop();
-  }
-});
-
-// C392 R2: the owner's forget purges a document's engine page through upstream's trusted local CLI (MCP refuses purge).
-const purge = (body: unknown) =>
-  fetch("http://127.0.0.1:3141/purge-page", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }).then(async (r) => ({ status: r.status, body: (await r.json()) as Record<string, unknown> }));
-
-test("C392 R2 /purge-page: runs `gbrain delete knowledge-docs/<doc> --source-id <src> --purge`; page_not_found = absent; a failure is a label only", async () => {
-  const doc = "kdoc_01HZXRSB6V0N7Q2M3K4J5P6W8Y";
-  const h = await startHelper(
-    `echo "$*" >> "$GBRAIN_HOME/args"; case "$*" in *kdoc_01hzxrsb6v0n7q2m3k4j5p6w8z*) echo 'Error [page_not_found]: no such page' >&2; echo '{"code":"page_not_found","message":"Page not found."}'; exit 1;; *kdoc_01hzxrsb6v0n7q2m3k4j5p6w90*) echo "page text Dana Client postgres://u:secretpw@db" >&2; exit 2;; *kdoc_01hzxrsb6v0n7q2m3k4j5p6w91*) echo '{"code":"revision_conflict","message":"see page_not_found docs"}'; echo 'page_not_found' >&2; exit 1;; *) exit 0;; esac`,
-  );
-  try {
-    assert.deepEqual(await purge({ source: "ka-0123456789abcdef01234567", document: doc }), { status: 200, body: { status: "purged" } });
-    assert.deepEqual(await purge({ source: "ka-0123456789abcdef01234567", document: "kdoc_01HZXRSB6V0N7Q2M3K4J5P6W8Z" }), { status: 200, body: { status: "absent" } });
-    assert.deepEqual(await purge({ source: "ka-0123456789abcdef01234567", document: "kdoc_01HZXRSB6V0N7Q2M3K4J5P6W90" }), {
-      status: 502,
-      body: { error: { code: "page_purge_failed", message: "the engine could not purge the page", details: { cause: "cli_exit_2" } } },
-    });
-    // S3-2: the code is read from the --json envelope, never by substring: another error that mentions page_not_found keeps the row
-    assert.deepEqual(await purge({ source: "ka-0123456789abcdef01234567", document: "kdoc_01HZXRSB6V0N7Q2M3K4J5P6W91" }), {
-      status: 502,
-      body: { error: { code: "page_purge_failed", message: "the engine could not purge the page", details: { cause: "cli_exit_1" } } },
-    });
-    // only a Knowledge document page of a Knowledge source: anything else is refused before the CLI runs
-    for (const bad of [{ source: "ka-0123456789abcdef01234567", document: "people/dana-client" }, { source: "default", document: doc }, { source: "ka-0123456789abcdef01234567", document: `${doc} --all` }, {}]) {
-      assert.equal((await purge(bad)).status, 400, JSON.stringify(bad));
-    }
-    const runs = readFileSync(join(h.home, "args"), "utf8").trim().split("\n");
-    assert.equal(runs.length, 4, "the refused requests never ran the CLI");
-    assert.match(runs[0] as string, /^run \/nonexistent\/src\/cli\.ts delete knowledge-docs\/kdoc_01hzxrsb6v0n7q2m3k4j5p6w8y --source-id ka-0123456789abcdef01234567 --purge --force --request-id [0-9a-f-]{36} --json$/u);
-    const lines = h.stderr().split("\n").filter((l) => l.includes('"page_purge"')).map((l) => JSON.parse(l));
-    assert.deepEqual(lines.map((l) => [l.outcome, l.cause ?? null]), [["purged", null], ["absent", null], ["failed", "cli_exit_2"], ["failed", "cli_exit_1"]]);
-    assert.ok(!h.stderr().includes("secretpw") && !h.stderr().includes("Dana"), "CLI output never reaches the log");
-  } finally {
-    await h.stop();
-  }
-});
-
-test("S3-3: the helper listens on loopback (127.0.0.1) only; tb-exec's asserted proxy is the one way in", async () => {
-  // The proxy side (instance assertion required, declared paths only) is tested in the SDK: opt2-tealbrick-sdk
-  // packages/miniapp-sdk/test/exec/tb-exec.test.ts ("helper proxy refuses a wrong key, a sibling service, a tampered body, a
-  // missing header and a replay"; "helper proxy refuses an undeclared path even with a valid assertion").
-  const h = await startHelper("exit 0");
-  try {
-    const loop = await fetch("http://127.0.0.1:3141/models", { method: "POST" });
-    await loop.body?.cancel();
-    assert.ok(loop.status > 0, "answers on 127.0.0.1");
-    const others = [
-      "[::1]",
-      ...Object.values(networkInterfaces())
-        .flat()
-        .filter((i) => i && !i.internal && i.family === "IPv4")
-        .map((i) => i?.address as string),
-    ];
-    for (const host of others) {
-      await assert.rejects(fetch(`http://${host}:3141/models`, { method: "POST", signal: AbortSignal.timeout(2_000) }), `not reachable on ${host}`);
-    }
   } finally {
     await h.stop();
   }

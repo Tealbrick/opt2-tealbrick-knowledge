@@ -26,8 +26,6 @@ Knowledge gives agents memory and documents, with data in the customer's own dep
 - Engine tools are exposed 1:1 under a dynamic `engine` list, bounded by a pinned surface; anything else fails closed. Without an engine, recall degrades to keyword search (`degraded: true`).
 - Areas are grant scopes: one private memory area per agent and one shared company area.
 - With Governance 0.3.0+ (C373): a personal area per directory person, shared by that person's agents (their default write area), and a team area per team (read by members' agents). Another person's area is readable only when the owner lets a team read it (Access page). No directory = the two areas above only.
-- Relationships (C392 R1): agents keep, for their owner, the people the owner deals with (identities, type, cited history). Agents propose; the owner confirms. Stance and trust (`reply`, `draft_only`, `hold`) are set by the owner only; a new person starts at `hold`. No owner page yet.
-- Forget a person (C392 R2): the owner can forget one person for good: the person's relationship rows go (one log row with counts stays), the owner sees which Knowledge documents name the person (title, body, old revisions, comments, deleted documents; never the text) and may delete the ones they pick for good, with their memory engine pages. The report lists what cannot be reached yet (Foundry, LCM-X, backups, research sources, other GBrain pages). Agents cannot forget.
 - Companion apps (Observer) may write into the company area as app callers: `areas_list`, `document_create`, `document_update` only, never an agent's private area. The document page names the app ("Observer").
 - Auth, grants, receipts, settings and backups come from the Miniapp SDK. Knowledge has no own auth.
 
@@ -56,8 +54,8 @@ Run the person UI without a bridge: set `TB_STANDALONE=1` and `TB_DATA_DIR` to a
 | `src/engines/` | Engine adapters: one interface, one adapter per upstream engine (`gbrain/`, `notebook/`) |
 | `src/store/` | The canonical document store (SQLite) |
 | `src/projection.ts` | Projection outbox to the engine |
-| `migrations/` | 4 forward-only migrations. Never edit a released file. |
-| `skills/<id>/SKILL.md` | Agent skills declared in the manifest (how to work with the memory system, per engine; research; relationships) |
+| `migrations/` | 1 forward-only migration. Never edit a released file. |
+| `skills/<id>/SKILL.md` | Agent skills declared in the manifest (how to work with the memory system, per engine; research) |
 | `services/<id>/` | Companion service images (see below); `services/README.md` describes them |
 | `test/` | Unit tests (`pnpm test`) |
 | `conformance.start.ts` | Boots the app for `tb-conformance` |

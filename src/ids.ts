@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { ulid } from "@opt2-tealbrick/manifest";
 
 /** `<prefix>_<ULID>` (CORE §1 format; the manifest package's one ULID generator, 80 random bits per id). */
-export function newId(prefix: "kcol" | "kdoc" | "krev" | "kcom" | "klnk" | "rp" | "rpp" | "rph"): string {
+export function newId(prefix: "kcol" | "kdoc" | "krev" | "kcom" | "klnk"): string {
   return `${prefix}_${ulid()}`;
 }
 
