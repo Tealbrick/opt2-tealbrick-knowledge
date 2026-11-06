@@ -2,6 +2,15 @@
 
 All notable changes to the Knowledge mini app. Versions are assigned at merge (C340).
 
+## 0.1.39 (2026-11-06)
+
+INC-20261106-02, second part: research chat answered without the notebook's sources.
+
+- `research_ask` sent Open Notebook the context selection map (source and note ids mapped to "full content") as the chat context. Open Notebook puts that value into the chat prompt as given; its own UI first builds the real context with `POST /api/chat/context` and sends that. So the model saw only ids and answered "Unknown" to questions about the notebook (qa1 0.1.38, 2026-11-06 10:56Z: a canary source with a test word, answer "Unknown").
+- `ask` now builds the context with `/api/chat/context` (the existing `context()`: enumerated membership, re-checked after, 413/409 refusals unchanged) and sends its sources and notes. A test proves the execute body carries the sources' text (a fake model that answers only from the context), and an empty notebook still gets an answer.
+- A built context over 200,000 tokens (Open Notebook's count, else characters / 4) is refused before the model call with `research_context_too_large` (413), not a 502 from the model. The log line "research engine call failed" then carries counts only (sources, notes, chars, tokens), never content.
+- `upgradeFrom` `>=0.1.20 <=0.1.38`.
+
 ## 0.1.38 (2026-11-06)
 
 INC-20261106-02: research chat (`research_ask`) failed on every workspace with the OpenAI provider (`research_outcome_unknown`; Open Notebook `POST /api/chat/execute` 502).

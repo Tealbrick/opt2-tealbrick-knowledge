@@ -21,6 +21,11 @@ const ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/u;
 const REJECTED_POST_STATUS = new Set([400, 401, 403, 404, 413, 422]);
 const MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
 const MAX_CONTEXT_ITEMS = 100;
+/**
+ * INC-20261106-02 (0.1.39): the built context goes into one model prompt. Above this many tokens (Open Notebook's own count,
+ * else characters / 4) the ask is refused before the model call with `context_too_large` (413), not a 502 from the model.
+ */
+export const MAX_CONTEXT_TOKENS = 200_000;
 
 type Json = Record<string, unknown>;
 const isObject = (value: unknown): value is Json => value !== null && typeof value === "object" && !Array.isArray(value);
@@ -110,8 +115,8 @@ async function readPrefix(response: Response, limit: number): Promise<string> {
   return new TextDecoder().decode(all);
 }
 
-/** One failed research engine call: method, path without query, HTTP status (or null) and the cause code. */
-export type NotebookFailure = { method: string; path: string; status: number | string; cause: string };
+/** One failed research engine call: method, path without query, HTTP status (or null), the cause code, and counts (never content). */
+export type NotebookFailure = { method: string; path: string; status: number | string; cause: string; sources?: number; notes?: number; chars?: number; tokens?: number };
 
 export class NotebookClient {
   /** INC-20261106-02: called for every failed call (Knowledge logs it); never carries upstream text. */
@@ -327,11 +332,23 @@ export class NotebookClient {
     return { id, title: text(body.title), modelId: text(body.model_override), messages: asList(body.messages ?? []).map(parseMessage) };
   }
 
-  /** Execute one turn. `/api/chat/execute` returns the whole history: the answer is recovered by an exact diff. */
+  /**
+   * Execute one turn. `/api/chat/execute` returns the whole history: the answer is recovered by an exact diff.
+   * INC-20261106-02 (0.1.39): upstream puts `context` into the chat prompt as given. It must be the BUILT context (the
+   * sources' and notes' content from `/api/chat/context`, as Open Notebook's own UI sends it); before 0.1.39 Knowledge sent
+   * the selection map (ids -> "full content"), so the model saw ids only and never the notebook's text.
+   */
   async ask(notebookId: string, sessionId: string, modelId: string, message: string): Promise<ChatMessage> {
     const session = await this.getSession(notebookId, sessionId);
     if (session.modelId !== modelId) throw new NotebookError("model_policy_mismatch", "rejected");
-    const context = await this.contextConfig(notebookId);
+    const built = await this.context(notebookId);
+    const context = { sources: built.sources, notes: built.notes };
+    const chars = JSON.stringify(context).length;
+    const tokens = built.tokenCount ?? Math.ceil(chars / 4);
+    if (tokens > MAX_CONTEXT_TOKENS) {
+      this.onFailure?.({ method: "POST", path: "/api/chat/execute", status: 413, cause: "context_too_large", sources: built.sources.length, notes: built.notes.length, chars, tokens });
+      throw new NotebookError("context_too_large", "rejected", 413);
+    }
     const body = await this.request("POST", "/api/chat/execute", { session_id: session.id, message, context, model_override: modelId }, 300_000);
     if (!isObject(body) || body.session_id !== session.id || !Array.isArray(body.messages)) throw new NotebookError("response_mismatch", "ambiguous");
     const messages = body.messages.map(parseMessage);
