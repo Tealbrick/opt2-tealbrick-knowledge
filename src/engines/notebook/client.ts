@@ -21,6 +21,11 @@ const ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/u;
 const REJECTED_POST_STATUS = new Set([400, 401, 403, 404, 413, 422]);
 const MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
 const MAX_CONTEXT_ITEMS = 100;
+/**
+ * INC-20261106-02 (0.1.39): the built context goes into one model prompt. Above this many tokens (Open Notebook's own count,
+ * else characters / 4) the ask is refused before the model call with `context_too_large` (413), not a 502 from the model.
+ */
+export const MAX_CONTEXT_TOKENS = 200_000;
 
 type Json = Record<string, unknown>;
 const isObject = (value: unknown): value is Json => value !== null && typeof value === "object" && !Array.isArray(value);
@@ -110,8 +115,8 @@ async function readPrefix(response: Response, limit: number): Promise<string> {
   return new TextDecoder().decode(all);
 }
 
-/** One failed research engine call: method, path without query, HTTP status (or null) and the cause code. */
-export type NotebookFailure = { method: string; path: string; status: number | string; cause: string };
+/** One failed research engine call: method, path without query, HTTP status (or null), the cause code, and counts (never content). */
+export type NotebookFailure = { method: string; path: string; status: number | string; cause: string; sources?: number; notes?: number; chars?: number; tokens?: number };
 
 export class NotebookClient {
   /** INC-20261106-02: called for every failed call (Knowledge logs it); never carries upstream text. */
@@ -338,6 +343,12 @@ export class NotebookClient {
     if (session.modelId !== modelId) throw new NotebookError("model_policy_mismatch", "rejected");
     const built = await this.context(notebookId);
     const context = { sources: built.sources, notes: built.notes };
+    const chars = JSON.stringify(context).length;
+    const tokens = built.tokenCount ?? Math.ceil(chars / 4);
+    if (tokens > MAX_CONTEXT_TOKENS) {
+      this.onFailure?.({ method: "POST", path: "/api/chat/execute", status: 413, cause: "context_too_large", sources: built.sources.length, notes: built.notes.length, chars, tokens });
+      throw new NotebookError("context_too_large", "rejected", 413);
+    }
     const body = await this.request("POST", "/api/chat/execute", { session_id: session.id, message, context, model_override: modelId }, 300_000);
     if (!isObject(body) || body.session_id !== session.id || !Array.isArray(body.messages)) throw new NotebookError("response_mismatch", "ambiguous");
     const messages = body.messages.map(parseMessage);

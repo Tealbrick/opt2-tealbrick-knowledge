@@ -9,6 +9,10 @@ const OTHER = "notebook:n2";
 const sources = new Map<string, { notebook: string; title: string; full_text: string }>([["source:s2", { notebook: OTHER, title: "other", full_text: "secret" }]]);
 const session = { id: "chat_session:c1", notebook_id: NB, model_override: "model:m1", messages: [] as { id: string; type: string; content: string }[] };
 let failExecute = false;
+/** the last /api/chat/execute body (INC-20261106-02: it must carry source TEXT) */
+let lastExecute: Record<string, any> | null = null;
+/** /api/chat/context answers this token count when set */
+let contextTokens: number | null = null;
 let url = "";
 const server = createServer(async (req, res) => {
   const chunks: Buffer[] = [];
@@ -32,7 +36,7 @@ const server = createServer(async (req, res) => {
   if (u.pathname === "/api/chat/context") {
     // upstream: "full content" sources come back with their text (Source.get_context("long"))
     const ids = Object.keys(body.context_config.sources);
-    return json(200, { context: { sources: ids.map((id) => ({ id, title: sources.get(id)?.title, full_text: sources.get(id)?.full_text, insights: [] })), notes: [] }, token_count: 42, char_count: 100 });
+    return json(200, { context: { sources: ids.map((id) => ({ id, title: sources.get(id)?.title, full_text: sources.get(id)?.full_text, insights: [] })), notes: [] }, token_count: contextTokens ?? 42, char_count: 100 });
   }
   if (u.pathname.startsWith("/api/sources/") && req.method === "GET") {
     const id = decodeURIComponent(u.pathname.slice("/api/sources/".length));
@@ -48,9 +52,10 @@ const server = createServer(async (req, res) => {
   if (u.pathname === `/api/chat/sessions/${encodeURIComponent(session.id)}`) return json(200, session);
   if (u.pathname === "/api/chat/execute") {
     if (failExecute) return json(500, {});
+    lastExecute = body;
     // upstream puts `context` into the prompt as given: the fake model answers only from source text in it (INC-20261106-02)
     const texts = (Array.isArray(body.context?.sources) ? body.context.sources : []).map((src: { full_text?: unknown }) => String(src.full_text ?? ""));
-    const month = texts.join(" ").match(/renews in (\w+)/u)?.[1];
+    const month = [...texts.join(" ").matchAll(/renews in (\w+)/gu)].map((m) => m[1]).join(", ");
     session.messages.push({ id: "m-h", type: "human", content: body.message }, { id: "m-a", type: "ai", content: month ? `grounded answer: ${month}` : "Unknown" });
     return json(200, { session_id: session.id, messages: session.messages });
   }
@@ -96,4 +101,45 @@ test("context lists only the notebook's own sources; delete needs membership", a
   assert.ok(sources.has("source:s2"));
   await client.deleteSource(NB, id);
   assert.equal(sources.has(id), false);
+});
+
+test("INC-20261106-02: the execute body carries the sources' TEXT (the built context), not ids", async () => {
+  const client = new NotebookClient({ baseUrl: url, password: "pw" });
+  const id = await client.addTextSource(NB, "Kestrel notes", "Kestrel renews in October");
+  const answer = await client.ask(NB, session.id, "model:m1", "When does Kestrel renew?");
+  assert.match(answer.content, /October/u, "the fake model answers only from context text");
+  const sent = lastExecute?.context as { sources: { id: string; full_text?: string }[]; notes: unknown[] };
+  assert.ok(Array.isArray(sent.sources) && Array.isArray(sent.notes), "built context: lists of items, not the id -> mode map");
+  assert.equal(sent.sources.find((item) => item.id === id)?.full_text, "Kestrel renews in October");
+  assert.ok(!JSON.stringify(sent).includes("full content"), "no selection-map values");
+  await client.deleteSource(NB, id);
+});
+
+test("INC-20261106-02: a context too large for the model is refused before the model call (413 context_too_large), counts logged only", async () => {
+  const client = new NotebookClient({ baseUrl: url, password: "pw" });
+  const seen: Record<string, unknown>[] = [];
+  client.onFailure = (failure) => seen.push(failure);
+  const id = await client.addTextSource(NB, "Huge", "secret-ish body text");
+  contextTokens = 250_000;
+  lastExecute = null;
+  try {
+    await assert.rejects(client.ask(NB, session.id, "model:m1", "q"), (e: unknown) => e instanceof NotebookError && e.code === "context_too_large" && e.status === 413 && e.disposition === "rejected");
+    assert.equal(lastExecute, null, "no model call");
+    assert.equal(seen.length, 1);
+    assert.deepEqual(Object.keys(seen[0] ?? {}).sort(), ["cause", "chars", "method", "notes", "path", "sources", "status", "tokens"]);
+    assert.equal(seen[0]?.cause, "context_too_large");
+    assert.equal(seen[0]?.tokens, 250_000);
+    assert.ok(!JSON.stringify(seen).includes("secret-ish"), "never content");
+  } finally {
+    contextTokens = null;
+    await client.deleteSource(NB, id);
+  }
+});
+
+test("INC-20261106-02: research ask on an EMPTY notebook still works", async () => {
+  const client = new NotebookClient({ baseUrl: url, password: "pw" });
+  for (const source of await client.listSources(NB)) await client.deleteSource(NB, source.id);
+  const answer = await client.ask(NB, session.id, "model:m1", "Anything?");
+  assert.equal(answer.type, "ai");
+  assert.deepEqual(lastExecute?.context, { sources: [], notes: [] });
 });
