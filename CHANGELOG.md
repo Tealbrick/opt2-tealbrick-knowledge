@@ -2,6 +2,17 @@
 
 All notable changes to the Knowledge mini app. Versions are assigned at merge (C340).
 
+## Unreleased
+
+C392 R1: the relationships store (server, manifest, skill, tests). No owner page yet (follow-up R1-UI).
+
+- Migration `0004_relationships.sql` (expand only): `kn_rel_people`, `kn_rel_identities`, `kn_relationships`, `kn_rel_proposals`, `kn_rel_history` and the append-only `kn_rel_log`. A third-party person belongs to one operator (a Governance person who owns agents); every child row names the pair (person, operator) in its foreign key.
+- Agent ops `relationships_list`, `relationship_get` (by person id or identity) and `relationship_propose` (scopeType `area`, like `remember`). The operator is the agent's owner in the Governance directory copy; no copy or no owner answers 409 `relationships_unavailable`. Another operator's person answers 404 `person_unknown`.
+- Agents propose type, identities and label (pending); history (contact, promise, topic) is written at once. Every proposal needs a citation {source, ref, at}. The type that reads back is the owner-confirmed one; a pending type shows as `proposedType`. A new person starts with type `unknown` and trust `hold`.
+- Person ops `relationships_overview`, `relationship_confirm` and `relationship_set`. Only the owner sets stance and trust; the agent input schemas have no such field (`additionalProperties: false`).
+- Identities are normalized with the canonical handle rule of `@opt2-tealbrick/manifest` (`normalizeHandle`) for email, Slack, Buzz and Telegram; phone = `+` and 6 to 15 digits. One identity names at most one person per operator.
+- Skill `knowledge-relationships`. Receipts and `kn_rel_log` carry ids, field names and enum values only.
+
 ## 0.1.34 (2026-11-06)
 
 C390 (knowledge#38), the second half: the GBrain and notebook databases are in every backup, and tb-exec listens on IPv4 and IPv6.
