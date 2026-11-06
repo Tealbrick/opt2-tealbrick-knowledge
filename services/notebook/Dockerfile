@@ -13,5 +13,9 @@ COPY --from=tb /usr/local/bin/node /usr/local/bin/node
 COPY --from=tb /opt/tb /opt/tb
 COPY services/notebook/entrypoint.sh /opt/knowledge/entrypoint.sh
 RUN chmod 0755 /opt/knowledge/entrypoint.sh
+# INC-20261104-01 (0.1.35): upstream binds the API to IPv4 only (API_HOST=0.0.0.0), unreachable on an IPv6-only Railway
+# private network. uvicorn on "::" listens on IPv6 only (asyncio sets IPV6_V6ONLY); its only client is the Knowledge app
+# (Node fetch falls back across address families), and Railway private networks are IPv6-only or dual-stack, never IPv4-only.
+ENV API_HOST=::
 ENTRYPOINT ["node", "/opt/tb/node_modules/@opt2-tealbrick/miniapp-sdk/dist/exec/cli.js", "--", "/opt/knowledge/entrypoint.sh"]
 CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
