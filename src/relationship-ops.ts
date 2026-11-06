@@ -5,6 +5,8 @@
 // The agent ops declare scopeType `area` like every other Knowledge agent op (mirrors `remember`) with no target instance:
 // the SDK checks the agent's best area access, so an agent the owner left without write access anywhere cannot propose.
 // Receipts (`redact`) carry ids, field names and counts only: never an identity value, a label, a stance or history text.
+// R1 hardening (C392): outputs carry `effectiveTrust` + `trustBasis` (F5) and every agent- or third-party-supplied text under
+// `observed: {untrusted: true}` (F4); the agent ops refuse a tag narrowing (F6, NARROWING_POLICY `unsupported`).
 // C392 R2: `relationship_forget_scan` (read) and `relationship_forget` (destructive), owner only (src/forget.ts).
 import { readFileSync } from "node:fs";
 import type { Db, HandlerSpec, Json, OpContext } from "@opt2-tealbrick/spec/sdk";
@@ -60,7 +62,7 @@ export const NOT_POSSIBLE_YET: readonly { store: string; reason: string }[] = [
   { store: "deleted_rows", reason: "Deleted rows can stay in free database pages and write-ahead logs (Knowledge SQLite, GBrain Postgres) until the database reuses or vacuums them." },
 ];
 
-const fieldsOf = (input: In) => ["type", "identities", "label", "stance", "trust"].filter((k) => input[k] !== undefined);
+const fieldsOf = (input: In) => ["type", "identities", "label", "stance", "trust", "verifyIdentities"].filter((k) => input[k] !== undefined);
 
 /** S3-5: at most this many engine pages are purged inside the forget call; the rest stay queued for the drain timer. */
 export const INLINE_PURGE_LIMIT = 10;
@@ -165,16 +167,21 @@ export function createRelationshipHandlers(d: RelationshipDeps): Record<string, 
     },
 
     relationship_confirm: {
-      redact: (input) => {
+      redact: (input, output) => {
         const n = (v: unknown) => (Array.isArray(v) ? v.length : 0);
-        return `relationship proposals of ${String(input.operator).slice(0, 40)}: ${n(input.accept)} accepted, ${n(input.reject)} rejected`;
+        const out = output as { decided?: { state?: string }[]; conflicts?: unknown[] } | undefined;
+        const who = `relationship proposals of ${String(input.operator).slice(0, 40)}`;
+        if (!Array.isArray(out?.decided)) return `${who}: ${n(input.accept)} to accept, ${n(input.reject)} to reject`;
+        const accepted = out.decided.filter((d) => d.state === "accepted").length;
+        return `${who}: ${accepted} accepted, ${out.decided.length - accepted} rejected, ${n(out.conflicts)} conflicts`;
       },
       run: (input, ctx) =>
         run(() => {
           ownerOnly(ctx);
           const operator = String(input.operator);
           requireListedOperator(ctx.db, operator);
-          return { operator, decided: decideProposals(ctx.db, operator, ctx.caller.id, { accept: input.accept, reject: input.reject }) };
+          const { decided, conflicts } = decideProposals(ctx.db, operator, ctx.caller.id, { accept: input.accept, reject: input.reject });
+          return { operator, decided, conflicts };
         }),
     },
 
@@ -185,7 +192,7 @@ export function createRelationshipHandlers(d: RelationshipDeps): Record<string, 
           ownerOnly(ctx);
           const operator = String(input.operator);
           requireListedOperator(ctx.db, operator);
-          const { relationship, changed } = setRelationship(ctx.db, operator, ctx.caller.id, { person: String(input.person), type: input.type, stance: input.stance, trust: input.trust, label: input.label });
+          const { relationship, changed } = setRelationship(ctx.db, operator, ctx.caller.id, { person: String(input.person), type: input.type, stance: input.stance, trust: input.trust, label: input.label, verifyIdentities: input.verifyIdentities });
           return { operator, relationship, changed };
         }),
     },
