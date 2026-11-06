@@ -18,11 +18,17 @@ export class GBrainError extends Error {
   readonly status: number | null;
   /** allowlisted upstream code (tool errors) or null */
   readonly code: string | null;
-  constructor(kind: GBrainErrorKind, message: string, opts: { status?: number; code?: string | null } = {}) {
+  /**
+   * Upstream's error code as sent (a vocabulary identifier such as `revision_required`, never text), or null. For Knowledge's
+   * own decisions and logs only (projection, INC-20261106-01); it never leaves Knowledge (outward answers use `code`).
+   */
+  readonly upstreamCode: string | null;
+  constructor(kind: GBrainErrorKind, message: string, opts: { status?: number; code?: string | null; upstreamCode?: string | null } = {}) {
     super(message);
     this.kind = kind;
     this.status = opts.status ?? null;
     this.code = opts.code ?? null;
+    this.upstreamCode = opts.upstreamCode ?? opts.code ?? null;
   }
 }
 
@@ -133,7 +139,8 @@ function resultData(message: unknown, id: string): ToolAnswer {
       code = undefined;
     }
     const safe = typeof code === "string" && SAFE_TOOL_ERRORS.has(code) ? code : null;
-    throw new GBrainError("tool", `GBrain tool execution failed${safe ? `: ${safe}` : ""}`, { code: safe });
+    const upstreamCode = typeof code === "string" && VOCAB.test(code) ? code : null;
+    throw new GBrainError("tool", `GBrain tool execution failed${safe ? `: ${safe}` : ""}`, { code: safe, upstreamCode });
   }
   const text = Array.isArray(result.content) ? result.content.filter((item): item is Record<string, unknown> => isRecord(item) && item.type === "text") : [];
   if (text.some((item) => typeof item.text !== "string")) throw new GBrainError("protocol", "invalid GBrain text content");

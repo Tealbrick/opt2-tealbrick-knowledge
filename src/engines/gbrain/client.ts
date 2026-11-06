@@ -3,7 +3,7 @@
 // upstream admin API. Every MCP call carries a token of a client bound to exactly ONE GBrain source
 // (one Knowledge area), so upstream itself enforces source isolation. One client per (source, agent)
 // keeps upstream ownership (forget) and delta cursors per agent.
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { callToolAnswer, GBrainError, listTools, readJsonResource, type ToolAnswer } from "./transport.ts";
 
 /** Upstream source id grammar (≤ 32 chars). */
@@ -38,6 +38,34 @@ export function deterministicRequestId(...parts: readonly string[]): string {
   const hex = createHash("sha256").update(JSON.stringify(parts)).digest("hex");
   const variant = ((Number.parseInt(hex.slice(16, 18), 16) & 0x3f) | 0x80).toString(16);
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-${variant}${hex.slice(18, 20)}-${hex.slice(20, 32)}`;
+}
+
+/** The slug GBrain stores for a page: upstream lower-cases every slug on write and reads the exact slug (INC-20261106-01). */
+export function canonicalPageSlug(slug: string): string {
+  return slug.toLowerCase();
+}
+
+/** A write refused on its revision precondition: read the revision again and retry once. */
+function revisionRetry(error: unknown): boolean {
+  return error instanceof GBrainError && (error.upstreamCode === "revision_conflict" || error.upstreamCode === "revision_required");
+}
+
+/** Refusals after which putCanonicalPage reads the page again (revision, content marker, timeline) and retries. */
+const REREAD_CODES: ReadonlySet<string> = new Set(["revision_conflict", "revision_required", "timeline_rows_would_be_removed"]);
+const CONTENT_MARKER = "knowledge_content_sha256";
+/** GBrain's Timeline section heading (timeline-omission.ts at the pin): `## Timeline` or `## History`. */
+const TIMELINE_HEADING = /^##\s+(timeline|history)\b/imu;
+
+/** The document with `knowledge_content_sha256: "<hex>"` (quoted: YAML never reads it as a number) as its first frontmatter key (content without frontmatter: unchanged). */
+export function withContentMarker(content: string, hash: string): string {
+  return content.startsWith("---\n") ? `---\n${CONTENT_MARKER}: ${JSON.stringify(hash)}\n${content.slice(4)}` : content;
+}
+
+/** The marker of a page read with get_page (frontmatter object), or null. */
+export function contentMarkerOf(page: Record<string, unknown>): string | null {
+  const frontmatter = page.frontmatter;
+  const value = frontmatter && typeof frontmatter === "object" ? (frontmatter as Record<string, unknown>)[CONTENT_MARKER] : undefined;
+  return typeof value === "string" ? value : null;
 }
 
 export interface GBrainClientOptions {
@@ -338,36 +366,90 @@ export class GBrainClient {
     throw new GBrainServiceError("gbrain_admin_unavailable");
   }
 
-  /** Knowledge owns its projected pages: write against the current revision with a deterministic request id. */
+  /**
+   * Knowledge owns its projected pages: write the document against the page's current revision. INC-20261106-01:
+   * - The slug is the lower-case form GBrain stores (validateSlug lower-cases on write, get_page reads the exact slug): with
+   *   the upper-case ULID get_page answered page_not_found, put_page went out without `expected_revision`, and GBrain
+   *   (>= 0.60.162) refused every update of an existing page with `revision_required`.
+   * - GBrain keeps a refused write under its request id and replays the refusal for the same arguments. The id was derived
+   *   from slug, content and revision, so every retry of a refused write got the stored refusal back, forever. Each try
+   *   now sends a fresh id. `expected_revision` keeps a repeated write safe: a stale write is a conflict, never an overwrite
+   *   of newer text (which is why `allow_shrink` is sent: a shorter document is an intended edit, not a partial read).
+   * - The page frontmatter carries `knowledge_content_sha256` of the document. After a conflict (or a refusal) the page is
+   *   read again: when it already holds this content (a write whose answer was lost, then landed), the write is done.
+   * - Agents may add timeline entries to the page (gb_add_timeline_entry). A document without a Timeline section would
+   *   delete them, and GBrain refuses that (`timeline_rows_would_be_removed`): the page's current Timeline section is kept
+   *   (appended) and the write is sent again. `drop_timeline` is never sent.
+   * At most 3 tries per call; then the error goes to the projector (logged, backed off, capped).
+   */
   async putCanonicalPage(sourceId: string, slug: string, content: string): Promise<void> {
-    const contentHash = createHash("sha256").update(content).digest("hex");
-    for (let attempt = 0; attempt < 2; attempt++) {
-      const revision = await this.pageRevision(sourceId, slug);
+    const pageSlug = canonicalPageSlug(slug);
+    const hash = createHash("sha256").update(content).digest("hex");
+    const marked = withContentMarker(content, hash);
+    let revision = await this.pageRevision(sourceId, pageSlug);
+    let timeline: string | null = null;
+    for (let tryNo = 0; ; tryNo++) {
       try {
         await this.call(sourceId, "put_page", {
-          slug,
-          content,
+          slug: pageSlug,
+          content: timeline ? `${marked.trimEnd()}\n\n${timeline}\n` : marked,
           ...(revision ? { expected_revision: revision } : {}),
-          request_id: deterministicRequestId("put_page", sourceId, slug, contentHash, revision ?? "create"),
+          allow_shrink: true,
+          request_id: randomUUID(),
         }, { timeoutMs: 300_000 });
         return;
       } catch (error) {
-        if (attempt === 0 && error instanceof GBrainError && error.code === "revision_conflict") continue;
-        throw error;
+        const code = error instanceof GBrainError ? error.upstreamCode : null;
+        if (tryNo >= 2 || !code || !REREAD_CODES.has(code)) throw error;
+        const page = await this.readPage(sourceId, pageSlug);
+        if (page && contentMarkerOf(page) === hash) return; // a lost answer: the page already holds this document
+        revision = page && typeof page.revision === "string" ? page.revision : null;
+        if (code === "timeline_rows_would_be_removed") {
+          // Only a document WITHOUT its own Timeline section gets the page's section appended (never a second section; with
+          // its own section the refusal goes to the projector: logged, backed off, capped). GBrain's `timeline` field is
+          // the whole section with its heading (seen on qa1: "## Timeline\n\n- **2026-01-05** | …").
+          const own = TIMELINE_HEADING.test(content);
+          timeline = !own && page && typeof page.timeline === "string" && TIMELINE_HEADING.test(page.timeline) ? page.timeline.trim() : null;
+          if (!timeline) throw error;
+        }
       }
     }
   }
 
   async deleteCanonicalPage(sourceId: string, slug: string): Promise<"deleted" | "absent"> {
-    const revision = await this.pageRevision(sourceId, slug);
-    if (!revision) return "absent";
-    await this.call(sourceId, "delete_page", { slug, expected_revision: revision, request_id: deterministicRequestId("delete_page", sourceId, slug, revision) });
-    return "deleted";
+    const pageSlug = canonicalPageSlug(slug);
+    for (let tryNo = 0; tryNo < 2; tryNo++) {
+      const revision = await this.pageRevision(sourceId, pageSlug);
+      if (!revision) return "absent";
+      try {
+        await this.call(sourceId, "delete_page", {
+          slug: pageSlug,
+          expected_revision: revision,
+          request_id: randomUUID(),
+        });
+        return "deleted";
+      } catch (error) {
+        if (tryNo === 0 && revisionRetry(error)) continue;
+        throw error;
+      }
+    }
+    return "absent";
+  }
+
+  /** The page with its content, frontmatter and timeline (null when there is none). */
+  private async readPage(sourceId: string, slug: string): Promise<Record<string, unknown> | null> {
+    try {
+      const page = (await this.call(sourceId, "get_page", { slug, include_content: true })) as unknown;
+      return page && typeof page === "object" && !Array.isArray(page) ? (page as Record<string, unknown>) : null;
+    } catch (error) {
+      if (error instanceof GBrainError && error.code === "page_not_found") return null;
+      throw error;
+    }
   }
 
   private async pageRevision(sourceId: string, slug: string): Promise<string | null> {
     try {
-      const page = (await this.call(sourceId, "get_page", { slug, include_content: true })) as Record<string, unknown> | null;
+      const page = (await this.call(sourceId, "get_page", { slug, include_content: false })) as Record<string, unknown> | null;
       return page && typeof page.revision === "string" ? page.revision : null;
     } catch (error) {
       if (error instanceof GBrainError && error.code === "page_not_found") return null;

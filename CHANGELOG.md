@@ -2,6 +2,20 @@
 
 All notable changes to the Knowledge mini app. Versions are assigned at merge (C340).
 
+## 0.1.37 (2026-11-06)
+
+INC-20261106-01: edits of documents never reached the memory engine (on every version with the GBrain 0.60.424 pin, 0.1.26+). Reproduced on qa1 with 0.1.36.
+
+- GBrain stores every page slug in lower case and `get_page` reads the exact slug. Knowledge read the page revision with the upper-case document id (`knowledge-docs/kdoc_<ULID>`), so the read missed every existing page. The write then went out without `expected_revision`, and GBrain (since 0.60.162) refuses such a write to an existing page with `revision_required`. Creates still worked; every update and every delete did not. Recall by meaning answered with the first version of each edited document, and deleted documents stayed in the engine (recall already left them out). Reads, writes and deletes now use the lower-case slug.
+- GBrain keeps a refused write under its request id and replays the refusal for the same arguments. The id was derived from slug, content and revision, so each retry got the stored refusal back, forever. Each write try now sends a fresh id; `expected_revision` keeps a repeated write safe (a stale write is a conflict, never an overwrite of newer text).
+- The page frontmatter carries `knowledge_content_sha256` (the document's hash). After a conflict the page is read again: when it already holds this document (a write whose answer was lost and that landed later), the write is done. No third write, no loop.
+- Writes send `allow_shrink: true` (a shorter document is an intended edit; always with `expected_revision`). `drop_timeline` is never sent: agents may add timeline entries to a document's page (`gb_add_timeline_entry`); when GBrain refuses an edit that would delete them (`timeline_rows_would_be_removed`), the page's Timeline section is kept and the edit is written again. Links agents added are kept by GBrain (its put reconciles only links derived from the content).
+- A failed projection was silent. Each failed attempt now logs "projection failed" (and "projection gave up" after 12) with area, document id, attempt, boot retry, state, error code and the next try. It never logs content. The stored `last_error` starts with the code.
+- The boot retry of failed rows ran 12 more writes per row on every boot. It now stops after 3 boots per row. The count is the row's `attempts` (kept across the boot retry, reset by a success or a new edit), so there is no schema change: a rollback to 0.1.36 opens the same database.
+- One-time catch-up at the first boot (kn_state `engine_catchup`): a delete is queued for every deleted document, so pages left in the engine before 0.1.37 are removed (idempotent: a missing page is one read). It goes through the one paced drain (20 rows per pass, every 30 s, the same attempt cap), with the failed rows the boot retry re-queued. Logs "engine catch-up queued" and "engine catch-up done" with counts only (requeued, ok, failed, pending).
+- One projection drain runs per database, also when the services are rebuilt during a pass (two passes wrote the same rows twice). A drain asked for during a pass runs one more pass after it.
+- `upgradeFrom` `>=0.1.20 <=0.1.36`.
+
 ## 0.1.36 (2026-11-06)
 
 INC-20261104-01, second step. 0.1.35 never reached stable: its update on qa1 rolled back.

@@ -135,9 +135,15 @@ export interface FakeGBrain {
   url: string;
   adminToken: string;
   sources: Set<string>;
-  /** source → slug → page */
-  pages: Map<string, Map<string, { content: string; revision: string }>>;
+  /** source → slug → page (`timeline` = the page's Timeline section, as upstream returns it) */
+  pages: Map<string, Map<string, { content: string; revision: string; timeline?: string }>>;
   calls: { source: string; name: string; args: Record<string, unknown> }[];
+  /**
+   * Intercept a put_page: `error` refuses it with that upstream code (stored under its request id like upstream); with
+   * `commit: true` the write lands first and the answer is still that error (a write whose answer was lost); `before` runs
+   * first (e.g. lands an earlier pending write). Undefined = the normal write.
+   */
+  putHook?: (source: string, slug: string, args: Record<string, unknown>) => { error?: string; commit?: boolean; before?: () => void } | undefined;
   /** override a tool's answer: return undefined to fall through */
   answer?: (source: string, name: string, args: Record<string, unknown>) => unknown;
   /**
@@ -161,11 +167,29 @@ export interface FakeGBrain {
 /** A real upstream GBrain 0.60.57.0 answer to `query` on a keyless brain over HTTP (captured from the pinned upstream). */
 export const UPSTREAM_DEGRADED_QUERY: unknown = JSON.parse(readFileSync(new URL("./fixtures/gbrain-replies/query-degraded-0.60.57.0.json", import.meta.url), "utf8"));
 
+/** The frontmatter of a page as upstream returns it (flat `key: value` lines; JSON values parsed). */
+function frontmatterOf(content: string): Record<string, unknown> {
+  const match = /^---\n([\s\S]*?)\n---\n/u.exec(content);
+  const out: Record<string, unknown> = {};
+  for (const line of match?.[1]?.split("\n") ?? []) {
+    const at = line.indexOf(": ");
+    if (at < 1) continue;
+    const raw = line.slice(at + 2);
+    try {
+      out[line.slice(0, at)] = JSON.parse(raw);
+    } catch {
+      out[line.slice(0, at)] = raw;
+    }
+  }
+  return out;
+}
+
 /** A small stand-in for `gbrain serve --http`: admin login, client registration, client_credentials tokens, stateless MCP. */
 export async function fakeGBrain(): Promise<FakeGBrain> {
   const adminToken = "a".repeat(40);
   const clients = new Map<string, { secret: string; source: string }>();
   const tokens = new Map<string, string>();
+  const requests = new Map<string, { digest: string; outcome: { error: string } | { ok: true } }>();
   let counter = 0;
   const state: Omit<FakeGBrain, "url" | "close"> = { adminToken, sources: new Set(), pages: new Map(), calls: [], facts: new Map() };
   const server: Server = createServer(async (req, res) => {
@@ -244,21 +268,54 @@ export async function fakeGBrain(): Promise<FakeGBrain> {
       if (custom !== undefined) return reply({ content: [{ type: "text", text: JSON.stringify(custom) }] });
       const pages = state.pages.get(source) ?? new Map();
       state.pages.set(source, pages);
-      // Upstream validateSlug lower-cases every slug (gbrain src/core/utils.ts at the pin); the fake does the same.
+      // Upstream validateSlug lower-cases every slug on write (gbrain src/core/utils.ts at the pin), while get_page reads the
+      // exact slug: an upper-case read misses the stored page (INC-20261106-01, proven on qa1). The fake does the same.
       const slug = String(args.slug ?? "").toLowerCase();
+      // Upstream keeps each write's outcome under its request id and replays it for the same arguments
+      // (persistence_requests); other arguments under a used id are refused with `idempotency_conflict`.
+      type Outcome = { error: string } | { ok: true };
+      const ledgered = (outcome: () => Outcome) => {
+        const id = typeof args.request_id === "string" ? args.request_id : null;
+        const { request_id: _id, ...intent } = args;
+        const digest = JSON.stringify([name, source, intent]);
+        const prior = id ? requests.get(id) : undefined;
+        const result: Outcome = prior ? (prior.digest === digest ? prior.outcome : { error: "idempotency_conflict" }) : outcome();
+        if (id && !prior) requests.set(id, { digest, outcome: result });
+        return "error" in result ? toolError(result.error) : reply({ content: [{ type: "text", text: JSON.stringify({ ok: true }) }] });
+      };
       if (name === "get_page") {
-        const page = pages.get(slug);
-        return page ? reply({ content: [{ type: "text", text: JSON.stringify({ slug, revision: page.revision, content: page.content }) }] }) : toolError("page_not_found");
+        const page = pages.get(String(args.slug ?? ""));
+        return page
+          ? reply({ content: [{ type: "text", text: JSON.stringify({ slug, revision: page.revision, content: page.content, frontmatter: frontmatterOf(page.content), timeline: page.timeline ?? "" }) }] })
+          : toolError("page_not_found");
       }
       if (name === "put_page") {
-        const page = pages.get(slug);
-        if (page && args.expected_revision !== page.revision) return toolError("revision_conflict");
-        pages.set(slug, { content: String(args.content), revision: `r${++counter}` });
-        return reply({ content: [{ type: "text", text: JSON.stringify({ ok: true }) }] });
+        return ledgered(() => {
+          const page = pages.get(slug);
+          // GBrain >= 0.60.162: an existing page without expected_revision is `revision_required`; a stale one `revision_conflict`
+          if (page && args.expected_revision === undefined) return { error: "revision_required" };
+          if (page && args.expected_revision !== page.revision) return { error: "revision_conflict" };
+          const hook = state.putHook?.(source, slug, args);
+          hook?.before?.();
+          const current = pages.get(slug);
+          if (current !== page && current && args.expected_revision !== current.revision) return { error: "revision_conflict" };
+          if (hook?.error && !hook.commit) return { error: hook.error };
+          const content = String(args.content);
+          const heading = /^##\s+(timeline|history)\b/imu.exec(content);
+          // upstream: a remote put without a Timeline section that would delete the page's dated rows is refused
+          if (current?.timeline && !heading) return { error: "timeline_rows_would_be_removed" };
+          pages.set(slug, { content, revision: `r${++counter}`, ...(heading ? { timeline: content.slice(heading.index).trim() } : {}) });
+          return hook?.error ? { error: hook.error } : { ok: true };
+        });
       }
       if (name === "delete_page") {
-        pages.delete(slug);
-        return reply({ content: [{ type: "text", text: JSON.stringify({ ok: true }) }] });
+        return ledgered(() => {
+          const page = pages.get(slug);
+          if (!page) return { error: "page_not_found" };
+          if (args.expected_revision !== page.revision) return { error: args.expected_revision === undefined ? "revision_required" : "revision_conflict" };
+          pages.delete(slug);
+          return { ok: true };
+        });
       }
       if (name === "context_pack") {
         // MEMORY_VERBS v1 shape (cards, facts, open threads); `entities` is a comma-separated string upstream
