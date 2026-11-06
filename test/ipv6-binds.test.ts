@@ -4,7 +4,8 @@
 // same class of bind broke the GBrain helper before miniapp-sdk 0.1.48 (knowledge#38).
 // Evidence (2026-11-06, the pinned SurrealDB v2.6.5 image): `--bind 0.0.0.0:8000` → ::1 ECONNREFUSED; `--bind [::]:8000`
 // → 127.0.0.1 and ::1 both connect (dual-stack, so the backup dump on 127.0.0.1 keeps working). uvicorn on "::" is IPv6
-// only (asyncio sets IPV6_V6ONLY); its one client, the Knowledge app, uses Node fetch, which falls back across families.
+// only (asyncio sets IPV6_V6ONLY), which failed Railway's IPv4 health check in 0.1.35: the API keeps its IPv4 bind and
+// services/notebook/ipv6-forward.ts adds the IPv6 listener (0.1.36).
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { test } from "node:test";
@@ -35,8 +36,12 @@ test("INC-20261104-01: notebook-db (SurrealDB) binds [::]:8000; the backup dump 
   assert.match(read("notebook-db/notebook-db-dump"), /--endpoint "http:\/\/127\.0\.0\.1:8000"/u);
 });
 
-test("INC-20261104-01: the Open Notebook API binds :: (API_HOST), not the upstream default 0.0.0.0", () => {
-  assert.match(code(read("notebook/Dockerfile")), /^ENV API_HOST=::$/mu);
+test("INC-20261104-01 (0.1.36): the Open Notebook API keeps upstream's IPv4 bind (Railway's IPv4 health check) and gets an IPv6 forwarder", () => {
+  const docker = code(read("notebook/Dockerfile"));
+  // 0.1.35 set API_HOST=:: : uvicorn then listens on IPv6 only and Railway's IPv4 health check failed the deploy
+  assert.doesNotMatch(docker, /API_HOST/u);
+  assert.match(docker, /COPY services\/notebook\/entrypoint\.sh services\/notebook\/ipv6-forward\.ts \/opt\/knowledge\//u);
+  assert.match(code(read("notebook/entrypoint.sh")), /while :; do node \/opt\/knowledge\/ipv6-forward\.ts; sleep 1; done\) &\nexec /u);
 });
 
 test("INC-20261104-01: gbrain serve binds :: by default (boot.ts)", () => {

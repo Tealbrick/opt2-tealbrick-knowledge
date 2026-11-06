@@ -2,6 +2,15 @@
 
 All notable changes to the Knowledge mini app. Versions are assigned at merge (C340).
 
+## 0.1.36 (2026-11-06)
+
+INC-20261104-01, second step. 0.1.35 never reached stable: its update on qa1 rolled back.
+
+- 0.1.35 set the Open Notebook API to `API_HOST=::`. uvicorn then listens on IPv6 only (asyncio sets `IPV6_V6ONLY`), Railway's health check probes over IPv4, and Railway failed the notebook deploy after 300 s. The API is back on upstream's IPv4 bind.
+- New `services/notebook/ipv6-forward.ts` (run by the image's Node, restarted if it exits) listens on `[::]:5055` with `IPV6_V6ONLY` and pipes each connection to `127.0.0.1:5055`. An IPv4 socket and an IPv6-only socket share the port (proven in the pinned image). So the API answers on IPv4 (health check) and on IPv6 (an IPv6-only Railway private network).
+- notebook-db keeps 0.1.35's `[::]:8000` (proven live on qa1: "Started web server on [::]:8000", backup dump exitCode 0).
+- `upgradeFrom` `>=0.1.20 <=0.1.35`.
+
 ## 0.1.35 (2026-11-06)
 
 INC-20261104-01: research notebooks work on a Railway project whose private network is IPv6 only (legacy environments).
