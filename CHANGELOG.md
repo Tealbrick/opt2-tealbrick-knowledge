@@ -2,6 +2,14 @@
 
 All notable changes to the Knowledge mini app. Versions are assigned at merge (C340).
 
+## 0.1.38 (2026-11-06)
+
+INC-20261106-02: research chat (`research_ask`) failed on every workspace with the OpenAI provider (`research_outcome_unknown`; Open Notebook `POST /api/chat/execute` 502).
+
+- Knowledge's OpenAI chat model for Open Notebook is `gpt-6-luna`, a reasoning model. Open Notebook's model library esperanto (2.25.1 in Open Notebook 1.14.0; unchanged in 2.28.0) drops `temperature` and `top_p` only for models named `o1`/`o3`/`o4`/`gpt-5`, so it sent `top_p` and OpenAI refused the call: 400 "Unsupported parameter: 'top_p' is not supported with this model." (ostra, 2026-11-06 10:05:17Z). The key was fine.
+- The notebook image patches that check so `gpt-6` models count as reasoning models. The build fails if the upstream line is not there exactly once, and checks the result: `gpt-6-luna` sends neither `temperature` nor `top_p`, `gpt-4o` keeps both. Proven in the pinned image (direct and LangChain paths).
+- `upgradeFrom` `>=0.1.20 <=0.1.37`.
+
 ## 0.1.37 (2026-11-06)
 
 INC-20261106-01: edits of documents never reached the memory engine (on every version with the GBrain 0.60.424 pin, 0.1.26+). Reproduced on qa1 with 0.1.36.
