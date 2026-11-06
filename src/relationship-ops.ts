@@ -70,6 +70,13 @@ export const INLINE_PURGE_LIMIT = 10;
 const CONFIRM_MAX = 15_000;
 
 /**
+ * Review S3-3: a label or title is agent or third-party text inside the owner's confirmation. Control, format (bidi,
+ * zero-width) and line/paragraph separator characters become one space and the result is JSON-quoted, so the text can
+ * neither start a line of its own nor close its quotes: it cannot forge a line of the confirmation.
+ */
+export const quoteOneLine = (text: string): string => JSON.stringify(text.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]+/gu, " ").trim());
+
+/**
  * S2: the owner-facing confirmation of a forget: NAMES the person (label, id, operator), states that the delete is
  * permanent, LISTS the documents to delete (area, title, id), the ids that would be refused, and what is not possible
  * yet. Shown to the owner only (the scan answer, a hold view): receipts, the log and the stored forget report keep ids
@@ -83,7 +90,7 @@ export function forgetConfirmation(db: Db, operator: string, person: string, pur
   const purge = picked.filter((id) => scan.found.has(id));
   const kept = picked.filter((id) => !scan.found.has(id));
   const head = [
-    `Forget "${p.label}" (${person}) in the relationships of operator ${operator}.`,
+    `Forget ${quoteOneLine(p.label)} (${person}) in the relationships of operator ${operator}.`,
     "This delete is permanent. It cannot be undone, and Knowledge cannot restore it.",
     `Deleted from Relationships: the person, ${count("kn_rel_identities")} identities, ${count("kn_rel_proposals")} proposals, ${count("kn_rel_history")} history items. One log row with counts stays.`,
     "",
@@ -93,7 +100,7 @@ export function forgetConfirmation(db: Db, operator: string, person: string, pur
   let size = head.join("\n").length;
   for (const [i, id] of purge.entries()) {
     const m = scan.found.get(id);
-    const line = `- ${m?.area ?? "?"}: "${documentTitle(db, id)}" (${id})${m?.deleted ? ", already deleted in the Library" : ""}`;
+    const line = `- ${m?.area ?? "?"}: ${quoteOneLine(documentTitle(db, id))} (${id})${m?.deleted ? ", already deleted in the Library" : ""}`;
     if (size + line.length > CONFIRM_MAX - 2_000) {
       lines.push(`- and ${purge.length - i} more`);
       break;

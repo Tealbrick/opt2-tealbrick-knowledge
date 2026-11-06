@@ -11,9 +11,9 @@
 // - Every write is logged in kn_rel_log (append-only) with ids, field names and enum values only (never identity values,
 //   labels, stance text or history text).
 // - R1 hardening (C392 F5): the stored `trust` is the owner's; what an agent may do with a message is `effectiveTrust`, which
-//   never exceeds the stored trust and is at most `draft_only` unless the sender identity is VERIFIED (`verified_by`,
-//   migration 0006: an owner-confirmed Slack, Buzz or Telegram platform id). Email is never verified until Connect attests
-//   a sender per message (`senderVerification`, the hook for messages/1 `author.verified`).
+//   never exceeds the stored trust and, until a lookup by a Connect message reference exists (spec 0.1.91 messages/1
+//   `author.verified`, hook `senderVerification`), is at most `draft_only` on EVERY read. `verified_by` (migration 0006, set
+//   only by the owner's relationship_set verifyIdentities) is owner state kept for that path; it raises nothing today.
 // - R1 hardening (C392 F4): every text an agent or a third party supplied (an agent's label, identity values, the proposed
 //   type, proposal values, history text, citations) reads back only under `observed: {untrusted: true, …}` (the platform
 //   marker, MANIFEST.md "untrusted"); owner-set fields (type, trust, effectiveTrust, trustBasis, stance, the owner's label)
@@ -53,7 +53,9 @@ export interface Identity {
   value: string;
 }
 export interface StoredIdentity extends Identity {
-  /** null = unverified: a lookup by this identity reads at most `draft_only` */
+  /** owner/platform state, never agent text: true only after the owner's relationship_set verifyIdentities */
+  verified: boolean;
+  /** why it is verified (owner state); null = unverified. Raises no trust until a source attestation exists (F5) */
   verifiedBy: VerifiedBy | null;
 }
 export interface Citation {
@@ -81,10 +83,12 @@ export interface PersonSummary {
   type: RelType;
   /** the owner's trust as stored */
   trust: Trust;
-  /** what an agent may do now: never above `trust`; at most `draft_only` unless the sender identity is verified (F5) */
+  /** what an agent may do now: never above `trust`; at most `draft_only` until the source attests the sender (F5) */
   effectiveTrust: Trust;
-  /** why `effectiveTrust` is what it is (enum words and an identity kind only, never a value) */
-  trustBasis: string;
+  /** why `effectiveTrust` is what it is */
+  trustBasis: TrustBasis;
+  /** the same in a sentence */
+  trustNote: string;
   stance: Stance | null;
   lastContact: string | null;
   openPromises: number;
@@ -134,13 +138,33 @@ function text(value: unknown, field: string, max: number): string {
 
 // ── identities ──
 
-const HANDLE_KINDS: ReadonlySet<string> = new Set(["email", "slack", "buzz", "telegram"]);
+const HANDLE_KINDS: ReadonlySet<string> = new Set(["email", "buzz", "telegram"]);
+/** A Slack workspace (team) id and a Slack user id: a user id is unique only inside its workspace. */
+const SLACK_TEAM = /^T[A-Z0-9]{2,30}$/u;
+const SLACK_USER = /^[UW][A-Z0-9]{2,30}$/u;
+/** Example of the Slack identity input, used in refusals and descriptions. */
+export const SLACK_EXAMPLE = "T0123ABC:U0456DEF";
 
 /**
- * The one stored form of an identity. email, slack, buzz and telegram use the canonical handle rule of
- * `@opt2-tealbrick/manifest` (`normalizeHandle`, G-4: email lower-case addr-spec, Slack upper-case id, Buzz npub, Telegram
- * numeric id) and a value it refuses is refused (and a Slack conversation id: a person is a U/W user id). phone = `+` and 6 to 15 digits (spaces, dots, dashes and brackets are
- * dropped). other = trimmed text. Throws `invalid_identity` (400).
+ * A Slack identity is TEAM-QUALIFIED: `<team id>:<user id>` (T…:U… or T…:W…, upper case), stored as kind `slack` with that
+ * value. This differs on purpose from the canonical handle `slack:U…` (G-4): the same U… id can exist in two Slack
+ * workspaces, so a bare user id could name another workspace's person. A bare U… id is refused with a plain message.
+ */
+function slackIdentity(raw: string): Identity {
+  const parts = raw.toUpperCase().split(":");
+  if (parts.length === 1 && SLACK_USER.test(parts[0] ?? ""))
+    throw new RelationshipError("invalid_identity", `A Slack identity needs the workspace (team) id and the user id, as "team:user", for example ${SLACK_EXAMPLE}. A user id alone is not enough.`, 400);
+  const [team, user] = parts;
+  if (parts.length !== 2 || !SLACK_TEAM.test(team ?? "") || !SLACK_USER.test(user ?? ""))
+    throw new RelationshipError("invalid_identity", `A Slack identity is "team:user": a T… workspace id and a U… or W… user id, for example ${SLACK_EXAMPLE}.`, 400);
+  return { kind: "slack", value: `${team}:${user}` };
+}
+
+/**
+ * The one stored form of an identity. email, buzz and telegram use the canonical handle rule of `@opt2-tealbrick/manifest`
+ * (`normalizeHandle`, G-4: email lower-case addr-spec, Buzz npub, Telegram numeric id) and a value it refuses is refused.
+ * slack = team-qualified `T…:U…` (`slackIdentity`; a conversation id C/G/D is never a person). phone = `+` and 6 to 15
+ * digits (spaces, dots, dashes and brackets are dropped). other = trimmed text. Throws `invalid_identity` (400).
  */
 export function normalizeIdentity(kind: unknown, value: unknown): Identity {
   const identity = canonicalIdentity(kind, value);
@@ -156,11 +180,11 @@ function canonicalIdentity(kind: unknown, value: unknown): Identity {
   if (typeof kind !== "string" || !(IDENTITY_KINDS as readonly string[]).includes(kind)) throw new RelationshipError("invalid_identity", `An identity kind must be one of: ${IDENTITY_KINDS.join(", ")}.`, 400);
   const raw = typeof value === "string" ? value.trim() : "";
   if (!raw || chars(raw) > 254) throw new RelationshipError("invalid_identity", "An identity needs a value of at most 254 characters.", 400);
+  if (kind === "slack") return slackIdentity(raw);
   if (HANDLE_KINDS.has(kind)) {
     const handle = normalizeHandle(`${kind}:${raw}`);
     const canonical = handle?.slice(kind.length + 1);
-    // a Slack C/G/D id names a conversation (a recipient), never a person: only U/W user ids identify a person
-    if (!canonical || (kind === "slack" && !/^[UW]/u.test(canonical))) throw new RelationshipError("invalid_identity", `This is not a valid ${kind} identity of a person.`, 400);
+    if (!canonical) throw new RelationshipError("invalid_identity", `This is not a valid ${kind} identity of a person.`, 400);
     return { kind: kind as IdentityKind, value: canonical };
   }
   if (kind === "phone") {
@@ -193,39 +217,60 @@ export function normalizeCitation(input: unknown, now: number = Date.now(), fiel
 const TRUST_RANK: Record<Trust, number> = { hold: 0, draft_only: 1, reply: 2 };
 const atMost = (trust: Trust, cap: Trust): Trust => (TRUST_RANK[trust] <= TRUST_RANK[cap] ? trust : cap);
 
+/** Why `effectiveTrust` is what it is (an enum; `trustNote` says it in a sentence). */
+export const TRUST_BASIS = ["owner_hold", "owner_draft_only", "awaiting_source_attestation", "source_attested"] as const;
+export type TrustBasis = (typeof TRUST_BASIS)[number];
+
 /**
- * F5 HOOK for a per-message sender attestation. Today it answers the stored verification, except that an EMAIL identity is
- * never verified: a From address is easy to fake. When the spec adds messages/1 `author.verified` (`platform_id` |
- * `dkim_spf_aligned`, produced by Connect, passed by R3/R4), the attestation of THAT message is checked here, and only then
- * may an email sender read above `draft_only`. No op takes an attestation yet, and no op writes `dkim_spf_aligned`.
+ * What the SOURCE of a message (Connect) attests about its author: spec 0.1.91 messages/1 `author.verified`. It must come
+ * from Connect by a source message reference, never from the agent's input. No op takes one yet, so every caller passes null.
  */
-export function senderVerification(identity: Identity, stored: VerifiedBy | null, _attestation: null = null): VerifiedBy | null {
-  if (identity.kind === "email") return null;
-  return stored === "platform_id" && PLATFORM_ID_KINDS.includes(identity.kind) ? stored : null;
+export interface SourceAttestation {
+  verified: VerifiedBy;
 }
 
-/** How a person was looked up: by the identity a message came from, or by person id (no sender named). */
-export type TrustLookup = { by: "identity"; identity: Identity; verifiedBy: VerifiedBy | null } | { by: "person" };
+/**
+ * F5 HOOK: the ONE place where a sender may become verified for one message. Coordinator rule (review of #43): trust above
+ * `draft_only` needs the author to come from the source, never from the agent, so without a source attestation this answers
+ * null, whatever the stored `verified_by` says (an owner-verified Slack id included).
+ * TODO(C392, spec 0.1.91 messages/1 `author.verified`): wire a lookup by Connect message reference (source message id →
+ * Connect-attested author) and pass its attestation here. Then: an attested `platform_id` counts for a Slack, Buzz or
+ * Telegram identity the owner verified (`verified_by = platform_id`, the owner's link of that id to this person); an attested
+ * `dkim_spf_aligned` counts for an email identity. Nothing else counts.
+ */
+export function senderVerification(identity: Identity, stored: VerifiedBy | null, attestation: SourceAttestation | null): VerifiedBy | null {
+  if (attestation === null) return null;
+  if (attestation.verified === "platform_id") return PLATFORM_ID_KINDS.includes(identity.kind) && stored === "platform_id" ? "platform_id" : null;
+  return identity.kind === "email" ? "dkim_spf_aligned" : null;
+}
+
+/** The sender of the message an agent acts on: the identity it was looked up by and the source's attestation (null today). */
+export interface Sender {
+  identity: Identity;
+  verifiedBy: VerifiedBy | null;
+  attestation: SourceAttestation | null;
+}
+
+const NOTES: Record<TrustBasis, string> = {
+  owner_hold: "The owner set hold: send nothing and do not draft.",
+  owner_draft_only: "The owner set draft only: draft for the owner, do not send.",
+  awaiting_source_attestation:
+    "Draft only: Knowledge cannot yet check with the message source (Connect) who sent the message, so the owner's higher trust has no effect yet.",
+  source_attested: "The message source attested the sender: the owner's trust applies.",
+};
 
 /**
- * The trust an agent may act on (F5), never above the owner's stored trust:
- * - stored `hold` → `hold`.
- * - by identity: a verified sender identity (`senderVerification`) → the stored trust; an unverified one → at most
- *   `draft_only`.
- * - by person id (relationships_list, relationship_get by `person`, the owner's overview): no sender is named, so the stored
- *   trust is capped at `draft_only` when the person has NO verified identity; with one, the stored trust reads back but holds
- *   only for a message from a verified identity. An agent answering a message looks the person up by the sender identity.
+ * The trust an agent may act on, never above the owner's stored `trust` (which stays visible next to it). Today EVERY read
+ * is at most `draft_only` (by identity, verified Slack id included, by person id, the list, the overview): only a sender the
+ * SOURCE attests (`senderVerification`, not wired yet) may raise it to the stored trust. An owner-set `reply` is stored but
+ * has no effect until then (`awaiting_source_attestation`).
  */
-export function effectiveTrust(stored: Trust, lookup: TrustLookup, hasVerifiedIdentity: boolean): { effectiveTrust: Trust; trustBasis: string } {
-  if (stored === "hold") return { effectiveTrust: "hold", trustBasis: "owner trust: hold" };
-  if (lookup.by === "identity") {
-    const verified = senderVerification(lookup.identity, lookup.verifiedBy);
-    if (verified) return { effectiveTrust: stored, trustBasis: `owner trust: ${stored}; verified ${lookup.identity.kind} platform id` };
-    if (stored === "draft_only") return { effectiveTrust: "draft_only", trustBasis: `owner trust: draft_only; unverified ${lookup.identity.kind}` };
-    return { effectiveTrust: atMost(stored, "draft_only"), trustBasis: `unverified ${lookup.identity.kind}: draft only` };
-  }
-  if (!hasVerifiedIdentity) return { effectiveTrust: atMost(stored, "draft_only"), trustBasis: stored === "draft_only" ? "owner trust: draft_only" : "by person id, no verified identity: draft only" };
-  return { effectiveTrust: stored, trustBasis: `owner trust: ${stored}; by person id: holds only for a message from a verified identity of this person` };
+export function effectiveTrust(stored: Trust, sender: Sender | null = null): { effectiveTrust: Trust; trustBasis: TrustBasis; trustNote: string } {
+  const out = (effective: Trust, basis: TrustBasis) => ({ effectiveTrust: effective, trustBasis: basis, trustNote: NOTES[basis] });
+  if (stored === "hold") return out("hold", "owner_hold");
+  if (stored === "draft_only") return out("draft_only", "owner_draft_only");
+  if (sender && senderVerification(sender.identity, sender.verifiedBy, sender.attestation)) return out(stored, "source_attested");
+  return out(atMost(stored, "draft_only"), "awaiting_source_attestation");
 }
 
 // ── stance ──
@@ -245,6 +290,7 @@ export function normalizeStance(input: unknown): Stance | null {
   }
   return out;
 }
+
 
 // ── who is the operator ──
 
@@ -298,10 +344,13 @@ function identitiesOf(db: Db, person: string): StoredIdentity[] {
   return db
     .prepare("SELECT kind, value, verified_by FROM kn_rel_identities WHERE person_id = ? ORDER BY kind, value")
     .all(person)
-    .map((r) => ({ kind: String(r.kind) as IdentityKind, value: String(r.value), verifiedBy: verifiedOf(r.verified_by) }));
+    .map((r) => {
+      const verifiedBy = verifiedOf(r.verified_by);
+      return { kind: String(r.kind) as IdentityKind, value: String(r.value), verified: verifiedBy !== null, verifiedBy };
+    });
 }
 
-function summaryOf(db: Db, operator: string, person: string, lookup: TrustLookup = { by: "person" }): PersonSummary {
+function summaryOf(db: Db, operator: string, person: string, sender: Sender | null = null): PersonSummary {
   const row = db
     .prepare("SELECT p.id, p.label, p.label_set_by, r.type, r.trust, r.stance, r.last_contact_at FROM kn_rel_people p JOIN kn_relationships r ON r.person_id = p.id AND r.operator = p.operator WHERE p.id = ? AND p.operator = ?")
     .get(person, operator);
@@ -317,7 +366,7 @@ function summaryOf(db: Db, operator: string, person: string, lookup: TrustLookup
     label: ownerLabel ? String(row.label) : null,
     type: String(row.type) as RelType,
     trust,
-    ...effectiveTrust(trust, lookup, identities.some((i) => senderVerification(i, i.verifiedBy) !== null)),
+    ...effectiveTrust(trust, sender),
     stance: row.stance == null ? null : (JSON.parse(String(row.stance)) as Stance),
     lastContact: iso(row.last_contact_at == null ? null : Number(row.last_contact_at)),
     openPromises: Number(promises?.n ?? 0),
@@ -399,21 +448,23 @@ function identityRow(db: Db, operator: string, identity: Identity): { person: st
 
 /**
  * One of the operator's people with recent history and pending proposals; another operator's person is `person_unknown`.
- * By `identity` (the sender of a message), `effectiveTrust` follows that identity's verification (F5).
+ * By `identity` or by `person`, `effectiveTrust` is at most `draft_only` today: the agent names the identity, so it cannot
+ * prove who sent a message; only a future lookup by a Connect message reference passes a source attestation (F5).
  */
 export function getRelationship(db: Db, operator: string, by: { person?: string; identity?: { kind: unknown; value: unknown } }): PersonSummary & { history: HistoryItem[]; proposals: Proposal[] } {
   if ((by.person === undefined) === (by.identity === undefined)) throw invalid("Name either person or identity.");
   let person: string;
-  let lookup: TrustLookup = { by: "person" };
+  let sender: Sender | null = null;
   if (by.person !== undefined) person = ownedPerson(db, operator, String(by.person)).id;
   else {
     const identity = normalizeIdentity(by.identity?.kind, by.identity?.value);
     const row = identityRow(db, operator, identity);
     if (!row) throw personUnknown();
     person = row.person;
-    lookup = { by: "identity", identity, verifiedBy: row.verifiedBy };
+    // the agent chose this identity: no source attestation (null) until the Connect message-reference lookup exists
+    sender = { identity, verifiedBy: row.verifiedBy, attestation: null };
   }
-  return { ...summaryOf(db, operator, person, lookup), history: historyOf(db, operator, person, 50), proposals: pendingProposals(db, operator, person) };
+  return { ...summaryOf(db, operator, person, sender), history: historyOf(db, operator, person, 50), proposals: pendingProposals(db, operator, person) };
 }
 
 // ── agent write: propose ──
@@ -611,6 +662,8 @@ export interface Decided {
   person: string;
   field: ProposalField;
   state: "accepted" | "rejected";
+  /** an accepted identity: whether it is verified now (false unless the owner verified it before with verifyIdentities) */
+  verified?: boolean;
 }
 /** F3: an accepted proposal that could not apply; it stays pending (the owner may reject it). */
 export interface Conflict {
@@ -625,9 +678,9 @@ export interface Conflict {
 /**
  * Owner op: accept or reject pending proposals of one operator. An unknown or already decided id refuses the whole call
  * (nothing changes). F3: an accepted identity that another person of the operator already has is reported in `conflicts`
- * and stays pending; the other decisions of the call apply. Accepting a Slack, Buzz or Telegram identity verifies it
- * (`platform_id`): the owner confirmed that this platform id is this person (F5). An accepted label is still an agent's
- * words: it reads back under `observed`.
+ * and stays pending; the other decisions of the call apply. An accepted identity is added UNVERIFIED, always (review
+ * S2-2): accepting links it to the person, it does not say the sender of a message is that person; the owner verifies a
+ * platform id only with relationship_set verifyIdentities. An accepted label is still an agent's words (`observed`).
  */
 export function decideProposals(db: Db, operator: string, actor: string, input: { accept?: unknown; reject?: unknown }, now: number = Date.now()): { decided: Decided[]; conflicts: Conflict[] } {
   const ids = (v: unknown): string[] => {
@@ -661,15 +714,14 @@ export function decideProposals(db: Db, operator: string, actor: string, input: 
             conflicts.push({ id: p.id, person: p.person, field: p.field, code: "identity_taken", takenBy: owner });
             continue;
           }
-          const verified = PLATFORM_ID_KINDS.includes(identity.kind) ? "platform_id" : null;
-          if (!owner) db.prepare("INSERT INTO kn_rel_identities (person_id, operator, kind, value, created_at, created_by, verified_by) VALUES (?, ?, ?, ?, ?, ?, ?)").run(p.person, operator, identity.kind, identity.value, now, actor, verified);
-          else if (verified) db.prepare("UPDATE kn_rel_identities SET verified_by = ? WHERE operator = ? AND kind = ? AND value = ?").run(verified, operator, identity.kind, identity.value);
+          if (!owner) db.prepare("INSERT INTO kn_rel_identities (person_id, operator, kind, value, created_at, created_by) VALUES (?, ?, ?, ?, ?, ?)").run(p.person, operator, identity.kind, identity.value, now, actor);
         }
       }
       db.prepare("UPDATE kn_rel_proposals SET state = ?, decided_at = ?, decided_by = ? WHERE id = ?").run(state, now, actor, p.id);
       db.prepare("UPDATE kn_rel_people SET updated_at = ? WHERE id = ?").run(now, p.person);
       log(db, now, actor, state === "accepted" ? "proposal_accepted" : "proposal_rejected", operator, p.person, `${p.field} ${p.id}${state === "accepted" && p.field === "type" ? ` type=${String(p.value)}` : ""}`);
-      decided.push({ id: p.id, person: p.person, field: p.field, state });
+      const verified = state === "accepted" && p.field === "identity" ? { verified: identityRow(db, operator, p.value as Identity)?.verifiedBy != null } : {};
+      decided.push({ id: p.id, person: p.person, field: p.field, state, ...verified });
     }
     return { decided, conflicts };
   });

@@ -9,7 +9,7 @@ import type { Json, OpContext } from "@opt2-tealbrick/spec/sdk";
 import { knowledgeDefinition } from "../src/app.ts";
 import { syncDirectory } from "../src/directory-feed.ts";
 import { NARROWING_POLICY } from "../src/handlers.ts";
-import { RELATIONSHIP_OPS } from "../src/relationship-ops.ts";
+import { forgetConfirmation, quoteOneLine, RELATIONSHIP_OPS } from "../src/relationship-ops.ts";
 import { HISTORY_CAP, normalizeIdentity, PENDING_CAP, senderVerification } from "../src/relationships.ts";
 import { context, FakeScopes, memoryDb, TestError } from "./helpers.ts";
 
@@ -93,7 +93,7 @@ test("C392 R1: a new person starts unknown + hold; a proposed type shows only as
   assert.equal(got.effectiveTrust, "hold");
   assert.equal(got.stance, null);
   assert.equal(got.lastContact, "2026-11-05T09:30:00.000Z");
-  assert.deepEqual(got.observed.identities, [{ kind: "email", value: "dana.client@acme-llc.example", verifiedBy: null }]);
+  assert.deepEqual(got.observed.identities, [{ kind: "email", value: "dana.client@acme-llc.example", verified: false, verifiedBy: null }]);
   assert.equal(got.history[0].observed.citation.ref, "msg-acme-0001");
   assert.equal(got.pendingProposals, 1);
   // the same type again is not a second proposal
@@ -223,17 +223,25 @@ test("C392 R1 identities: normalized (email case, phone digits), unique per oper
   assert.deepEqual(normalizeIdentity("email", "  Dana.Client@ACME-llc.Example "), { kind: "email", value: "dana.client@acme-llc.example" });
   assert.deepEqual(normalizeIdentity("phone", "+44 (20) 7946-0018"), { kind: "phone", value: "+442079460018" });
   assert.deepEqual(normalizeIdentity("phone", "020.7946.0018"), { kind: "phone", value: "+02079460018" });
-  assert.deepEqual(normalizeIdentity("slack", "u012abcdef"), { kind: "slack", value: "U012ABCDEF" });
+  assert.deepEqual(normalizeIdentity("slack", " t0123abc:u012abcdef "), { kind: "slack", value: "T0123ABC:U012ABCDEF" }, "team-qualified, upper case");
+  assert.deepEqual(normalizeIdentity("slack", "T0123ABC:W012ABCDEF"), { kind: "slack", value: "T0123ABC:W012ABCDEF" });
+  assert.throws(() => normalizeIdentity("slack", "U012ABCDEF"), (e: unknown) => (e as { code?: string; message?: string }).code === "invalid_identity" && /workspace \(team\) id and the user id/u.test(String((e as Error).message)), "a bare user id is refused with a plain message");
   assert.deepEqual(normalizeIdentity("other", "  acme-portal:dana  "), { kind: "other", value: "acme-portal:dana" });
-  for (const [kind, value] of [["email", "not an address"], ["phone", "call me"], ["phone", "+12"], ["slack", "@dana"], ["slack", "D012ABCDEF"], ["telegram", "@dana"], ["buzz", "npub1nope"]] as const)
+  for (const [kind, value] of [["email", "not an address"], ["phone", "call me"], ["phone", "+12"], ["slack", "@dana"], ["slack", "T0123ABC:D012ABCDEF"], ["slack", "T0123ABC:C012ABCDEF"], ["slack", "U012ABCDEF:T0123ABC"], ["slack", "T0123ABC:U012:X"], ["slack", "T0123ABC"], ["telegram", "@dana"], ["buzz", "npub1nope"]] as const)
     assert.throws(() => normalizeIdentity(kind, value), (e: unknown) => (e as { code?: string }).code === "invalid_identity", `${kind} ${value}`);
 
-  const { run, ctx, owner, db, receipts } = await setup();
+  const { run, ctx, owner, db, receipts, valid } = await setup();
   const phone = { kind: "phone", value: "+44 20 7946 0018" };
   const dana = await run("relationship_propose", { new: { label: "Dana", identities: [CLIENT, phone] }, citation: CITE }, ctx(ADA));
   assert.equal((await run("relationship_get", { identity: { kind: "phone", value: "+44 (20) 7946-0018" } }, ctx(ADA))).person, dana.person);
   await assert.rejects(run("relationship_propose", { new: { label: "Dana again", identities: [{ kind: "email", value: "DANA.CLIENT@acme-llc.example" }] }, citation: CITE }, ctx(AVA)), rejects("identity_taken"));
-  await assert.rejects(run("relationship_propose", { new: { label: "Bad", identities: [{ kind: "slack", value: "not-a-slack-id" }] }, citation: CITE }, ctx(ADA)), rejects("invalid_identity"));
+  for (const value of ["not-a-slack-id", "U012ABCDEF"]) {
+    const bad = { new: { label: "Bad", identities: [{ kind: "slack", value }] }, citation: CITE };
+    assert.equal(valid("relationship_propose", bad), false, `schema refuses slack ${value}`);
+    await assert.rejects(run("relationship_propose", bad, ctx(ADA), true), rejects("invalid_identity"), `handler refuses slack ${value}`);
+  }
+  assert.equal(valid("relationship_get", { identity: { kind: "slack", value: "T0123ABC:U012ABCDEF" } }), true);
+  assert.equal(valid("relationship_get", { identity: { kind: "email", value: "T0123ABC:U012ABCDEF" } }), true, "the Slack pattern binds only kind slack");
   assert.equal(db.prepare("SELECT count(*) AS n FROM kn_rel_people").get()?.n, 1, "refused proposals write nothing");
   // F3: an identity proposal on another person that collides with Dana's is refused at propose time, all or nothing
   const eli = await run("relationship_propose", { new: { label: "Eli", identities: [{ kind: "email", value: "eli@acme-llc.example" }] }, citation: CITE }, ctx(ADA));
@@ -269,7 +277,11 @@ test("C392 R1 identities: normalized (email case, phone digits), unique per oper
   assert.equal(eliNow.person, eli.person);
   assert.equal(eliNow.label, null, "an accepted label is still an agent's words");
   assert.equal(eliNow.observed.label, "Eli, Acme LLC ops");
-  assert.equal(eliNow.observed.identities.find((i: Record<string, unknown>) => i.kind === "telegram").verifiedBy, "platform_id", "an accepted platform id is verified");
+  assert.deepEqual(
+    (({ verified, verifiedBy }) => ({ verified, verifiedBy }))(eliNow.observed.identities.find((i: Record<string, unknown>) => i.kind === "telegram")),
+    { verified: false, verifiedBy: null },
+    "accepting never verifies (review S2-2)",
+  );
   await assert.rejects(run("relationship_confirm", { operator: "ct_ben", accept: [typeP] }, owner()), rejects("proposal_unknown"), "another operator's proposal answers like a missing one");
 });
 
@@ -375,10 +387,10 @@ function outsideObserved(v: unknown, needle: string, path: string[] = []): strin
   return [];
 }
 
-test("C392 F5 fire-on-bad: a reply person looked up by an unverified email reads draft_only; a verified Slack id reads reply; an agent's identity is never verified", async () => {
+test("C392 F5 fire-on-bad: every read is at most draft_only until the source attests the sender: a spoofed email, an agent's Slack id, an owner-verified Slack id, by person, list", async () => {
   const { run, ctx, owner, db, valid } = await setup();
   const email = { kind: "email", value: "dana@example.com" };
-  const slack = { kind: "slack", value: "U0DANA0001" };
+  const slack = { kind: "slack", value: "T0ACME001:U0DANA0001" };
   const dana = await run("relationship_propose", { new: { label: "Dana", identities: [email, slack] }, citation: CITE }, ctx(ADA));
   assert.deepEqual(
     db.prepare("SELECT kind, verified_by FROM kn_rel_identities ORDER BY kind").all().map((r) => ({ ...r })),
@@ -389,59 +401,83 @@ test("C392 F5 fire-on-bad: a reply person looked up by an unverified email reads
     "an identity an agent put in is never verified, not even a platform id",
   );
   await run("relationship_set", { operator: "ct_anna", person: dana.person, trust: "reply" }, owner());
-
-  const byEmail = await run("relationship_get", { identity: email }, ctx(ADA));
-  assert.deepEqual([byEmail.trust, byEmail.effectiveTrust, byEmail.trustBasis], ["reply", "draft_only", "unverified email: draft only"]);
-  const bySlack = await run("relationship_get", { identity: slack }, ctx(ADA));
-  assert.deepEqual([bySlack.effectiveTrust, bySlack.trustBasis], ["draft_only", "unverified slack: draft only"], "an agent-supplied Slack id is unverified");
-  const byPerson = await run("relationship_get", { person: dana.person }, ctx(ADA));
-  assert.deepEqual([byPerson.effectiveTrust, byPerson.trustBasis], ["draft_only", "by person id, no verified identity: draft only"]);
-  assert.equal((await run("relationships_list", {}, ctx(ADA))).people[0].effectiveTrust, "draft_only");
+  const capped = async (input: Record<string, unknown>, why: string) => {
+    const got = await run("relationship_get", input, ctx(ADA));
+    assert.deepEqual([got.trust, got.effectiveTrust, got.trustBasis], ["reply", "draft_only", "awaiting_source_attestation"], why);
+    assert.match(got.trustNote, /cannot yet check with the message source/u);
+    return got;
+  };
+  await capped({ identity: email }, "a (possibly spoofed) email sender of a reply person");
+  await capped({ identity: { kind: "email", value: "DANA@example.com" } }, "the same address in other case");
+  await capped({ identity: slack }, "an agent-supplied Slack id");
+  await capped({ person: dana.person }, "by person id");
+  const listed = (await run("relationships_list", { query: "dana@example" }, ctx(ADA))).people[0];
+  assert.deepEqual([listed.effectiveTrust, listed.trustBasis], ["draft_only", "awaiting_source_attestation"], "list by the spoofed email");
+  const overview = (await run("relationships_overview", { operator: "ct_anna" }, owner())).operators[0].people[0];
+  assert.deepEqual([overview.trust, overview.effectiveTrust], ["reply", "draft_only"], "the owner sees the stored trust and that it has no effect yet");
 
   // only the owner verifies, and only a platform id: email is refused by the schema and by the handler
   assert.equal(valid("relationship_set", { operator: "ct_anna", person: dana.person, verifyIdentities: [email] }), false);
   await assert.rejects(run("relationship_set", { operator: "ct_anna", person: dana.person, verifyIdentities: [email] }, owner(), true), rejects("identity_unverifiable"));
-  await assert.rejects(run("relationship_set", { operator: "ct_anna", person: dana.person, verifyIdentities: [{ kind: "slack", value: "U0OTHER001" }] }, owner()), rejects("identity_unknown"));
+  await assert.rejects(run("relationship_set", { operator: "ct_anna", person: dana.person, verifyIdentities: [{ kind: "slack", value: "T0ACME001:U0OTHER001" }] }, owner()), rejects("identity_unknown"));
   await assert.rejects(run("relationship_set", { operator: "ct_anna", person: dana.person, verifyIdentities: [slack] }, ctx(ADA)), rejects("scope_denied"), "an agent never verifies");
-  const verified = await run("relationship_set", { operator: "ct_anna", person: dana.person, verifyIdentities: [{ kind: "slack", value: "u0dana0001" }] }, owner());
+  const verified = await run("relationship_set", { operator: "ct_anna", person: dana.person, verifyIdentities: [{ kind: "slack", value: "t0acme001:u0dana0001" }] }, owner());
   assert.equal(verified.changed, true);
   assert.equal(db.prepare("SELECT detail FROM kn_rel_log ORDER BY id DESC LIMIT 1").get()?.detail, "verified slack x1");
+  const bySlack = await capped({ identity: slack }, "an OWNER-VERIFIED Slack id: the agent still chose the identity, no source attestation");
+  assert.deepEqual(
+    bySlack.observed.identities.map((i: Record<string, unknown>) => [i.kind, i.verified, i.verifiedBy]),
+    [
+      ["email", false, null],
+      ["slack", true, "platform_id"],
+    ],
+  );
+  await capped({ identity: email }, "the spoofed email after the Slack id is verified");
+  await capped({ person: dana.person }, "by person id with a verified identity");
 
-  const bySlackNow = await run("relationship_get", { identity: slack }, ctx(ADA));
-  assert.deepEqual([bySlackNow.effectiveTrust, bySlackNow.trustBasis], ["reply", "owner trust: reply; verified slack platform id"]);
-  const spoofed = await run("relationship_get", { identity: { kind: "email", value: "DANA@example.com" } }, ctx(ADA));
-  assert.equal(spoofed.effectiveTrust, "draft_only", "a (possibly spoofed) email sender of a reply person never reads reply");
-  const byPersonNow = await run("relationship_get", { person: dana.person }, ctx(ADA));
-  assert.equal(byPersonNow.effectiveTrust, "reply");
-  assert.match(byPersonNow.trustBasis, /holds only for a message from a verified identity/u);
-
-  // never above the stored trust: draft_only and hold stay what the owner set, whatever the identity
+  // never above the stored trust: draft_only and hold stay what the owner set
   await run("relationship_set", { operator: "ct_anna", person: dana.person, trust: "draft_only" }, owner());
-  assert.equal((await run("relationship_get", { identity: slack }, ctx(ADA))).effectiveTrust, "draft_only");
+  assert.deepEqual(
+    (({ effectiveTrust, trustBasis }) => [effectiveTrust, trustBasis])(await run("relationship_get", { identity: slack }, ctx(ADA))),
+    ["draft_only", "owner_draft_only"],
+  );
   await run("relationship_set", { operator: "ct_anna", person: dana.person, trust: "hold" }, owner());
   for (const identity of [slack, email]) {
     const held = await run("relationship_get", { identity }, ctx(ADA));
-    assert.deepEqual([held.effectiveTrust, held.trustBasis], ["hold", "owner trust: hold"], identity.kind);
+    assert.deepEqual([held.effectiveTrust, held.trustBasis], ["hold", "owner_hold"], identity.kind);
   }
 
   // an agent cannot claim a verification: no such input field; a slipped-in field is ignored
-  assert.equal(valid("relationship_propose", { person: dana.person, identities: [{ kind: "slack", value: "U0DANA0002", verifiedBy: "platform_id" }], citation: CITE }), false);
+  assert.equal(valid("relationship_propose", { person: dana.person, identities: [{ kind: "slack", value: "T0ACME001:U0DANA0002", verifiedBy: "platform_id" }], citation: CITE }), false);
   assert.equal(valid("relationship_propose", { new: { label: "X", identities: [{ kind: "telegram", value: "12345678" }], verified: true }, citation: CITE }), false);
   const eve = await run("relationship_propose", { new: { label: "Eve", identities: [{ kind: "telegram", value: "12345678", verifiedBy: "platform_id" }] }, verified_by: "platform_id", citation: CITE } as never, ctx(ADA), true);
   assert.equal(db.prepare("SELECT verified_by FROM kn_rel_identities WHERE person_id = ?").get(eve.person)?.verified_by, null);
-  // a pending identity proposal is not an identity: a lookup by it is person_unknown until the owner accepts it
-  const prop = await run("relationship_propose", { person: eve.person, identities: [{ kind: "slack", value: "U0EVE00001" }], citation: CITE }, ctx(ADA));
-  await assert.rejects(run("relationship_get", { identity: { kind: "slack", value: "U0EVE00001" } }, ctx(ADA)), rejects("person_unknown"));
-  await run("relationship_confirm", { operator: "ct_anna", accept: [prop.proposals[0].id] }, owner());
+  // S2-2: a Slack id an agent proposed and the owner ACCEPTED is added unverified, and reads draft_only
+  const eveSlack = { kind: "slack", value: "T0ACME001:U0EVE00001" };
+  const prop = await run("relationship_propose", { person: eve.person, identities: [eveSlack], citation: CITE }, ctx(ADA));
+  await assert.rejects(run("relationship_get", { identity: eveSlack }, ctx(ADA)), rejects("person_unknown"), "a pending proposal is not an identity");
+  const accepted = await run("relationship_confirm", { operator: "ct_anna", accept: [prop.proposals[0].id] }, owner());
+  assert.deepEqual(accepted.decided, [{ id: prop.proposals[0].id, person: eve.person, field: "identity", state: "accepted", verified: false }]);
   await run("relationship_set", { operator: "ct_anna", person: eve.person, trust: "reply" }, owner());
-  assert.equal((await run("relationship_get", { identity: { kind: "slack", value: "U0EVE00001" } }, ctx(ADA))).effectiveTrust, "reply", "an owner-accepted platform id is verified");
-  assert.equal((await run("relationship_get", { identity: { kind: "telegram", value: "12345678" } }, ctx(ADA))).effectiveTrust, "draft_only", "the agent's telegram id still is not");
+  const eveGot = await capped({ identity: eveSlack }, "an accepted Slack id");
+  assert.equal(eveGot.observed.identities.find((i: Record<string, unknown>) => i.kind === "slack").verified, false);
+  await run("relationship_set", { operator: "ct_anna", person: eve.person, verifyIdentities: [eveSlack] }, owner());
+  await capped({ identity: eveSlack }, "verified now, still no source attestation");
 
-  // email can never be verified: the database refuses platform_id on an email, and the hook answers null for any email
+  // the database pins verification to its kinds
   assert.throws(() => db.exec("UPDATE kn_rel_identities SET verified_by = 'platform_id' WHERE kind = 'email'"), /CHECK/u);
-  assert.equal(senderVerification({ kind: "email", value: "dana@example.com" }, "dkim_spf_aligned"), null);
-  assert.equal(senderVerification({ kind: "slack", value: "U0DANA0001" }, "platform_id"), "platform_id");
-  assert.equal(senderVerification({ kind: "phone", value: "+4420" }, "platform_id"), null);
+  // the hook: nothing counts without a SOURCE attestation (none is wired yet); with one, only the matching rule counts
+  for (const [identity, stored] of [
+    [slack, "platform_id"],
+    [email, "dkim_spf_aligned"],
+    [email, null],
+  ] as const)
+    assert.equal(senderVerification(identity as never, stored, null), null, `${identity.kind} without attestation`);
+  assert.equal(senderVerification(slack as never, "platform_id", { verified: "platform_id" }), "platform_id", "future: an attested, owner-verified platform id");
+  assert.equal(senderVerification(slack as never, null, { verified: "platform_id" }), null, "future: an attested id the owner never linked to this person");
+  assert.equal(senderVerification(email as never, null, { verified: "dkim_spf_aligned" }), "dkim_spf_aligned", "future: an attested email");
+  assert.equal(senderVerification(email as never, null, { verified: "platform_id" }), null);
+  assert.equal(senderVerification({ kind: "phone", value: "+4420" }, "platform_id", { verified: "platform_id" }), null);
 });
 
 test("C392 F4: an injection in a label, history text and citation comes back only inside observed {untrusted: true} and changes nothing", async () => {
@@ -596,7 +632,7 @@ test("C392 F8: a person keeps at most HISTORY_CAP history rows: the oldest conta
   assert.equal(Number(db.prepare("SELECT count(*) AS n FROM kn_rel_proposals WHERE person_id = ?").get(eli.person)?.n), 0, "all or nothing");
 });
 
-test("C392 migration 0006: expand only; backfills verified_by (owner-confirmed platform ids only) and label_set_by (owner's newest label change)", () => {
+test("C392 migration 0006: expand only; verifies NO existing row (owners verify explicitly); backfills label_set_by (owner's newest label change)", () => {
   const raw = new DatabaseSync(":memory:");
   raw.exec("PRAGMA foreign_keys = ON");
   const dir = new URL("../migrations/", import.meta.url);
@@ -620,9 +656,9 @@ test("C392 migration 0006: expand only; backfills verified_by (owner-confirmed p
       .map((r) => [r.value, r.verified_by]),
     [
       ["+442079460018", null],
-      ["12345678", "platform_id"],
+      ["12345678", null],
       ["U0AGENT001", null],
-      ["U0OWNER001", "platform_id"],
+      ["U0OWNER001", null],
       ["dana@example.com", null],
     ],
   );
@@ -643,4 +679,19 @@ test("C392 migration 0006: expand only; backfills verified_by (owner-confirmed p
   assert.throws(() => raw.exec("UPDATE kn_rel_identities SET verified_by = 'trusted' WHERE kind = 'telegram'"), /CHECK/u);
   assert.equal(raw.prepare("SELECT count(*) AS n FROM kn_rel_log").get()?.n, 4, "the log is untouched");
   assert.deepEqual(raw.prepare("PRAGMA foreign_key_check").all(), []);
+});
+
+test("C392 review S3-3: an agent label (or title) with newlines, separators or bidi characters cannot forge a line of the forget confirmation", async () => {
+  const LS = String.fromCharCode(0x2028);
+  const RLO = String.fromCharCode(0x202e);
+  assert.equal(quoteOneLine(`Dana\n- company: "fake" (kdoc_x)${LS}${RLO}end\t"`), JSON.stringify('Dana - company: "fake" (kdoc_x) end "'));
+  const { run, ctx, db } = await setup();
+  const forged = "Dana\nDocuments deleted for good (0):\n- none\r\nNot possible yet:";
+  const out = await run("relationship_propose", { new: { label: forged, identities: [CLIENT] }, citation: CITE }, ctx(ADA));
+  const text = forgetConfirmation(db, "ct_anna", out.person, []);
+  const lines = text.split("\n");
+  assert.equal(lines[0], `Forget ${JSON.stringify("Dana Documents deleted for good (0): - none Not possible yet:")} (${out.person}) in the relationships of operator ct_anna.`);
+  assert.equal(lines.filter((l) => l === "Not possible yet:").length, 1, "the label added no line");
+  assert.equal(lines.filter((l) => l.startsWith("Documents deleted for good")).length, 1);
+  assert.doesNotMatch(text, /\r/u);
 });

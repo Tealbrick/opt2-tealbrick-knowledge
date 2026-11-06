@@ -1,20 +1,16 @@
--- C392 R1 hardening (F5, F4). Expand only: two nullable columns and backfills; nothing of 0001-0005 is dropped or renamed.
+-- C392 R1 hardening (F5, F4). Expand only: two nullable columns and one backfill (label_set_by); nothing of 0001-0005 is dropped or renamed.
 --
--- F5: trust is keyed on WHO SENT a message, so it only holds for an identity the sender cannot fake. `verified_by` says why
--- an identity is trusted as the sender: `platform_id` = a Slack, Buzz or Telegram id (the platform API names the author, a
--- third party cannot send as another id) whose link to this person the OWNER confirmed (an accepted identity proposal, or
--- the owner's relationship_set verifyIdentities). `dkim_spf_aligned` is reserved for an email sender that Connect attests per
--- message (a spec follow-up: messages/1 `author.verified`); no code path writes it yet, so an email identity is never
--- verified and a lookup by email reads at most `draft_only`. NULL = unverified (every email, phone and other identity, and
--- every identity an agent put in). The CHECK pins each value to its kinds, so a handler bug cannot verify an email as a
--- platform id.
+-- F5: trust is keyed on WHO SENT a message, so it may only rise above draft_only for a sender the message SOURCE attests
+-- (spec 0.1.91 messages/1 `author.verified`, through Connect; not wired yet, so no read rises today). `verified_by` is the
+-- OWNER's state kept for that path: `platform_id` = a Slack, Buzz or Telegram id the owner verified as this person with
+-- relationship_set verifyIdentities (never an agent, never by accepting a proposal). `dkim_spf_aligned` is reserved for an
+-- email identity; no code path writes it. NULL = unverified. The CHECK pins each value to its kinds, so a handler bug cannot
+-- verify an email as a platform id. No backfill: R1 is unreleased and owners verify explicitly.
 ALTER TABLE kn_rel_identities ADD COLUMN verified_by TEXT CHECK (
   verified_by IS NULL
   OR (verified_by = 'platform_id' AND kind IN ('slack', 'buzz', 'telegram'))
   OR (verified_by = 'dkim_spf_aligned' AND kind = 'email')
 );
--- Backfill: platform ids the owner confirmed (rows not written by an agent; an agent's created_by is its agt_ id).
-UPDATE kn_rel_identities SET verified_by = 'platform_id' WHERE kind IN ('slack', 'buzz', 'telegram') AND created_by NOT LIKE 'agt\_%' ESCAPE '\';
 
 -- F4: a label is owner text only when the owner typed it (relationship_set). An agent's label (a new person's, or an
 -- accepted label proposal: the words still come from a message) is NULL here and reads back under `observed`.
