@@ -61,7 +61,32 @@ export interface NotebookClientOptions {
   fetch?: typeof fetch;
 }
 
+/**
+ * INC-20261106-02: the cause of a failed research engine call, as a short fixed code from upstream's error text (never the
+ * text itself: it may quote the prompt or a provider message). Open Notebook answers errors as {"detail": "<text>"}.
+ */
+const PARAMETERS = ["top_p", "temperature", "max_tokens", "max_completion_tokens", "reasoning_effort", "response_format", "tools", "stream"];
+export function failureCause(status: number, detail: string): string {
+  const text = detail.toLowerCase();
+  const param = /unsupported (?:parameter|value)/u.test(text) ? PARAMETERS.find((name) => text.includes(`'${name}'`) || text.includes(`"${name}"`)) : undefined;
+  if (param) return `unsupported_parameter:${param}`;
+  if (/unsupported (?:parameter|value)/u.test(text)) return "unsupported_parameter";
+  if (/decrypt|encryption key|fernet|invalid token/u.test(text)) return "credential_decrypt";
+  if (/api key|apikey|unauthori[sz]ed|authentication|\b401\b|invalid_api_key|expired/u.test(text)) return "auth_failed";
+  if (/rate limit|\b429\b|quota|insufficient_quota/u.test(text)) return "rate_limited";
+  if (/model[^.]{0,40}(?:not found|does not exist)|model_not_found|unknown model/u.test(text)) return "model_not_found";
+  if (/credential|no default model|not configured|configuration/u.test(text)) return "model_config";
+  if (/timed? ?out|timeout/u.test(text)) return "timeout";
+  if (/context length|too many tokens|maximum context/u.test(text)) return "context_too_long";
+  return status >= 500 ? "upstream_error" : "upstream_rejected";
+}
+
+/** One failed research engine call: method, path without query, HTTP status (or null) and the cause code. */
+export type NotebookFailure = { method: string; path: string; status: number | string; cause: string };
+
 export class NotebookClient {
+  /** INC-20261106-02: called for every failed call (Knowledge logs it); never carries upstream text. */
+  onFailure: ((failure: NotebookFailure) => void) | null = null;
   private readonly baseUrl: string;
   private readonly password: string;
   private readonly timeoutMs: number;
@@ -91,11 +116,26 @@ export class NotebookClient {
         headers: { authorization: `Bearer ${this.password}`, accept: "application/json", ...(body === undefined ? {} : { "content-type": "application/json" }) },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       });
-    } catch {
+    } catch (error) {
+      const cause = error instanceof Error && error.name === "TimeoutError" ? "timeout" : "unreachable";
+      this.onFailure?.({ method, path: path.split("?")[0] ?? path, status: "none", cause });
       throw failure("upstream_unavailable", null);
     }
     if (!response.ok) {
-      await response.body?.cancel();
+      if (response.status !== 404) {
+        // a bounded read of {"detail": …}: only the derived cause code leaves this function
+        let detail = "";
+        try {
+          const raw = (await response.text()).slice(0, 4096);
+          const parsed = JSON.parse(raw) as unknown;
+          detail = isObject(parsed) && typeof parsed.detail === "string" ? parsed.detail : raw;
+        } catch {
+          detail = "";
+        }
+        this.onFailure?.({ method, path: path.split("?")[0] ?? path, status: response.status, cause: failureCause(response.status, detail) });
+      } else {
+        await response.body?.cancel();
+      }
       throw failure(response.status === 404 ? "not_found" : "upstream_rejected", response.status);
     }
     if (response.status === 204) return null;

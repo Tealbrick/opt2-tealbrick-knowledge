@@ -16,12 +16,17 @@ COPY --from=tb /opt/tb /opt/tb
 # INC-20261106-02 (0.1.38): research chat answered 502 on every OpenAI workspace. esperanto (Open Notebook's model library,
 # 2.25.1 here, same in 2.28.0) leaves out temperature/top_p only for models named o1/o3/o4/gpt-5; Knowledge's OpenAI chat
 # model gpt-6-luna is a reasoning model too and OpenAI refuses its top_p ("Unsupported parameter: 'top_p'", 400). gpt-6
-# models count as reasoning models here. The build fails if the upstream line is not there exactly once, and checks the
-# result (no temperature, no top_p for gpt-6-luna; gpt-4o keeps them).
+# models (the family and dated ids) count as reasoning models here. The build fails if the upstream line is not there
+# exactly once, and checks the result: gpt-6-luna, gpt-6-luna-20260922, gpt-6-sol and gpt-6-astra send no temperature and no
+# top_p, and max_tokens goes out as max_completion_tokens exactly as for gpt-5; gpt-4o keeps temperature and top_p.
 RUN f=/app/.venv/lib/python3.12/site-packages/esperanto/providers/llm/openai.py \
   && test "$(grep -c 'or self.get_model_name().startswith("gpt-5")$' "$f")" = 1 \
   && sed -i 's/or self.get_model_name().startswith("gpt-5")$/or self.get_model_name().startswith("gpt-5") or self.get_model_name().startswith("gpt-6")/' "$f" \
-  && /app/.venv/bin/python -c "from esperanto.providers.llm.openai import OpenAILanguageModel as M; r = M(model_name='gpt-6-luna', api_key='build-check'); k = r._get_api_kwargs(); assert r._is_reasoning_model() and 'top_p' not in k and 'temperature' not in k, k; o = M(model_name='gpt-4o', api_key='build-check'); assert not o._is_reasoning_model() and 'top_p' in o._get_api_kwargs()"
+  && /app/.venv/bin/python -c "from esperanto.providers.llm.openai import OpenAILanguageModel as M; \
+ref = sorted(M(model_name='gpt-5-mini', api_key='build-check')._get_api_kwargs(max_tokens=1000)); \
+checks = [(n, M(model_name=n, api_key='build-check')) for n in ('gpt-6-luna', 'gpt-6-luna-20260922', 'gpt-6-sol', 'gpt-6-astra')]; \
+[(lambda n, r, k, km: (_ for _ in ()).throw(AssertionError((n, k, km))) if not (r._is_reasoning_model() and 'top_p' not in k and 'temperature' not in k and sorted(km) == ref == ['max_completion_tokens', 'stream']) else None)(n, r, r._get_api_kwargs(), r._get_api_kwargs(max_tokens=1000)) for n, r in checks]; \
+o = M(model_name='gpt-4o', api_key='build-check'); assert not o._is_reasoning_model() and 'top_p' in o._get_api_kwargs()"
 COPY services/notebook/entrypoint.sh services/notebook/ipv6-forward.ts /opt/knowledge/
 RUN chmod 0755 /opt/knowledge/entrypoint.sh
 ENTRYPOINT ["node", "/opt/tb/node_modules/@opt2-tealbrick/miniapp-sdk/dist/exec/cli.js", "--", "/opt/knowledge/entrypoint.sh"]

@@ -316,6 +316,8 @@ export class Knowledge {
       this.config.research && this.config.notebookUrl && this.config.notebookPassword
         ? new NotebookClient({ baseUrl: this.config.notebookUrl, password: this.config.notebookPassword, fetch: this.opts.fetch })
         : null;
+    // INC-20261106-02: a failed research call is logged with its cause code (never upstream text or the prompt)
+    if (notebook) notebook.onFailure = ({ method, path, status, cause }) => this.engineLog?.("research engine call failed", { method, path, status, cause });
     const projector = engine ? new Projector(db, store, areas, engine, now) : null;
     // INC-20261106-01: a failed projection is logged (ids, attempt, error code; never content), it was silent
     if (projector) projector.log = (msg, fields) => this.engineLog?.(msg, fields);
