@@ -27,6 +27,7 @@ Knowledge gives agents memory and documents, with data in the customer's own dep
 - Areas are grant scopes: one private memory area per agent and one shared company area.
 - With Governance 0.3.0+ (C373): a personal area per directory person, shared by that person's agents (their default write area), and a team area per team (read by members' agents). Another person's area is readable only when the owner lets a team read it (Access page). No directory = the two areas above only.
 - Relationships (C392 R1): agents keep, for their owner, the people the owner deals with (identities, type, cited history). Agents propose; the owner confirms. Stance and trust (`reply`, `draft_only`, `hold`) are set by the owner only; a new person starts at `hold`. No owner page yet.
+- Forget a person (C392 R2): the owner can forget one person for good: the person's relationship rows go (one log row with counts stays), the owner sees which Knowledge documents name the person (title, body, old revisions, comments, deleted documents; never the text) and may delete the ones they pick for good, with their memory engine pages. The report lists what cannot be reached yet (Foundry, LCM-X, backups, research sources, other GBrain pages). Agents cannot forget.
 - Companion apps (Observer) may write into the company area as app callers: `areas_list`, `document_create`, `document_update` only, never an agent's private area. The document page names the app ("Observer").
 - Auth, grants, receipts, settings and backups come from the Miniapp SDK. Knowledge has no own auth.
 

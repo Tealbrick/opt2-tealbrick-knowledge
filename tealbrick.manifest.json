@@ -219,7 +219,8 @@
           "paths": [
             "/sources",
             "/models",
-            "/embed-check"
+            "/embed-check",
+            "/purge-page"
           ]
         }
       },
@@ -3811,6 +3812,434 @@
         "update"
       ],
       "effect": "write",
+      "idempotency": "required",
+      "receipt": true,
+      "audience": "person"
+    },
+    {
+      "id": "relationship_forget_scan",
+      "title": "Find what names a person (before forget)",
+      "description": "Before a forget: list the Knowledge documents of every area (live and deleted, every revision and comment) that contain the name or an identity of one person of one operator. Returns document ids, areas and where the person was found, never the text. Changes nothing.",
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "operator",
+          "person"
+        ],
+        "properties": {
+          "operator": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "description": "Governance person id of the operator (the owner of the agents)."
+          },
+          "person": {
+            "type": "string",
+            "pattern": "^rp_[0-9A-HJKMNP-TV-Z]{26}$",
+            "description": "A relationships person id (rp_…)."
+          }
+        }
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "operator": {
+            "type": "string"
+          },
+          "person": {
+            "type": "string"
+          },
+          "scan": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "terms",
+              "skippedShort",
+              "truncated"
+            ],
+            "properties": {
+              "terms": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "How many search terms (the label and identity values) were used."
+              },
+              "skippedShort": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Terms shorter than 4 characters, not searched (they match too much ordinary text)."
+              },
+              "truncated": {
+                "type": "boolean",
+                "description": "More than 500 documents matched; only the first 500 are listed."
+              }
+            }
+          },
+          "matched": {
+            "type": "array",
+            "maxItems": 500,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "documentId",
+                "area",
+                "deleted",
+                "where"
+              ],
+              "properties": {
+                "documentId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64
+                },
+                "area": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64
+                },
+                "deleted": {
+                  "type": "boolean",
+                  "description": "The document is soft-deleted (deleted in the Library, still stored)."
+                },
+                "where": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 4,
+                  "items": {
+                    "type": "string",
+                    "enum": [
+                      "title",
+                      "body",
+                      "revision",
+                      "comment"
+                    ]
+                  },
+                  "description": "Where a name or identity of the person was found. body = the current body, summary, tags and source; revision = any stored revision. Never the text."
+                }
+              }
+            }
+          },
+          "notPossibleYet": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "store",
+                "reason"
+              ],
+              "properties": {
+                "store": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64
+                },
+                "reason": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 400
+                }
+              }
+            },
+            "description": "What this forget cannot reach yet, store by store."
+          }
+        }
+      },
+      "crud": [
+        "read"
+      ],
+      "effect": "read",
+      "idempotency": "none",
+      "receipt": false,
+      "audience": "person"
+    },
+    {
+      "id": "relationship_forget",
+      "title": "Forget a person",
+      "description": "Forget one person of one operator for good: deletes the person, identities, relationship, proposals and history (one log row with counts stays). Also deletes, with all revisions, comments and links, the documents you pick from this forget's own scan, and purges their memory engine pages. Returns a report, with what cannot be reached yet. Cannot be undone.",
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "operator",
+          "person"
+        ],
+        "properties": {
+          "operator": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "description": "Governance person id of the operator (the owner of the agents)."
+          },
+          "person": {
+            "type": "string",
+            "pattern": "^rp_[0-9A-HJKMNP-TV-Z]{26}$",
+            "description": "A relationships person id (rp_…)."
+          },
+          "purgeDocuments": {
+            "type": "array",
+            "maxItems": 100,
+            "items": {
+              "type": "string",
+              "pattern": "^kdoc_[0-9A-HJKMNP-TV-Z]{26}$"
+            },
+            "description": "Document ids from relationship_forget_scan to delete for good. An id this forget's scan does not match is refused and kept."
+          }
+        }
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "person": {
+            "type": "string"
+          },
+          "operator": {
+            "type": "string"
+          },
+          "deleted": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "relationships": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "people",
+                  "identities",
+                  "edges",
+                  "proposals",
+                  "history"
+                ],
+                "properties": {
+                  "people": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "identities": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "edges": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "proposals": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "history": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                }
+              }
+            }
+          },
+          "scan": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "terms",
+              "skippedShort",
+              "truncated"
+            ],
+            "properties": {
+              "terms": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "How many search terms (the label and identity values) were used."
+              },
+              "skippedShort": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Terms shorter than 4 characters, not searched (they match too much ordinary text)."
+              },
+              "truncated": {
+                "type": "boolean",
+                "description": "More than 500 documents matched; only the first 500 are listed."
+              }
+            }
+          },
+          "documents": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "matched",
+              "purged",
+              "pending",
+              "refused"
+            ],
+            "properties": {
+              "matched": {
+                "type": "array",
+                "maxItems": 500,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "documentId",
+                    "area",
+                    "deleted",
+                    "where"
+                  ],
+                  "properties": {
+                    "documentId": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 64
+                    },
+                    "area": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 64
+                    },
+                    "deleted": {
+                      "type": "boolean",
+                      "description": "The document is soft-deleted (deleted in the Library, still stored)."
+                    },
+                    "where": {
+                      "type": "array",
+                      "minItems": 1,
+                      "maxItems": 4,
+                      "items": {
+                        "type": "string",
+                        "enum": [
+                          "title",
+                          "body",
+                          "revision",
+                          "comment"
+                        ]
+                      },
+                      "description": "Where a name or identity of the person was found. body = the current body, summary, tags and source; revision = any stored revision. Never the text."
+                    }
+                  }
+                }
+              },
+              "purged": {
+                "type": "array",
+                "maxItems": 100,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "documentId",
+                    "area",
+                    "engine"
+                  ],
+                  "properties": {
+                    "documentId": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 64
+                    },
+                    "area": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 64
+                    },
+                    "engine": {
+                      "type": "string",
+                      "enum": [
+                        "purged",
+                        "pending",
+                        "none"
+                      ],
+                      "description": "The memory engine page: purged, pending (queued, retried in the background) or none (no engine runs)."
+                    }
+                  }
+                }
+              },
+              "pending": {
+                "type": "array",
+                "maxItems": 100,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "documentId",
+                    "area",
+                    "reason"
+                  ],
+                  "properties": {
+                    "documentId": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 64
+                    },
+                    "area": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 64
+                    },
+                    "reason": {
+                      "type": "string",
+                      "enum": [
+                        "engine_pending"
+                      ]
+                    }
+                  }
+                }
+              },
+              "refused": {
+                "type": "array",
+                "maxItems": 100,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "documentId",
+                    "reason"
+                  ],
+                  "properties": {
+                    "documentId": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 64
+                    },
+                    "reason": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "notPossibleYet": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "store",
+                "reason"
+              ],
+              "properties": {
+                "store": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64
+                },
+                "reason": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 400
+                }
+              }
+            },
+            "description": "What this forget cannot reach yet, store by store."
+          }
+        }
+      },
+      "crud": [
+        "delete"
+      ],
+      "effect": "destructive",
+      "holdFamily": "destructive",
       "idempotency": "required",
       "receipt": true,
       "audience": "person"

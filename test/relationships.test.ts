@@ -295,12 +295,12 @@ test("C392 R1: the owner's overview lists each directory operator with people, e
   assert.deepEqual(person.proposals.map((p: Record<string, any>) => [p.field, p.value, p.citation.ref, p.proposedBy]), [["type", "customer", "msg-acme-0001", ADA]]);
 });
 
-test("C392 R1: NARROWING_POLICY decides every relationship op ('none'); the manifest declares six ops and the skill", () => {
+test("C392 R1: NARROWING_POLICY decides every relationship op ('none'; R2 forget 'unsupported'); the manifest declares the ops and the skill", () => {
   const manifest = JSON.parse(readFileSync(new URL("../tealbrick.manifest.json", import.meta.url), "utf8"));
   const ops = (manifest.operations as Record<string, any>[]).filter((o) => /^relationships?_/u.test(o.id));
   for (const o of ops) if (o.scopeType) assert.equal(o.scopeType, "area", `${o.id}: like remember, the best area access bounds an agent`);
   assert.deepEqual(ops.map((o) => o.id).sort(), [...RELATIONSHIP_OPS].sort());
-  for (const id of RELATIONSHIP_OPS) assert.equal(NARROWING_POLICY[id], "none", id);
+  for (const id of RELATIONSHIP_OPS) assert.equal(NARROWING_POLICY[id], id.startsWith("relationship_forget") ? "unsupported" : "none", id);
   const shape = Object.fromEntries(ops.map((o) => [o.id, [o.audience, o.crud.join(","), o.effect, o.idempotency, o.receipt, "holdFamily" in o, "scopeType" in o]]));
   assert.deepEqual(shape, {
     relationships_list: ["agent", "read", "read", "none", false, false, true],
@@ -309,6 +309,8 @@ test("C392 R1: NARROWING_POLICY decides every relationship op ('none'); the mani
     relationships_overview: ["person", "read", "read", "none", false, false, false],
     relationship_confirm: ["person", "update", "write", "required", true, false, false],
     relationship_set: ["person", "update", "write", "required", true, false, false],
+    relationship_forget_scan: ["person", "read", "read", "none", false, false, false],
+    relationship_forget: ["person", "delete", "destructive", "required", true, true, false],
   });
   assert.ok(manifest.skills.some((s: Record<string, unknown>) => s.id === "knowledge-relationships" && s.file === "skills/knowledge-relationships/SKILL.md"));
   const skill = readFileSync(new URL("../skills/knowledge-relationships/SKILL.md", import.meta.url), "utf8");
@@ -321,7 +323,7 @@ test("C392 migration 0004: applies after 0001-0003 with data; a child row can ne
   raw.exec("PRAGMA foreign_keys = ON");
   const dir = new URL("../migrations/", import.meta.url);
   const files = readdirSync(dir).filter((f) => f.endsWith(".sql")).sort();
-  assert.equal(files.at(-1), "0004_relationships.sql");
+  assert.ok(files.includes("0004_relationships.sql"));
   for (const f of files.filter((f) => f < "0004")) raw.exec(readFileSync(new URL(f, dir), "utf8"));
   raw.exec("INSERT INTO kn_team_grants (team_id, person_id, tags, created_at, created_by) VALUES ('t', 'p', NULL, 1, 'per_x')");
   raw.exec(readFileSync(new URL("0004_relationships.sql", dir), "utf8"));

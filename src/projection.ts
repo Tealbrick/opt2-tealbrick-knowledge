@@ -33,6 +33,11 @@ export class Projector {
     this.now = now;
   }
 
+  /** True while a pass runs (C392 R2: a page purge waits for it, so an in-flight `put_page` cannot re-create a purged page). */
+  busy(): boolean {
+    return this.running !== null;
+  }
+
   /** Run one pass (concurrent callers share it). Returns the number of rows processed. */
   drain(): Promise<number> {
     if (!this.running) this.running = this.pass().finally(() => (this.running = null));
