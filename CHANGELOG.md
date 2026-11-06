@@ -13,6 +13,30 @@ C392 R1: the relationships store (server, manifest, skill, tests). No owner page
 - Identities are normalized with the canonical handle rule of `@opt2-tealbrick/manifest` (`normalizeHandle`) for email, Slack, Buzz and Telegram; phone = `+` and 6 to 15 digits. One identity names at most one person per operator.
 - Skill `knowledge-relationships`. Receipts and `kn_rel_log` carry ids, field names and enum values only.
 
+C373 Foundry (knowledge#26, merged with main for F0 of Knowledge v2, C392/C393):
+
+App database migration `0005_deep.sql` (expand only; it was `0004_deep.sql` on the branch, renamed after R1 took 0004). New service image `opt2-tealbrick-knowledge-deep` (only deployed when
+the `deep` setting is on).
+
+#### Added
+
+- Foundry feed: the company area's documents go to the deep service (helix-foundry). `kind:table` CSV documents become
+  datasets: pages with the same `source:<collection>` tag merge, and each row cites its document. Other documents become one
+  documents dataset. Idempotent on (document id, version); a deleted table gets a tombstone snapshot. Only the company area
+  is fed; other areas are refused.
+- Agent tools `deep_search` (rows and documents by words, no model, honours Rules tags), `deep_ask` (foundry's analyst
+  with the reasoning model: rows, SQL, assumptions, citations; without a model it says so and points to `deep_search`),
+  `deep_status`. Skill `knowledge-deep`.
+- Owner: `deep_settings_set` (company area on or paused) and a Foundry section on the Settings page (on/off, Foundry chat
+  model state, tables and sync state).
+- The `reasoning` model role is also used by the `deep` service (`KN_REASONING_*`). The supervisor applies it to foundry
+  (raw rows never go to the model, no background runs); callers can never set or read foundry's provider, and foundry's
+  model runs are refused while no model is applied.
+
+#### Changed
+
+- `services/deep` base image Node 24.22.1; the supervisor's `DB_PATH` uses a template string.
+
 ## 0.1.34 (2026-11-06)
 
 C390 (knowledge#38), the second half: the GBrain and notebook databases are in every backup, and tb-exec listens on IPv4 and IPv6.

@@ -64,15 +64,31 @@ const overview = (running: boolean) => ({
     { id: "person-a", label: "Person ct_anna (personal memory)", kind: "person", engineReady: running, documents: 1, ready: 1, pending: 0, failed: 0 },
     { id: "person-z", label: "Person ct_zed (personal memory)", kind: "person", engineReady: running, documents: 0, ready: 0, pending: 0, failed: 0 },
   ],
+  // C373 Foundry: on with the company area fed and no reasoning model (running), or not part of the install
+  deep: running
+    ? {
+        enabled: true,
+        running: true,
+        health: { ok: true, status: "ok", phase: "serving" },
+        model: { state: "unset" },
+        allowedAreas: ["company"],
+        areas: [{ id: "company", label: "Company", selected: true, syncedAt: 1793063000000, error: null, tables: [{ name: "orders", rows: 3, documents: 2 }], failedTables: [{ name: "broken", error: "a quoted field is not closed" }], textDocuments: true }],
+      }
+    : { enabled: false, running: false, allowedAreas: ["company"] },
 });
+const deepCalls: unknown[] = [];
 const stub = { running: true, keyPresent: false };
 const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
-globalThis.fetch = (async (input: string | URL | Request) => {
+globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
   const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url, "http://localhost");
   const path = url.pathname.replace("/a/knowledge/tb/v1/", "");
   if (path === "session") return json(200, { principal: { type: "person", id: "per_1", instance: "ins_1" }, csrf: "csrf-token", idempotencyRequired: [] });
   const op = /^ops\/(.+)$/.exec(path)?.[1];
   if (op === "settings_overview") return json(200, { status: "ok", output: overview(stub.running) });
+  if (op === "deep_settings_set") {
+    deepCalls.push(JSON.parse(String((init as RequestInit | undefined)?.body ?? "{}")));
+    return json(200, { status: "ok", output: { areas: [] } });
+  }
   // a stray value field: the page must never render it
   if (op === "access_overview") return json(200, { status: "ok", output: { people: [{ id: "ct_anna", active: true, area: "person-a", areaExists: true, documents: 1, agents: [{ id: "agt_a", name: "Ada" }], readBy: [] }] } });
   if (op === "tb.keys_status") return json(200, { status: "ok", output: [{ name: "OPENAI_API_KEY", required: true, present: stub.keyPresent, source: null, value: SECRET }] });
@@ -152,6 +168,35 @@ describe("Settings page (C296)", () => {
     assert.ok(roleRows.some((r) => /^Reasoning \(ask and explain\)\s*unknown$/u.test(r)), roleRows.join("|"));
     assert.match(text, /index was built with openai:text-embedding-3-small/u);
     assert.match(text, /has not reported its models yet/u);
+    await m.unmount();
+  });
+
+  it("C373: Foundry shows on, chat needing a reasoning model, the company feed with its tables; Pause sends deep_settings_set", async () => {
+    stub.running = true;
+    deepCalls.length = 0;
+    const m = await mount(mod.Settings);
+    const section = m.host.querySelector('section[aria-label="Foundry"]');
+    assert.ok(section, "Foundry section");
+    const text = section?.textContent ?? "";
+    assert.match(text, /Foundry chat:\s*needs a reasoning model/u);
+    assert.match(text, /orders\s*3\s*2/u);
+    assert.match(text, /broken\s*not loaded/u);
+    assert.match(text, /Person, team and agent memory never goes to Foundry/u);
+    const pause = [...(section?.querySelectorAll("button") ?? [])].find((b) => b.textContent === "Pause") as HTMLButtonElement | undefined;
+    assert.ok(pause);
+    await act(async () => pause?.click());
+    for (let i = 0; i < 4; i++) await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+    assert.equal(deepCalls.length, 1);
+    assert.match(JSON.stringify(deepCalls[0]), /"areas":\[\]/u);
+    await m.unmount();
+  });
+
+  it("C373: without Foundry the section says off and how it is chosen", async () => {
+    stub.running = false;
+    const m = await mount(mod.Settings);
+    const text = m.host.querySelector('section[aria-label="Foundry"]')?.textContent ?? "";
+    assert.match(text, /Foundry:\s*off/u);
+    assert.match(text, /chosen when the app is installed/u);
     await m.unmount();
   });
 });

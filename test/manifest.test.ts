@@ -31,7 +31,7 @@ test("C373: model roles embeddings + reasoning are optional, standard, fed to th
   const { activeModelRoles } = await import("@opt2-tealbrick/manifest");
   const { ROLE_ENV } = await import("../services/gbrain/models.ts");
   const roles = manifest.settings.modelRoles as { role: string; required: boolean; minPolicy: string; usedBy: string[]; env: Record<string, string> }[];
-  assert.deepEqual(roles.map((r) => [r.role, r.required, r.minPolicy, r.usedBy.join(",")]), [["embeddings", false, "standard", "gbrain"], ["reasoning", false, "standard", "gbrain"]]);
+  assert.deepEqual(roles.map((r) => [r.role, r.required, r.minPolicy, r.usedBy.join(",")]), [["embeddings", false, "standard", "gbrain"], ["reasoning", false, "standard", "gbrain,deep"]]);
   assert.deepEqual(roles.find((r) => r.role === "embeddings")?.env, ROLE_ENV.embeddings);
   assert.deepEqual(roles.find((r) => r.role === "reasoning")?.env, ROLE_ENV.reasoning);
   // MANIFEST §7.1: never GBrain's run-time model variables (a restart on keysRev would embed against the old index)

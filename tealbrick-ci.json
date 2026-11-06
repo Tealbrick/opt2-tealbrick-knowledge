@@ -43,6 +43,14 @@
       "service": "notebook",
       "context": ".",
       "dockerfile": "services/notebook/Dockerfile"
+    },
+    {
+      "name": "opt2-tealbrick-knowledge-deep",
+      "product": "knowledge",
+      "kind": "service",
+      "service": "deep",
+      "context": ".",
+      "dockerfile": "services/deep/Dockerfile"
     }
   ]
 }

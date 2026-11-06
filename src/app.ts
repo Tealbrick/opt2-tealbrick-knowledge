@@ -28,7 +28,7 @@ export type KnowledgeDefinition = AppDefinition & { onStart(ctx: StartContext): 
 
 export function knowledgeDefinition(env: Record<string, string | undefined>, TbError: ErrorFactory, opts: KnowledgeOptions = {}): { definition: KnowledgeDefinition; knowledge: Knowledge } {
   const knowledge = new Knowledge(readConfig(env), opts);
-  const { handlers, dynamic, events } = createHandlers(knowledge, TbError);
+  const { handlers, dynamic, events } = createHandlers(knowledge, TbError, { ...(opts.deepAskWaitMs !== undefined ? { askWaitMs: opts.deepAskWaitMs } : {}), ...(opts.deepAskPollMs !== undefined ? { askPollMs: opts.deepAskPollMs } : {}) });
   return {
     knowledge,
     definition: {
@@ -66,9 +66,11 @@ export function knowledgeDefinition(env: Record<string, string | undefined>, TbE
         await knowledge.checkModels(ctx).catch(() => undefined);
         // F89: probe the engine now (and every 10 min) so a degraded engine shows before the first recall.
         await knowledge.watchEngine(services, ctx.statusChanged ? () => ctx.statusChanged?.() : null, opts.engineProbeMs).catch(() => undefined);
+        // C373: hand the selected areas' documents to the deep service now and every minute (not awaited: it may start later).
+        void knowledge.watchDeep(services, opts.deepSyncMs).catch(() => undefined);
         // a model answer during boot may have arrived before the status push was wired: push once now (review)
         if (knowledge.attention()) ctx.statusChanged?.();
-        ctx.log.info("knowledge started", { engine: services.engine ? "gbrain" : "none", configured: knowledge.config.engine, attention: knowledge.attention()?.code ?? "none", embeddings: knowledge.engineModels()?.embeddings.state ?? "unknown", reasoning: knowledge.engineModels()?.reasoning.state ?? "unknown", engineState: knowledge.engineStatus().state, research: services.notebook !== null, areas: services.areas.list().length });
+        ctx.log.info("knowledge started", { engine: services.engine ? "gbrain" : "none", configured: knowledge.config.engine, attention: knowledge.attention()?.code ?? "none", embeddings: knowledge.engineModels()?.embeddings.state ?? "unknown", reasoning: knowledge.engineModels()?.reasoning.state ?? "unknown", engineState: knowledge.engineStatus().state, research: services.notebook !== null, deep: services.deep !== null, areas: services.areas.list().length });
       },
     },
   };

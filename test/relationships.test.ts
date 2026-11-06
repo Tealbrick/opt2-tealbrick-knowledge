@@ -321,7 +321,8 @@ test("C392 migration 0004: applies after 0001-0003 with data; a child row can ne
   raw.exec("PRAGMA foreign_keys = ON");
   const dir = new URL("../migrations/", import.meta.url);
   const files = readdirSync(dir).filter((f) => f.endsWith(".sql")).sort();
-  assert.equal(files.at(-1), "0004_relationships.sql");
+  // 0005_deep (C373 Foundry) follows; 0004 must stay the fourth file so it applies right after 0001-0003
+  assert.equal(files[3], "0004_relationships.sql");
   for (const f of files.filter((f) => f < "0004")) raw.exec(readFileSync(new URL(f, dir), "utf8"));
   raw.exec("INSERT INTO kn_team_grants (team_id, person_id, tags, created_at, created_by) VALUES ('t', 'p', NULL, 1, 'per_x')");
   raw.exec(readFileSync(new URL("0004_relationships.sql", dir), "utf8"));
