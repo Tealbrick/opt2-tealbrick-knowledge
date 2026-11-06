@@ -3,6 +3,7 @@
 import { useSession } from "@opt2-tealbrick/miniapp-sdk/client";
 import { Button, Card, Dialog, Field, Notice, SearchIcon, Section, Segmented, Select, Table, Tag, Textarea, TextInput } from "@opt2-tealbrick/ui";
 import { type CSSProperties, useCallback, useEffect, useState } from "react";
+import { AreaPicker } from "./area-filter.tsx";
 import { ConfirmDelete, ErrorNotice, errText, isConflict, Loading, run, type Status, statusTag, TextBlock, useDebounced, useOverview, when, whenShort } from "./common.tsx";
 
 /** Empty string means "not chosen". */
@@ -231,19 +232,17 @@ function Browse({ areas, nav, setNav }: { areas: { id: string; label: string; do
   return (
     <div className="tb-stack">
       <div className="toolbar">
-        <div className="kn-area">
-          <Field label="Memory area">
-            <Select
-              options={areas.map((a) => ({ value: a.id, label: a.label }))}
-              value={nav.area}
-              onValueChange={(value) => {
-                setNav({ area: value, collectionId: "" });
-                setQuery("");
-                setNotice(null);
-              }}
-            />
-          </Field>
-        </div>
+        <AreaPicker
+          page="library"
+          label="Memory area"
+          areas={areas}
+          value={nav.area}
+          onChange={(value) => {
+            setNav({ area: value, collectionId: "" });
+            setQuery("");
+            setNotice(null);
+          }}
+        />
       </div>
       <ErrorNotice error={error} />
       {notice ? <Notice tone="live">{notice}</Notice> : null}

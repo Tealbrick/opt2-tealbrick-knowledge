@@ -4,6 +4,8 @@
 import { callOp } from "@opt2-tealbrick/miniapp-sdk/client";
 import { Button, Notice, Table, Tag } from "@opt2-tealbrick/ui";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { type AccessOverview, personWords } from "./access.tsx";
+import { useRowFilter } from "./area-filter.tsx";
 import { errText, PageHead } from "./common.tsx";
 
 interface Choice {
@@ -134,9 +136,50 @@ function FoundrySection({ deep, reload }: { deep: DeepOverview; reload: () => vo
   );
 }
 
+/** The memory areas, with a filter on the rows (C382 batch 4). The areas load in full, so the filter reads all of them. */
+/** The area name the owner reads. A person's area is named by the agents that act for the person, never by the directory id. */
+function areaName(a: SettingsOverview["areas"][number], people: AccessOverview["people"] | null): string {
+  if (a.kind !== "person") return a.label;
+  return `${personWords(people?.find((p) => p.area === a.id)?.agents)}: personal memory`;
+}
+
+function AreasTable({ areas, people }: { areas: SettingsOverview["areas"]; people: AccessOverview["people"] | null }) {
+  const { shown, bar } = useRowFilter("settings", areas, (a) => [areaName(a, people), a.kind, a.engineReady ? "ready" : "preparing"], "Filter the memory areas");
+  return (
+    <>
+      {bar}
+      <Table>
+        <thead>
+          <tr>
+            <th>Area</th>
+            <th>Engine source</th>
+            <th>Documents</th>
+            <th>In memory</th>
+            <th>Waiting</th>
+            <th>Failed</th>
+          </tr>
+        </thead>
+        <tbody>
+          {shown.map((a) => (
+            <tr key={a.id}>
+              <td className="strong">{areaName(a, people)}</td>
+              <td>{a.engineReady ? <Tag status="live">ready</Tag> : <Tag status="busy">preparing</Tag>}</td>
+              <td className="num">{a.documents}</td>
+              <td className="num">{a.ready}</td>
+              <td className="num">{a.pending}</td>
+              <td className="num">{a.failed ? <Tag status="needs-you">{a.failed}</Tag> : 0}</td>
+            </tr>
+          ))}
+        </tbody>
+      </Table>
+    </>
+  );
+}
+
 export function Settings() {
   const [data, setData] = useState<SettingsOverview | null>(null);
   const [keys, setKeys] = useState<KeyRow[] | null>(null);
+  const [people, setPeople] = useState<AccessOverview["people"] | null>(null);
   const [error, setError] = useState<string | null>(null);
   // Only the latest load may set the page (a slow older answer never overwrites a newer one).
   const latest = useRef(0);
@@ -155,13 +198,17 @@ export function Settings() {
     callOp<KeyRow[] | { keys: KeyRow[] }>("tb.keys_status", {})
       .then((r) => call === latest.current && setKeys(Array.isArray(r) ? r : (r.keys ?? [])))
       .catch(() => call === latest.current && setKeys(null));
+    // the agents that act for each person name the person's area; without them the area reads "A person"
+    callOp<AccessOverview>("access_overview", {})
+      .then((r) => call === latest.current && setPeople(r.people))
+      .catch(() => call === latest.current && setPeople(null));
   }, []);
   useEffect(load, [load]);
   const rejected = data?.engine.attention?.code === KEY_REJECTED_CODE;
   const keyState = (name: string) => {
     const row = keys?.find((k) => k.name === name);
     if (!row) return <Tag status="busy">unknown</Tag>;
-    if (row.present && row.required && rejected) return <Tag status="needs-you">rejected by provider</Tag>;
+    if (row.present && rejected) return <Tag status="needs-you">rejected by provider</Tag>;
     if (row.present) return <Tag status="live">set</Tag>;
     return row.required ? <Tag status="needs-you">missing</Tag> : <Tag>not needed</Tag>;
   };
@@ -298,30 +345,7 @@ export function Settings() {
 
           <section className="tb-stack" aria-label="Memory areas">
             <h2>Memory areas</h2>
-            <Table>
-              <thead>
-                <tr>
-                  <th>Area</th>
-                  <th>Engine source</th>
-                  <th>Documents</th>
-                  <th>In memory</th>
-                  <th>Waiting</th>
-                  <th>Failed</th>
-                </tr>
-              </thead>
-              <tbody>
-                {data.areas.map((a) => (
-                  <tr key={a.id}>
-                    <td className="strong">{a.label}</td>
-                    <td>{a.engineReady ? <Tag status="live">ready</Tag> : <Tag status="busy">preparing</Tag>}</td>
-                    <td className="num">{a.documents}</td>
-                    <td className="num">{a.ready}</td>
-                    <td className="num">{a.pending}</td>
-                    <td className="num">{a.failed ? <Tag status="needs-you">{a.failed}</Tag> : 0}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </Table>
+            <AreasTable areas={data.areas} people={people} />
           </section>
         </div>
       )}

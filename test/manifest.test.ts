@@ -38,5 +38,16 @@ test("C373: model roles embeddings + reasoning are optional, standard, fed to th
   for (const r of roles) for (const name of Object.values(r.env)) assert.ok(!name.startsWith("GBRAIN_"), name);
   assert.deepEqual(activeModelRoles(manifest, { engine: "gbrain" } as never, "gbrain").map((r: { role: string }) => r.role), ["embeddings", "reasoning"]);
   const gbrain = manifest.runtime.services.find((x: { id: string }) => x.id === "gbrain");
-  assert.deepEqual(gbrain.helper.paths, ["/sources", "/models"]);
+  assert.deepEqual(gbrain.helper.paths, ["/sources", "/models", "/embed-check"]);
+});
+
+test("C390: every service with a backup has its private address in the app env, so the SDK dumps it (it skipped gbrain-db and notebook-db before)", () => {
+  const env = (manifest.runtime.env ?? []) as { name: string; value?: string }[];
+  const services = (manifest.runtime.services ?? []) as { id: string; backup?: unknown }[];
+  const backed = services.filter((s) => s.backup);
+  assert.deepEqual(backed.map((s) => s.id).sort(), ["gbrain-db", "notebook-db"]);
+  for (const s of backed) {
+    const re = new RegExp(`\\{\\{services\\.${s.id}\\.(url|host)\\}\\}`);
+    assert.ok(env.some((e) => typeof e.value === "string" && re.test(e.value)), `${s.id} has no {{services.${s.id}.host}} env entry`);
+  }
 });

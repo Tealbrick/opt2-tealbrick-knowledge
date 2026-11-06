@@ -162,8 +162,13 @@ export function planModels(env: Record<string, string | undefined>, built: Built
     active = null;
   } else if (built.disabled || !built.embeddingModel) {
     if (wanted) {
-      enable = sizeArgs(wanted);
-      active = wanted;
+      // C389: the brain already has its vector column (GBrain makes it 1024 wide without embeddings). A model whose width
+      // GBrain knows is enabled at that width (no `--embedding-dimensions`: GBrain uses the column and refuses a model that
+      // cannot produce it); a default width such as the legacy 1536 would never fit. Only a model GBrain cannot size
+      // (`needsDims`) passes its real width, which must then fit the column.
+      const fixed = knowsWidth(wanted.model);
+      enable = sizeArgs(fixed ? { ...wanted, dims: null } : wanted);
+      active = fixed ? { ...wanted, dims: null } : wanted;
     }
   } else {
     active = { model: built.embeddingModel, dims: built.dims };
@@ -203,8 +208,15 @@ export function planModels(env: Record<string, string | undefined>, built: Built
   return { env: out, init, enable, status: { v: 1, embeddings: { state, source, active, wanted, ...addressIgnored(embRole) }, reasoning: { ...chat, ...addressIgnored(chatRole) } } };
 }
 
+/** GBrain sizes this `provider:model` itself (its recipe is not one that needs `dims`): the brain's column fixes the width. */
+function knowsWidth(model: string): boolean {
+  const p = Object.values(GBRAIN_PROVIDERS).find((x) => model.startsWith(`${x.recipe}:`));
+  return !!p && !p.needsDims;
+}
+
+/** C389: for a model GBrain sizes itself, a bound or default width is no change (the column fixes it); else the widths must match. */
 function sameModel(a: { model: string; dims: number | null }, b: { model: string; dims: number | null }): boolean {
-  return a.model === b.model && (a.dims === null || b.dims === null || a.dims === b.dims);
+  return a.model === b.model && (a.dims === null || b.dims === null || a.dims === b.dims || knowsWidth(a.model));
 }
 
 /**

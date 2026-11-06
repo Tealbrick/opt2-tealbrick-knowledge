@@ -12,6 +12,7 @@ import { type AppClient, appEnv, createFakeBridge, type FakeBridge, TEST_ROOTS_E
 import type { Manifest } from "@opt2-tealbrick/spec/manifest";
 import type { Json } from "@opt2-tealbrick/spec/sdk";
 import start from "../conformance.start.ts";
+import { conformanceManifest } from "../conformance.strip.ts";
 
 const manifest = JSON.parse(readFileSync(new URL("../tealbrick.manifest.json", import.meta.url), "utf8")) as Manifest;
 const RULE = "rul_01REALRULE0000000000000000";
@@ -27,7 +28,8 @@ let key = 0;
 const idem = () => `g5-real-${String(++key).padStart(4, "0")}`;
 
 before(async () => {
-  bridge = await createFakeBridge({ manifest });
+  // C380: the harness serves the manifest without the guarded Governance ops (conformance.strip.ts), so the fake bridge serves that one
+  bridge = await createFakeBridge({ manifest: conformanceManifest(manifest) });
   await bridge.control.publishKeySet();
   dataDir = mkdtempSync(join(tmpdir(), "knowledge-g5-"));
   const env = appEnv(bridge, dataDir, { [TEST_ROOTS_ENV]: JSON.stringify(bridge.testRootJwks()), TBCONF_PORT: "0", TBCONF_STUB_ENGINE: "0" });

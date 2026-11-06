@@ -2,12 +2,23 @@
 
 All notable changes to the Knowledge mini app. Versions are assigned at merge (C340).
 
-## Unreleased (proposed 0.1.30; C373 Foundry, builds on 0.1.29)
+## Unreleased
 
-App database migration `0004_deep.sql` (expand only). New service image `opt2-tealbrick-knowledge-deep` (only deployed when
+C392 R1: the relationships store (server, manifest, skill, tests). No owner page yet (follow-up R1-UI).
+
+- Migration `0004_relationships.sql` (expand only): `kn_rel_people`, `kn_rel_identities`, `kn_relationships`, `kn_rel_proposals`, `kn_rel_history` and the append-only `kn_rel_log`. A third-party person belongs to one operator (a Governance person who owns agents); every child row names the pair (person, operator) in its foreign key.
+- Agent ops `relationships_list`, `relationship_get` (by person id or identity) and `relationship_propose` (scopeType `area`, like `remember`). The operator is the agent's owner in the Governance directory copy; no copy or no owner answers 409 `relationships_unavailable`. Another operator's person answers 404 `person_unknown`.
+- Agents propose type, identities and label (pending); history (contact, promise, topic) is written at once. Every proposal needs a citation {source, ref, at}. The type that reads back is the owner-confirmed one; a pending type shows as `proposedType`. A new person starts with type `unknown` and trust `hold`.
+- Person ops `relationships_overview`, `relationship_confirm` and `relationship_set`. Only the owner sets stance and trust; the agent input schemas have no such field (`additionalProperties: false`).
+- Identities are normalized with the canonical handle rule of `@opt2-tealbrick/manifest` (`normalizeHandle`) for email, Slack, Buzz and Telegram; phone = `+` and 6 to 15 digits. One identity names at most one person per operator.
+- Skill `knowledge-relationships`. Receipts and `kn_rel_log` carry ids, field names and enum values only.
+
+C373 Foundry (knowledge#26, merged with main for F0 of Knowledge v2, C392/C393):
+
+App database migration `0005_deep.sql` (expand only; it was `0004_deep.sql` on the branch, renamed after R1 took 0004). New service image `opt2-tealbrick-knowledge-deep` (only deployed when
 the `deep` setting is on).
 
-### Added
+#### Added
 
 - Foundry feed: the company area's documents go to the deep service (helix-foundry). `kind:table` CSV documents become
   datasets: pages with the same `source:<collection>` tag merge, and each row cites its document. Other documents become one
@@ -22,9 +33,100 @@ the `deep` setting is on).
   (raw rows never go to the model, no background runs); callers can never set or read foundry's provider, and foundry's
   model runs are refused while no model is applied.
 
-### Changed
+#### Changed
 
 - `services/deep` base image Node 24.22.1; the supervisor's `DB_PATH` uses a template string.
+
+## 0.1.34 (2026-11-06)
+
+C390 (knowledge#38), the second half: the GBrain and notebook databases are in every backup, and tb-exec listens on IPv4 and IPv6.
+
+- The backup gap: `gbrain-db` and `notebook-db` declared a backup, but the app had no private address for them, so every backup and pre-update snapshot logged "service not deployed; left out of the backup" and held only the app database. New env `KNOWLEDGE_GBRAIN_DB_HOST` (`{{services.gbrain-db.host}}`) and `KNOWLEDGE_NOTEBOOK_DB_HOST` (`{{services.notebook-db.host}}`) let the SDK dump both: `services/gbrain-db.pgdump` and `services/notebook-db.surql`. A manifest test fails if a service with a backup has no address entry.
+- miniapp-sdk 0.1.46 → 0.1.48 in the app and 0.1.41 → 0.1.48 in tb-exec of the companion images: tb-exec listens on `::` with a `0.0.0.0` fallback, and a helper or backup failure carries a cause label (`details.cause`), which `area provisioning failed` logs since 0.1.33. manifest 0.1.35 → 0.1.37 (the SDK's own pin).
+- `upgradeFrom` `>=0.1.20 <=0.1.33`.
+
+## 0.1.33 (2026-11-05)
+
+C390 (knowledge#38), diagnostics: a memory area that cannot get its engine source now says why.
+
+- The GBrain helper logs `helper_listening` at start and one line per `sources add` (outcome, cause, duration; labels only, never CLI output). It closes the CLI's stdin and stops a CLI run after 25 s, below the SDK's 30 s, so a slow CLI is `502 source_add_failed cause=cli_timeout`, not `503 helper_unavailable`.
+- `area provisioning failed` logs a cause label when the error carries one (`details.cause`; the SDK adds it from miniapp-sdk 0.1.48).
+- Not in this version (next, with miniapp-sdk 0.1.48): tb-exec on `::`, and the backup of `gbrain-db` / `notebook-db`.
+- `upgradeFrom` `>=0.1.20 <=0.1.32`.
+
+## 0.1.32 (2026-11-04)
+
+The final version of 0.1.32-dev.1 (C389): embeddings on a brain built without them are enabled at the brain's own width. No other change. `upgradeFrom` admits 0.1.32-dev.1.
+
+## 0.1.32-dev.1 (2026-11-04)
+
+C389, DEV first. Embeddings on a brain built without them: GBrain makes that brain's vector column 1024 wide, and 0.1.31 enabled
+embeddings at the legacy default 1536, which GBrain refused (`embedding_width_mismatch`), so search stayed keyword-only. A model whose
+width GBrain knows is now enabled at the column's own width (no `--embedding-dimensions`); only a model GBrain cannot size passes its
+width. A default or bound width for such a model is no longer reported as a model change. Area provisioning failures also log the
+HTTP status of the helper error (503: the helper port does not answer; 502: the helper process behind it does not).
+
+## 0.1.31 (2026-11-01)
+
+The final version of the 0.1.31-dev series. See the dev entries below for what is in it. New in this cut: Access and Settings name a person by their agents and never show a raw id (C383). `upgradeFrom` now admits every 0.1.31-dev.N.
+
+## 0.1.31-dev.5 (2026-11-01)
+
+C383, DEV only. miniapp-sdk 0.1.46, manifest 0.1.35: an app caller can read the status of a hold on this app, and an approval of an app caller's hold serves only that call's key (audit holes 5, 6). No other change.
+
+## 0.1.31-dev.4 (2026-11-01)
+
+C382 batch 4, DEV only. No function or CLI change; ui 0.7.1.
+
+- Holds and Receipts: a filter by agent and by text. A filter always shows "Showing N of M" and Clear. Receipts filters by agent on the server; the text filter reads the loaded rows and says so while more are not loaded, with Show older in reach. Held approvals that a filter hides are counted above the list.
+- Memory area pickers (Library, Recall, Research): a filter on the choices, plain text or a regex. The chosen area always stays in the list. The filter is remembered and says "Showing N of M memory areas".
+- Memory areas tables (Memory status, Settings): the same filter on the rows.
+
+## 0.1.31-dev.3 (2026-10-31; C382, dev channel only; upgradeFrom adds 0.1.31-dev.2)
+
+ui 0.4.1: on Agents & scopes the level buttons no longer move under the pointer. No operation, no migration.
+
+## 0.1.31-dev.2 (2026-10-31; C382, dev channel only; upgradeFrom adds 0.1.31-dev.1)
+
+Screen change only: no operation, no migration, no CLI change.
+
+### Changed
+
+- Agents & scopes no longer draws one dropdown per agent and memory area. It shows the defaults once, then only what differs from them, with "Back to default" and a one-line add. "Add or change many" opens the bulk editor: agents, memory areas, one click per level (ui 0.4.0 `AccessEditor`, through `tb.scopes_set`).
+
+## 0.1.31-dev.1 (2026-10-30; C380 B6 Governance access ops, dev channel only; upgradeFrom ">=0.1.20 <=0.1.30 || 0.1.28-dev.1")
+
+No app database migration. Two new agent operations, `access_list` and `access_revoke` (tb.access/1, spec 0.1.89), appended last in the manifest.
+Only the Governance app (verified product `fleet`, listed) may call them; every other caller is refused with no data.
+
+### Added
+
+- `access_list`: what each agent holds (own memory area, the people's memory it reaches) and which teams may read a person's memory. Reads local data only.
+  It names what it cannot list (team memory by membership, Portal scope rows, held calls), so it is never read as "nothing".
+- `access_revoke`: ends a team's read grant on a person's memory (the `access_grant_remove` logic, logged in `kn_access_log`). Areas, documents and scope rows are never changed.
+
+## 0.1.30 (2026-10-30; KN-EMBED embedding failures name their true cause, recovery without a redeploy; upgradeFrom ">=0.1.20 <=0.1.29 || 0.1.28-dev.1")
+
+`upgradeFrom` ">=0.1.20 <=0.1.29 || 0.1.28-dev.1". No app database migration. Core's update rule passes a degraded app only with the same
+attention code, so an instance whose embedding calls fail for another reason than a bad key (it reports `memory_engine_key_rejected` on
+0.1.29) rolls back this update until the provider problem is fixed. Fix the cause first, then update.
+
+### Fixed
+
+- A failed embedding call no longer reads as "Key rejected" by itself. GBrain reports 401, 403, 400, 404 and a wrong vector size all as
+  `embed_unavailable:provider_error`, and 429, 5xx and no answer as `embed_timeout:timeout`. Knowledge now asks the engine for one real
+  test call (helper path `/embed-check`, at most one a minute, no retries, only while embedding calls fail) and names the cause:
+  `memory_engine_key_rejected` (401, 403), `memory_engine_provider_quota`, `memory_engine_provider_busy`, `memory_engine_model_refused`,
+  `memory_engine_provider_unreachable`, `memory_engine_provider_failing`. The rejected-key text names the field to replace.
+- A replaced key clears the attention within minutes: after a key change the engine is probed at 30 s, 2 min and 5 min, not only by the
+  10 min timer. The engine itself restarts on the new key without a redeploy (`tb-exec`, unchanged).
+- Documents written while embedding calls failed get their vectors: each engine boot with a working key runs `gbrain embed --stale --yes
+  --max-usd 1` in the background. The earlier enable path ran it without `--yes`, which GBrain refuses in a non-interactive run, so it never
+  filled anything. This spends the owner's provider credit, at most 1 USD per boot.
+- Notes about one query (`keyword_zero`, `keyword_relaxed_carried` and the like) are no longer engine faults, so the status check no longer
+  reads "memory engine degraded" for them.
+- Keys and Settings pages: a rejected key reads "rejected by provider" also when the key is optional (every Knowledge key is).
+- Manifest: the app-key help says what the key does now (one valid key is enough for Knowledge), not "older installs only".
 
 ## 0.1.29 (2026-10-27; C373 second brain: model roles, app writers, person and team memory; upgradeFrom ">=0.1.20 <=0.1.28 || 0.1.28-dev.1")
 

@@ -5,7 +5,7 @@
   "name": "Knowledge",
   "summary": "Memory and documents for your agents: a private memory area per agent, a shared company area, research notebooks.",
   "description": "Knowledge gives every connected agent its own memory area and a shared company area. With Governance, the agents of one person share that person's memory and team members' agents read their team's memory; the owner decides which team may read whose memory. Agents remember and recall through memory tools; documents keep revisions, comments and links. Memory runs on GBrain, research on Open Notebook, both inside your own deployment.",
-  "version": "0.1.29",
+  "version": "0.1.34",
   "sdkMajor": 1,
   "publisher": {
     "name": "Tealbrick"
@@ -106,6 +106,14 @@
       {
         "name": "KNOWLEDGE_NOTEBOOK_PASSWORD",
         "value": "{{services.notebook.env.OPEN_NOTEBOOK_PASSWORD}}"
+      },
+      {
+        "name": "KNOWLEDGE_GBRAIN_DB_HOST",
+        "value": "{{services.gbrain-db.host}}"
+      },
+      {
+        "name": "KNOWLEDGE_NOTEBOOK_DB_HOST",
+        "value": "{{services.notebook-db.host}}"
       },
       {
         "name": "KNOWLEDGE_DEEP",
@@ -222,7 +230,8 @@
           "port": 3140,
           "paths": [
             "/sources",
-            "/models"
+            "/models",
+            "/embed-check"
           ]
         }
       },
@@ -2029,6 +2038,578 @@
       "audience": "agent"
     },
     {
+      "id": "relationships_list",
+      "title": "List relationships",
+      "description": "The people your owner deals with (customers, suppliers, colleagues, friends, family) as Knowledge keeps them for your owner: identities, the type the owner confirmed (`unknown` until then; a pending proposal shows as `proposedType`), the owner's trust (`reply`, `draft_only` or `hold`) and stance, the last contact, open promises and pending proposals. Filter by confirmed type or by words of a label or identity. Needs Governance to name your owner.",
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "friend",
+              "family",
+              "colleague",
+              "customer",
+              "supplier",
+              "unknown"
+            ]
+          },
+          "query": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "description": "Words of a label or an identity."
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200,
+            "default": 100
+          }
+        }
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "people": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "person": {
+                  "type": "string"
+                },
+                "label": {
+                  "type": "string"
+                },
+                "identities": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "kind",
+                      "value"
+                    ],
+                    "properties": {
+                      "kind": {
+                        "type": "string",
+                        "enum": [
+                          "email",
+                          "slack",
+                          "phone",
+                          "buzz",
+                          "telegram",
+                          "other"
+                        ]
+                      },
+                      "value": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 254,
+                        "description": "As seen: an email address, a Slack user id, a phone number, a Buzz npub, a Telegram id. Knowledge stores one normal form."
+                      }
+                    }
+                  }
+                },
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "friend",
+                    "family",
+                    "colleague",
+                    "customer",
+                    "supplier",
+                    "unknown"
+                  ]
+                },
+                "proposedType": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "trust": {
+                  "type": "string",
+                  "enum": [
+                    "reply",
+                    "draft_only",
+                    "hold"
+                  ]
+                },
+                "stance": {
+                  "type": [
+                    "object",
+                    "null"
+                  ]
+                },
+                "lastContact": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "openPromises": {
+                  "type": "integer"
+                },
+                "pendingProposals": {
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        }
+      },
+      "crud": [
+        "read"
+      ],
+      "effect": "read",
+      "scopeType": "area",
+      "idempotency": "none",
+      "receipt": false,
+      "audience": "agent"
+    },
+    {
+      "id": "relationship_get",
+      "title": "Get a relationship",
+      "description": "One person your owner deals with, by `person` id or by an `identity` (for example the email address a message came from): confirmed type, trust, stance, identities, recent cited history and pending proposals. Read it before you draft to a person: `hold` means do not send; `draft_only` means draft for the owner, do not send.",
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "minProperties": 1,
+        "maxProperties": 1,
+        "properties": {
+          "person": {
+            "type": "string",
+            "pattern": "^rp_[0-9A-HJKMNP-TV-Z]{26}$",
+            "description": "A relationships person id (rp_…)."
+          },
+          "identity": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "kind",
+              "value"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "email",
+                  "slack",
+                  "phone",
+                  "buzz",
+                  "telegram",
+                  "other"
+                ]
+              },
+              "value": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 254,
+                "description": "As seen: an email address, a Slack user id, a phone number, a Buzz npub, a Telegram id. Knowledge stores one normal form."
+              }
+            }
+          }
+        }
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "person": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "identities": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "value"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "email",
+                    "slack",
+                    "phone",
+                    "buzz",
+                    "telegram",
+                    "other"
+                  ]
+                },
+                "value": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 254,
+                  "description": "As seen: an email address, a Slack user id, a phone number, a Buzz npub, a Telegram id. Knowledge stores one normal form."
+                }
+              }
+            }
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "friend",
+              "family",
+              "colleague",
+              "customer",
+              "supplier",
+              "unknown"
+            ]
+          },
+          "proposedType": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "trust": {
+            "type": "string",
+            "enum": [
+              "reply",
+              "draft_only",
+              "hold"
+            ]
+          },
+          "stance": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "lastContact": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "openPromises": {
+            "type": "integer"
+          },
+          "pendingProposals": {
+            "type": "integer"
+          },
+          "history": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "contact",
+                    "promise",
+                    "topic"
+                  ]
+                },
+                "text": {
+                  "type": "string"
+                },
+                "open": {
+                  "type": "boolean"
+                },
+                "citation": {
+                  "type": "object"
+                },
+                "at": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "proposals": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "person": {
+                  "type": "string"
+                },
+                "field": {
+                  "type": "string",
+                  "enum": [
+                    "type",
+                    "identity",
+                    "label"
+                  ]
+                },
+                "value": {},
+                "citation": {
+                  "type": "object"
+                },
+                "proposedBy": {
+                  "type": "string"
+                },
+                "state": {
+                  "type": "string"
+                },
+                "createdAt": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "crud": [
+        "read"
+      ],
+      "effect": "read",
+      "scopeType": "area",
+      "idempotency": "none",
+      "receipt": false,
+      "audience": "agent"
+    },
+    {
+      "id": "relationship_propose",
+      "title": "Propose a relationship fact",
+      "description": "Record what you observed about a person your owner deals with, citing the message. Name an existing `person`, or a `new` one (label and at least one identity; it starts with type unknown and trust hold). A type, identities or a label on an existing person are proposals: the owner confirms them; until then the type reads as before. `history` (contact, promise, topic) is recorded at once. You cannot set trust or stance: the owner sets them.",
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "citation"
+        ],
+        "properties": {
+          "person": {
+            "type": "string",
+            "pattern": "^rp_[0-9A-HJKMNP-TV-Z]{26}$",
+            "description": "A relationships person id (rp_…)."
+          },
+          "new": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "label",
+              "identities"
+            ],
+            "description": "A person not yet in the relationships (check with relationship_get by identity first).",
+            "properties": {
+              "label": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 120,
+                "description": "How the owner would name this person (for example a name and company)."
+              },
+              "identities": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 10,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "kind",
+                    "value"
+                  ],
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "email",
+                        "slack",
+                        "phone",
+                        "buzz",
+                        "telegram",
+                        "other"
+                      ]
+                    },
+                    "value": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 254,
+                      "description": "As seen: an email address, a Slack user id, a phone number, a Buzz npub, a Telegram id. Knowledge stores one normal form."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "friend",
+              "family",
+              "colleague",
+              "customer",
+              "supplier"
+            ],
+            "description": "The relationship you think this is. The owner confirms it."
+          },
+          "identities": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 10,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "value"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "email",
+                    "slack",
+                    "phone",
+                    "buzz",
+                    "telegram",
+                    "other"
+                  ]
+                },
+                "value": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 254,
+                  "description": "As seen: an email address, a Slack user id, a phone number, a Buzz npub, a Telegram id. Knowledge stores one normal form."
+                }
+              }
+            },
+            "description": "More identities of an existing person. The owner confirms each."
+          },
+          "label": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120,
+            "description": "A better label for an existing person. The owner confirms it."
+          },
+          "history": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 20,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "text"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "contact",
+                    "promise",
+                    "topic"
+                  ]
+                },
+                "text": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 500,
+                  "description": "A short neutral note. Never health, religion, politics or sexuality."
+                },
+                "open": {
+                  "type": "boolean",
+                  "description": "Promises only: true while the promise is open (default)."
+                }
+              }
+            }
+          },
+          "citation": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "source",
+              "ref",
+              "at"
+            ],
+            "description": "The message this comes from: required on every proposal.",
+            "properties": {
+              "source": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64,
+                "description": "The channel or app the message came from (for example slack, email, buzz)."
+              },
+              "ref": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200,
+                "description": "The message or record id in that source."
+              },
+              "at": {
+                "type": "string",
+                "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}(T[0-9]{2}:[0-9]{2}(:[0-9]{2}(\\.[0-9]{1,9})?)?(Z|[+-][0-9]{2}:[0-9]{2}))?$",
+                "description": "ISO date or time of the message."
+              }
+            }
+          }
+        }
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "person": {
+            "type": "string"
+          },
+          "created": {
+            "type": "boolean"
+          },
+          "proposals": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "field": {
+                  "type": "string"
+                },
+                "existing": {
+                  "type": "boolean"
+                }
+              }
+            }
+          },
+          "history": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "unchanged": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "crud": [
+        "create"
+      ],
+      "effect": "write",
+      "scopeType": "area",
+      "idempotency": "required",
+      "receipt": true,
+      "audience": "agent"
+    },
+    {
       "id": "deep_search",
       "title": "Search company data (Foundry)",
       "description": "Find rows of company tables (for example orders, invoices, customers) and company documents that Foundry holds, by words: names, ids, statuses. No model is used. Only data from documents you may read. Each result has `ref` (open the source document with get) and `source` (the citation).",
@@ -3188,6 +3769,286 @@
       "audience": "person"
     },
     {
+      "id": "relationships_overview",
+      "title": "Relationships overview",
+      "description": "Per operator (a Governance person who owns agents): the people their agents deal with, the confirmed type, trust and stance, and the agents' pending proposals with the message each cites. Also the log of changes.",
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "operator": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "description": "Governance person id of the operator (the owner of the agents)."
+          }
+        }
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "directory": {
+            "type": "object"
+          },
+          "operators": {
+            "type": "array"
+          },
+          "log": {
+            "type": "array"
+          }
+        }
+      },
+      "crud": [
+        "read"
+      ],
+      "effect": "read",
+      "idempotency": "none",
+      "receipt": false,
+      "audience": "person"
+    },
+    {
+      "id": "relationship_confirm",
+      "title": "Confirm or reject proposals",
+      "description": "Accept or reject agents' proposals for one operator. Accepting a type makes it the confirmed type; accepting an identity adds it (refused when another person of the operator has it); accepting a label renames the person.",
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "operator"
+        ],
+        "properties": {
+          "operator": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "description": "Governance person id of the operator (the owner of the agents)."
+          },
+          "accept": {
+            "type": "array",
+            "maxItems": 50,
+            "items": {
+              "type": "string",
+              "pattern": "^rpp_[0-9A-HJKMNP-TV-Z]{26}$"
+            }
+          },
+          "reject": {
+            "type": "array",
+            "maxItems": 50,
+            "items": {
+              "type": "string",
+              "pattern": "^rpp_[0-9A-HJKMNP-TV-Z]{26}$"
+            }
+          }
+        }
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "operator": {
+            "type": "string"
+          },
+          "decided": {
+            "type": "array"
+          }
+        }
+      },
+      "crud": [
+        "update"
+      ],
+      "effect": "write",
+      "idempotency": "required",
+      "receipt": true,
+      "audience": "person"
+    },
+    {
+      "id": "relationship_set",
+      "title": "Set a relationship",
+      "description": "Set the type, stance, trust or label of one person for one operator. Trust decides what that operator's agents may do: reply, draft only, or hold (send nothing). Only the owner sets stance and trust.",
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "operator",
+          "person"
+        ],
+        "properties": {
+          "operator": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "description": "Governance person id of the operator (the owner of the agents)."
+          },
+          "person": {
+            "type": "string",
+            "pattern": "^rp_[0-9A-HJKMNP-TV-Z]{26}$",
+            "description": "A relationships person id (rp_…)."
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "friend",
+              "family",
+              "colleague",
+              "customer",
+              "supplier",
+              "unknown"
+            ]
+          },
+          "stance": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": false,
+            "description": "How to write to this person. null clears it.",
+            "properties": {
+              "tone": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 60
+              },
+              "formality": {
+                "type": "string",
+                "enum": [
+                  "formal",
+                  "neutral",
+                  "informal"
+                ]
+              },
+              "avoidTopics": {
+                "type": "array",
+                "maxItems": 20,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 60
+                }
+              }
+            }
+          },
+          "trust": {
+            "type": "string",
+            "enum": [
+              "reply",
+              "draft_only",
+              "hold"
+            ]
+          },
+          "label": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120
+          }
+        }
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "operator": {
+            "type": "string"
+          },
+          "relationship": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "person": {
+                "type": "string"
+              },
+              "label": {
+                "type": "string"
+              },
+              "identities": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "kind",
+                    "value"
+                  ],
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "email",
+                        "slack",
+                        "phone",
+                        "buzz",
+                        "telegram",
+                        "other"
+                      ]
+                    },
+                    "value": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 254,
+                      "description": "As seen: an email address, a Slack user id, a phone number, a Buzz npub, a Telegram id. Knowledge stores one normal form."
+                    }
+                  }
+                }
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "friend",
+                  "family",
+                  "colleague",
+                  "customer",
+                  "supplier",
+                  "unknown"
+                ]
+              },
+              "proposedType": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "trust": {
+                "type": "string",
+                "enum": [
+                  "reply",
+                  "draft_only",
+                  "hold"
+                ]
+              },
+              "stance": {
+                "type": [
+                  "object",
+                  "null"
+                ]
+              },
+              "lastContact": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "openPromises": {
+                "type": "integer"
+              },
+              "pendingProposals": {
+                "type": "integer"
+              }
+            }
+          },
+          "changed": {
+            "type": "boolean"
+          }
+        }
+      },
+      "crud": [
+        "update"
+      ],
+      "effect": "write",
+      "idempotency": "required",
+      "receipt": true,
+      "audience": "person"
+    },
+    {
       "id": "deep_settings_set",
       "title": "Choose Foundry areas",
       "description": "Owner: whether Foundry reads the company area (the only area it may read today; person, team and agent areas stay out). An empty list pauses the feed; what Foundry already holds stays until a dataset delete exists.",
@@ -3227,6 +4088,562 @@
       "idempotency": "none",
       "receipt": true,
       "audience": "person"
+    },
+    {
+      "id": "access_list",
+      "title": "List what agents and people hold here (Governance only)",
+      "description": "Governance reads what each agent holds in Knowledge (its own memory area and the people's memory it reaches) and which teams may read a person's memory. Only the Governance app can call it; anyone else is refused. It changes nothing and returns no memory text. What it cannot list is named as not shown.",
+      "input": {
+        "title": "tb.access/1 access_list input",
+        "description": "Spec 0.1.89, docs/ACCESS.md. Embedded byte for byte as the op input (M-OP-8: no $id). Dialect: JSON Schema 2020-12.",
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "v",
+          "subjects"
+        ],
+        "properties": {
+          "v": {
+            "const": 1
+          },
+          "subjects": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 32,
+            "uniqueItems": true,
+            "items": {
+              "$ref": "#/$defs/subject"
+            },
+            "if": {
+              "contains": {
+                "type": "object",
+                "required": [
+                  "kind"
+                ],
+                "properties": {
+                  "kind": {
+                    "const": "all"
+                  }
+                }
+              }
+            },
+            "then": {
+              "maxItems": 1
+            },
+            "description": "Kind all must be the only subject."
+          },
+          "cursor": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200,
+            "default": 100
+          },
+          "sweepId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "description": "Echoed in the answer."
+          }
+        },
+        "$defs": {
+          "subject": {
+            "oneOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "kind",
+                  "id"
+                ],
+                "properties": {
+                  "kind": {
+                    "const": "agent"
+                  },
+                  "id": {
+                    "type": "string",
+                    "pattern": "^agt_[0-9A-HJKMNP-TV-Z]{26}$"
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "kind",
+                  "id",
+                  "handles"
+                ],
+                "properties": {
+                  "kind": {
+                    "const": "person"
+                  },
+                  "id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  },
+                  "handles": {
+                    "type": "array",
+                    "maxItems": 16,
+                    "uniqueItems": true,
+                    "items": {
+                      "type": "string",
+                      "pattern": "^(buzz:npub1[qpzry9x8gf2tvdw0s3jn54khce6mua7l]{58}|slack:[UW][A-Z0-9]{2,30}|telegram:-?[1-9][0-9]{0,19})$",
+                      "description": "Canonical handle (G-4), the fleet.directory_feed/1 pattern. Readers also require normalizeHandle(h) === h."
+                    }
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "kind"
+                ],
+                "properties": {
+                  "kind": {
+                    "const": "unlinked"
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "kind"
+                ],
+                "properties": {
+                  "kind": {
+                    "const": "all"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      },
+      "output": {
+        "title": "tb.access/1 access_list output",
+        "description": "Spec 0.1.89, docs/ACCESS.md. Embedded byte for byte as the op output (M-OP-8: no $id). Dialect: JSON Schema 2020-12. Extra members are allowed and ignored (L24). complete is true exactly when nextCursor is null and notShown is empty.",
+        "type": "object",
+        "required": [
+          "v",
+          "asOf",
+          "items",
+          "nextCursor",
+          "notShown",
+          "complete"
+        ],
+        "properties": {
+          "v": {
+            "const": 1
+          },
+          "asOf": {
+            "type": "string",
+            "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2})$"
+          },
+          "sweepId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "items": {
+            "type": "array",
+            "maxItems": 200,
+            "items": {
+              "$ref": "#/$defs/item"
+            }
+          },
+          "nextCursor": {
+            "oneOf": [
+              {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "notShown": {
+            "type": "array",
+            "maxItems": 32,
+            "items": {
+              "type": "object",
+              "required": [
+                "kind",
+                "reason"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64
+                },
+                "reason": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                }
+              }
+            }
+          },
+          "complete": {
+            "type": "boolean"
+          }
+        },
+        "if": {
+          "required": [
+            "complete"
+          ],
+          "properties": {
+            "complete": {
+              "const": true
+            }
+          }
+        },
+        "then": {
+          "properties": {
+            "nextCursor": {
+              "type": "null"
+            },
+            "notShown": {
+              "maxItems": 0
+            }
+          }
+        },
+        "else": {
+          "anyOf": [
+            {
+              "properties": {
+                "nextCursor": {
+                  "type": "string"
+                }
+              }
+            },
+            {
+              "properties": {
+                "notShown": {
+                  "minItems": 1
+                }
+              }
+            }
+          ]
+        },
+        "$defs": {
+          "item": {
+            "type": "object",
+            "required": [
+              "id",
+              "kind",
+              "subject",
+              "resource",
+              "direction",
+              "level",
+              "label",
+              "state",
+              "revocable",
+              "digest"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 3,
+                "maxLength": 128,
+                "pattern": "^[a-z][a-z_]*:[!-~]+$",
+                "description": "Stable, <kind>:<opaque>, ASCII without spaces."
+              },
+              "kind": {
+                "enum": [
+                  "account_as_itself",
+                  "account_as_me",
+                  "buzz_identity",
+                  "scheduled_post",
+                  "first_contacts",
+                  "channel_sender",
+                  "agent_area",
+                  "person_area",
+                  "team_grant",
+                  "assignment",
+                  "own_project",
+                  "routine",
+                  "workflow_agent_step",
+                  "schedule_of_workflow"
+                ],
+                "description": "Closed list per target: ACCESS_KINDS in the spec package."
+              },
+              "subject": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "required": [
+                      "kind",
+                      "id"
+                    ],
+                    "properties": {
+                      "kind": {
+                        "const": "agent"
+                      },
+                      "id": {
+                        "type": "string",
+                        "pattern": "^agt_[0-9A-HJKMNP-TV-Z]{26}$"
+                      }
+                    }
+                  },
+                  {
+                    "type": "object",
+                    "required": [
+                      "kind",
+                      "id"
+                    ],
+                    "properties": {
+                      "kind": {
+                        "const": "person"
+                      },
+                      "id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 64
+                      }
+                    }
+                  },
+                  {
+                    "type": "object",
+                    "required": [
+                      "kind"
+                    ],
+                    "properties": {
+                      "kind": {
+                        "const": "unlinked"
+                      }
+                    }
+                  }
+                ]
+              },
+              "resource": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "direction": {
+                "enum": [
+                  "held_by",
+                  "about"
+                ]
+              },
+              "level": {
+                "enum": [
+                  "read",
+                  "write",
+                  "use",
+                  "info"
+                ]
+              },
+              "label": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 120
+              },
+              "state": {
+                "enum": [
+                  "active",
+                  "paused",
+                  "scheduled",
+                  "dormant"
+                ]
+              },
+              "revocable": {
+                "type": "boolean"
+              },
+              "since": {
+                "type": "string",
+                "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2})$"
+              },
+              "digest": {
+                "type": "string",
+                "pattern": "^sha256:[0-9a-f]{64}$"
+              }
+            }
+          }
+        }
+      },
+      "audience": "agent",
+      "listing": "workflow",
+      "crud": [
+        "read"
+      ],
+      "effect": "read",
+      "idempotency": "none",
+      "receipt": false
+    },
+    {
+      "id": "access_revoke",
+      "title": "End access held here (Governance only)",
+      "description": "Governance asks Knowledge to end a team's read access to one person's memory. Only the Governance app can call it. Only a team grant can be ended. Memory areas, documents and Portal grants are never changed. Each item is checked against the digest Governance read; if it changed, nothing is removed for that item.",
+      "input": {
+        "title": "tb.access/1 access_revoke input",
+        "description": "Spec 0.1.89, docs/ACCESS.md. Embedded byte for byte as the op input (M-OP-8: no $id). Dialect: JSON Schema 2020-12. No free text. Connect refuses more than 5 items (ACCESS_REVOKE_ITEMS_MAX).",
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "v",
+          "plan",
+          "attempt",
+          "subject",
+          "items"
+        ],
+        "properties": {
+          "v": {
+            "const": 1
+          },
+          "plan": {
+            "type": "string",
+            "pattern": "^pln_[0-9A-Za-z]{1,40}$"
+          },
+          "attempt": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000
+          },
+          "subject": {
+            "oneOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "kind",
+                  "id"
+                ],
+                "properties": {
+                  "kind": {
+                    "const": "agent"
+                  },
+                  "id": {
+                    "type": "string",
+                    "pattern": "^agt_[0-9A-HJKMNP-TV-Z]{26}$"
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "kind",
+                  "id"
+                ],
+                "properties": {
+                  "kind": {
+                    "const": "person"
+                  },
+                  "id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  }
+                }
+              }
+            ]
+          },
+          "items": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 10,
+            "uniqueItems": true,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "id",
+                "digest"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "minLength": 3,
+                  "maxLength": 128,
+                  "pattern": "^[a-z][a-z_]*:[!-~]+$",
+                  "description": "Stable, <kind>:<opaque>, ASCII without spaces."
+                },
+                "digest": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
+                }
+              }
+            }
+          }
+        }
+      },
+      "output": {
+        "title": "tb.access/1 access_revoke output",
+        "description": "Spec 0.1.89, docs/ACCESS.md. Embedded byte for byte as the op output (M-OP-8: no $id). Dialect: JSON Schema 2020-12. Extra members are allowed and ignored (L24).",
+        "type": "object",
+        "required": [
+          "v",
+          "asOf",
+          "results"
+        ],
+        "properties": {
+          "v": {
+            "const": 1
+          },
+          "asOf": {
+            "type": "string",
+            "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2})$"
+          },
+          "results": {
+            "type": "array",
+            "maxItems": 10,
+            "items": {
+              "type": "object",
+              "required": [
+                "id",
+                "outcome"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "minLength": 3,
+                  "maxLength": 128,
+                  "pattern": "^[a-z][a-z_]*:[!-~]+$",
+                  "description": "Stable, <kind>:<opaque>, ASCII without spaces."
+                },
+                "outcome": {
+                  "enum": [
+                    "revoked",
+                    "already_gone",
+                    "changed",
+                    "not_revocable",
+                    "failed"
+                  ]
+                },
+                "code": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9_]{0,63}$"
+                },
+                "detail": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                }
+              }
+            }
+          }
+        }
+      },
+      "audience": "agent",
+      "listing": "workflow",
+      "crud": [
+        "update"
+      ],
+      "effect": "write",
+      "idempotency": "required",
+      "receipt": true
     }
   ],
   "scopes": [
@@ -3372,7 +4789,7 @@
           ]
         },
         "step": "models",
-        "help": "Older installs only: used while no model role is set on the Keys and models page."
+        "help": "The memory engine uses this key while no model role is set on the Keys and models page. One valid key here is enough for Knowledge."
       },
       {
         "name": "ANTHROPIC_API_KEY",
@@ -3388,7 +4805,7 @@
           "model_provider": "anthropic"
         },
         "step": "models",
-        "help": "Older installs only: used while no model role is set on the Keys and models page."
+        "help": "The memory engine uses this key while no model role is set on the Keys and models page. One valid key here is enough for Knowledge."
       },
       {
         "name": "GOOGLE_GENERATIVE_AI_API_KEY",
@@ -3404,7 +4821,7 @@
           "model_provider": "google"
         },
         "step": "models",
-        "help": "Older installs only: used while no model role is set on the Keys and models page."
+        "help": "The memory engine uses this key while no model role is set on the Keys and models page. One valid key here is enough for Knowledge."
       }
     ],
     "modelRoles": [
@@ -3459,6 +4876,11 @@
       "id": "knowledge-memory",
       "title": "How to use your memory",
       "file": "skills/knowledge-memory/SKILL.md"
+    },
+    {
+      "id": "knowledge-relationships",
+      "title": "Relationships with people",
+      "file": "skills/knowledge-relationships/SKILL.md"
     },
     {
       "id": "knowledge-gbrain",

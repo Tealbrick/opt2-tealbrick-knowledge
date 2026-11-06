@@ -1,6 +1,6 @@
 // Access page (C373): who reads whose memory. People (Governance directory entries) → their personal memory and their
 // agents; teams → members and the owner's grants "this team may read this person's memory" (add, change, remove).
-// The Governance feed carries no person names: a person shows as its directory id plus the names of its agents.
+// The Governance feed carries no person names: a person shows as "A person" plus the names of its agents. No raw id is shown.
 // Never handles or trust values (C88): the server does not send them.
 import { callOp } from "@opt2-tealbrick/miniapp-sdk/client";
 import { Button, Field, Notice, Section, Select, Table, Tag, TextInput } from "@opt2-tealbrick/ui";
@@ -30,10 +30,10 @@ const names = (agents: AgentRef[]) => (agents.length ? agents.map((a) => a.name)
 const tagText = (tags: string[] | null) => (tags?.length ? `only memories tagged ${tags.join(", ")}` : "all of it");
 const ACTIONS: Record<string, string> = { grant_added: "Grant added", grant_changed: "Grant changed", grant_removed: "Grant removed" };
 
-/** Person label in plain words: the directory id and the agents that act for the person. */
+/** Person label in plain words: "A person" and the agents that act for the person (never the directory id). */
+export const personWords = (agents: AgentRef[] | undefined): string => (agents?.length ? `A person (${names(agents)})` : "A person");
 function personText(o: AccessOverview, id: string): string {
-  const p = o.people.find((x) => x.id === id);
-  return p?.agents.length ? `${id} (${names(p.agents)})` : id;
+  return personWords(o.people.find((x) => x.id === id)?.agents);
 }
 
 export function Access() {
@@ -120,7 +120,7 @@ export function Access() {
                 <tr key={p.id}>
                   <td className="strong">
                     <span className="tb-row">
-                      <span className="mono">{p.id}</span>
+                      <span>{personWords(p.agents)}</span>
                       {p.active ? null : <Tag>departed</Tag>}
                     </span>
                   </td>
@@ -224,7 +224,7 @@ export function Access() {
                   <td>{when(l.at)}</td>
                   <td>{ACTIONS[l.action] ?? l.action}</td>
                   <td>{data.teams.find((t) => t.id === l.team)?.name ?? l.team}</td>
-                  <td className="mono">{l.person}</td>
+                  <td>{personText(data, l.person)}</td>
                   <td>{l.tags?.join(", ") ?? "all"}</td>
                 </tr>
               ))}

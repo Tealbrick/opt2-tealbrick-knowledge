@@ -1,6 +1,7 @@
 // Recall page: ask memory a question the way an agent would, optionally within one area. A result opens in Library.
-import { Button, EmptyState, Field, Notice, Select, Swatch, Tag, TextInput } from "@opt2-tealbrick/ui";
+import { Button, EmptyState, Field, Notice, Swatch, Tag, TextInput } from "@opt2-tealbrick/ui";
 import { type FormEvent, useState } from "react";
+import { AreaPicker } from "./area-filter.tsx";
 import { ErrorNotice, errText, run, useOverview } from "./common.tsx";
 
 interface RecallResponse {
@@ -46,11 +47,7 @@ export function Recall({ onOpen }: { onOpen: (documentId: string) => void }) {
             <TextInput value={query} onChange={(event) => setQuery(event.target.value)} />
           </Field>
         </div>
-        <div className="kn-area">
-          <Field label="Memory area">
-            <Select options={[{ value: "", label: "All areas" }, ...(areas ?? []).map((a) => ({ value: a.id, label: a.label }))]} value={area} onValueChange={setArea} />
-          </Field>
-        </div>
+        <AreaPicker page="recall" label="Memory area" areas={areas ?? []} value={area} onChange={setArea} extra={[{ value: "", label: "All areas" }]} />
         <Button type="submit" variant="primary" disabled={busy || !query.trim()}>
           {busy ? "Searching…" : "Search memory"}
         </Button>
