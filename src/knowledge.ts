@@ -6,7 +6,6 @@ import { type CallApp, onDirectoryModel, startDirectoryTimer } from "./directory
 import { type ClientStore, GBrainClient, type StoredClient } from "./engines/gbrain/client.ts";
 import { GBrainEngine } from "./engines/gbrain/engine.ts";
 import { NotebookClient } from "./engines/notebook/client.ts";
-import { drainForgetQueue } from "./forget.ts";
 import { areaSourceId, SHARED_AREA_ID } from "./ids.ts";
 import { ensureDirectoryAreas } from "./people.ts";
 import { Projector } from "./projection.ts";
@@ -322,16 +321,7 @@ export class Knowledge {
     });
     const interval = this.opts.drainIntervalMs ?? 30_000;
     if (projector && interval > 0 && !this.timer) {
-      this.timer = setInterval(() => {
-        const current = this.services;
-        if (!current?.projector) return;
-        // C392 R2: queued page purges run after the projection pass, so no in-flight write re-creates a purged page
-        void current.projector
-          .drain()
-          .catch(() => undefined)
-          .then(() => this.drainForget(current))
-          .catch(() => undefined);
-      }, interval);
+      this.timer = setInterval(() => void this.services?.projector?.drain().catch(() => undefined), interval);
       this.timer.unref();
     }
     return this.services;
@@ -555,18 +545,6 @@ export class Knowledge {
   /** Kick the projection outbox without waiting (called after every document write). */
   kick(services: Services) {
     void services.projector?.drain().catch(() => undefined);
-  }
-
-  /**
-   * C392 R2: purge queued engine pages of forgotten documents through the engine helper (upstream's trusted local CLI; MCP
-   * refuses `purge`). `documents`: only these rows, at once (the forget op itself); without, the due rows (the drain timer).
-   * Never while a projection pass runs: that pass may still write one of these pages; the rows wait for the next tick.
-   * No engine or no helper access yet → nothing runs (null) and the rows stay queued.
-   */
-  async drainForget(services: Services, access?: Pick<ServiceAccess, "callServiceHelper">, documents?: readonly string[]): Promise<{ done: string[]; failed: string[] } | null> {
-    const helper = access ?? this.provisionAccess;
-    if (!services.engine || !helper || services.projector?.busy()) return null;
-    return drainForgetQueue(services.db, (path, body) => helper.callServiceHelper("gbrain", path, body as never), (this.opts.now ?? Date.now)(), documents);
   }
 
   /** Provision engine resources for areas that lack them (shared by concurrent callers). */

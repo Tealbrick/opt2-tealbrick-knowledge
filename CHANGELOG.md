@@ -13,16 +13,6 @@ C392 R1: the relationships store (server, manifest, skill, tests). No owner page
 - Identities are normalized with the canonical handle rule of `@opt2-tealbrick/manifest` (`normalizeHandle`) for email, Slack, Buzz and Telegram; phone = `+` and 6 to 15 digits. One identity names at most one person per operator.
 - Skill `knowledge-relationships`. Receipts and `kn_rel_log` carry ids, field names and enum values only.
 
-C392 R2: forget a person (Knowledge-local stores; C393 Q3: ship with honest "not possible yet" lines).
-
-- Person ops `relationship_forget_scan` (read) and `relationship_forget` (destructive, hold family `destructive`, idempotency required, receipt). Owner only; agents and apps are `scope_denied`. Narrowing policy `unsupported` (a forget reads and deletes documents whatever their tags).
-- The forget hard-deletes the person, identities, edge, proposals and history in one transaction and writes one tombstone row to `kn_rel_log` (`person_forgotten`, counts only).
-- The scan searches every document of every area, live and soft-deleted (title, body, summary, tags, source, every revision, every comment) for the label and identity values (case-insensitive; terms under 4 characters skipped) and returns ids, areas and places, never text. `purgeDocuments` hard-deletes the picked documents that this call's scan matched (document, revisions, comments, links, projection rows, keyword index); any other id is refused and kept.
-- Engine pages of purged documents: purged through the new GBrain helper path `/purge-page` (upstream's local CLI `gbrain delete <slug> --purge`; upstream refuses `purge` over MCP). Migration `0005_forget_queue.sql` (expand only) queues a page while the helper does not answer; the projection timer retries it. `guard.ts` is unchanged: agents can never purge.
-- Every report lists `notPossibleYet`: Foundry, LCM-X, backups (retention from the manifest), research sources, GBrain pages not projected from a document, GBrain purge tombstones, other people's Relationships rows, deleted rows in database pages.
-- Skill: agents cannot forget; they send the owner to the Relationships page. No owner page yet (R1-UI).
-- Review fixes (#42): the scan answer carries each document's title and a `confirmation` text (person name, permanent, each document with area and title, not-possible-yet lines); `relationship_forget` has the same text as `holdView` and an id-and-count hold summary. The forget report, receipts and log keep ids and counts. At most 10 engine pages are purged inside the call; the rest stay queued. The helper reads `page_not_found` from the CLI's JSON error code, not by substring. Tests: app callers refused; `/purge-page` only on the `gbrain` service; the helper binds loopback only; a real-SDK test for the person call and the idempotent replay of a forget.
-
 ## 0.1.34 (2026-11-06)
 
 C390 (knowledge#38), the second half: the GBrain and notebook databases are in every backup, and tb-exec listens on IPv4 and IPv6.
