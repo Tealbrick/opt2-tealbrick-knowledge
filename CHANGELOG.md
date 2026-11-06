@@ -2,6 +2,15 @@
 
 All notable changes to the Knowledge mini app. Versions are assigned at merge (C340).
 
+## 0.1.35 (2026-11-06)
+
+INC-20261104-01: research notebooks work on a Railway project whose private network is IPv6 only (legacy environments).
+
+- notebook-db (SurrealDB) listened on `0.0.0.0:8000`, IPv4 only. Open Notebook resolved the private host to an IPv6 address and got `Connect call failed ('fd12:…', 8000) [Errno 111]`, so every research call failed. It now binds `[::]:8000`, which accepts IPv4 and IPv6 (proven with the pinned SurrealDB image: `127.0.0.1` and `::1` both connect; the backup dump on `127.0.0.1` keeps working).
+- The Open Notebook API listened on `0.0.0.0:5055` (upstream default `API_HOST`), so the Knowledge app could not reach it on such a network either. It now binds `::` (`API_HOST=::`).
+- A test fails if any companion Dockerfile or entrypoint binds a listener to `0.0.0.0`. gbrain serve already binds `::`; Postgres listens on all addresses; tb-exec listens on `::` since 0.1.34 (miniapp-sdk 0.1.48).
+- `upgradeFrom` `>=0.1.20 <=0.1.34`.
+
 ## 0.1.34 (2026-11-06)
 
 C390 (knowledge#38), the second half: the GBrain and notebook databases are in every backup, and tb-exec listens on IPv4 and IPv6.
