@@ -1504,3 +1504,84 @@ test("QA-KN24-7 / residual: Settings says a base URL is not used for a fixed-add
   const plain = roleRows(readEngineModels(BOUND));
   assert.ok(plain.every((r) => !/fixed address/u.test(r.notice ?? "")));
 });
+
+// ── INC-20261106-01: every edit of a projected document was refused by the engine, silently, forever ──
+
+const pageSlug = (documentId: string) => `knowledge-docs/${documentId.toLowerCase()}`;
+const pageCalls = (name: string, documentId: string) => gbrain.calls.filter((c) => c.name === name && String(c.args.slug).toLowerCase() === pageSlug(documentId));
+
+test("INC-20261106-01: an edit of a projected document reaches the engine (lower-case slug, current revision, a fresh request id per write)", async () => {
+  const { ctx, run, knowledge, db } = await setup();
+  const doc = await run("document_create", { title: "Edit probe", body: "first version of the heron plan" }, ctx(ADA));
+  await run("recall", { query: "warm up" }, ctx(ADA)); // provisions the engine source
+  await knowledge.current()?.projector?.drain();
+  const pages = gbrain.pages.get(areaSourceId(ADA_AREA));
+  assert.match(pages?.get(pageSlug(doc.id))?.content ?? "", /first version/u);
+
+  await run("document_update", { id: doc.id, body: "second version of the heron plan" }, ctx(ADA));
+  await knowledge.current()?.projector?.drain();
+  assert.match(pages?.get(pageSlug(doc.id))?.content ?? "", /second version/u, "the edit is in the engine");
+  assert.equal(db.prepare("SELECT state FROM kn_projection WHERE document_id = ?").get(doc.id)?.state, "ready");
+  // the revision is read with the slug GBrain stores (it reads the exact slug; an upper-case read missed every page)
+  for (const call of pageCalls("get_page", doc.id)) assert.equal(call.args.slug, pageSlug(doc.id));
+  const puts = pageCalls("put_page", doc.id);
+  assert.equal(puts.length, 2, "one write per version, no refused update");
+  assert.equal(puts[0]?.args.expected_revision, undefined, "create");
+  assert.equal(typeof puts[1]?.args.expected_revision, "string", "update against the current revision");
+  assert.notEqual(puts[0]?.args.request_id, puts[1]?.args.request_id);
+  // Knowledge's document is the whole page: shortening it or dropping a Timeline section is intended
+  assert.equal(puts[1]?.args.allow_shrink, true);
+  assert.equal(puts[1]?.args.drop_timeline, true);
+
+  await run("document_delete", { id: doc.id }, ctx(ADA));
+  await knowledge.current()?.projector?.drain();
+  assert.equal(pages?.has(pageSlug(doc.id)), false, "a deleted document leaves the engine (it stayed: the revision read missed)");
+});
+
+test("INC-20261106-01: a refused write is logged (ids, attempt, code, never content) and its retry is a new write, not the replay of the refusal", async () => {
+  const { ctx, run, knowledge, db } = await setup();
+  const body = "secret-ish walrus content that must never reach a log line";
+  await run("recall", { query: "warm up" }, ctx(ADA));
+  const lines: { msg: string; fields: Record<string, string | number> }[] = [];
+  knowledge.engineLog = (msg, fields) => lines.push({ msg, fields });
+  let refuse = true;
+  gbrain.refusePut = (_source, _slug, args) => (refuse && String(args.content).includes("walrus") ? "page_shrink_refused" : undefined);
+  try {
+    const doc = await run("document_create", { title: "Refusal probe", body }, ctx(ADA));
+    await knowledge.current()?.projector?.drain();
+    const row = db.prepare("SELECT state, attempts, last_error FROM kn_projection WHERE document_id = ?").get(doc.id);
+    assert.equal(row?.state, "pending");
+    assert.equal(row?.attempts, 1);
+    assert.match(String(row?.last_error), /^page_shrink_refused: /u);
+    const failed = lines.find((l) => l.msg === "projection failed");
+    assert.deepEqual(failed?.fields, { area: ADA_AREA, document: doc.id, attempt: 1, maxAttempts: 12, state: "pending", code: "page_shrink_refused", retryInS: 5 });
+    assert.ok(!JSON.stringify(lines).includes("walrus"), "no content in the log");
+
+    // the engine accepts the write now: the retry is a NEW request (a replay of the stored refusal would fail forever)
+    refuse = false;
+    db.prepare("UPDATE kn_projection SET next_attempt_at = 0 WHERE document_id = ?").run(doc.id);
+    await knowledge.current()?.projector?.drain();
+    assert.equal(db.prepare("SELECT state FROM kn_projection WHERE document_id = ?").get(doc.id)?.state, "ready");
+    const ids = pageCalls("put_page", doc.id).map((c) => c.args.request_id);
+    assert.equal(new Set(ids).size, ids.length, "every write try sends its own request id");
+  } finally {
+    gbrain.refusePut = undefined;
+    knowledge.engineLog = null;
+  }
+});
+
+test("INC-20261106-01: the boot retry of failed rows stops after 3 boots; a new edit of the document resets it", async () => {
+  const { ctx, run, knowledge, db } = await setup();
+  const doc = await run("document_create", { title: "Cap probe", body: "cap probe" }, ctx(ADA));
+  const projector = knowledge.current()?.projector;
+  assert.ok(projector);
+  const fail = () => db.prepare("UPDATE kn_projection SET state = 'failed', attempts = 12 WHERE document_id = ?").run(doc.id);
+  for (let boot = 1; boot <= 3; boot++) {
+    fail();
+    assert.deepEqual(projector.retryFailed(), { retried: 1, stillFailed: 0 }, `boot ${boot}`);
+  }
+  fail();
+  assert.deepEqual(projector.retryFailed(), { retried: 0, stillFailed: 1 }, "boot 4: the row stays failed (no 12 more writes per boot)");
+  await run("document_update", { id: doc.id, body: "cap probe, edited" }, ctx(ADA));
+  assert.deepEqual({ ...db.prepare("SELECT state, cycles FROM kn_projection WHERE document_id = ?").get(doc.id) }, { state: "pending", cycles: 0 });
+});

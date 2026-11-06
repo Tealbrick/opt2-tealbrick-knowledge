@@ -138,6 +138,8 @@ export interface FakeGBrain {
   /** source → slug → page */
   pages: Map<string, Map<string, { content: string; revision: string }>>;
   calls: { source: string; name: string; args: Record<string, unknown> }[];
+  /** refuse a put_page with this upstream code (a deterministic refusal such as `page_shrink_refused`); undefined = accept */
+  refusePut?: (source: string, slug: string, args: Record<string, unknown>) => string | undefined;
   /** override a tool's answer: return undefined to fall through */
   answer?: (source: string, name: string, args: Record<string, unknown>) => unknown;
   /**
@@ -166,6 +168,7 @@ export async function fakeGBrain(): Promise<FakeGBrain> {
   const adminToken = "a".repeat(40);
   const clients = new Map<string, { secret: string; source: string }>();
   const tokens = new Map<string, string>();
+  const requests = new Map<string, { digest: string; outcome: { error: string } | { ok: true } }>();
   let counter = 0;
   const state: Omit<FakeGBrain, "url" | "close"> = { adminToken, sources: new Set(), pages: new Map(), calls: [], facts: new Map() };
   const server: Server = createServer(async (req, res) => {
@@ -244,21 +247,45 @@ export async function fakeGBrain(): Promise<FakeGBrain> {
       if (custom !== undefined) return reply({ content: [{ type: "text", text: JSON.stringify(custom) }] });
       const pages = state.pages.get(source) ?? new Map();
       state.pages.set(source, pages);
-      // Upstream validateSlug lower-cases every slug (gbrain src/core/utils.ts at the pin); the fake does the same.
+      // Upstream validateSlug lower-cases every slug on write (gbrain src/core/utils.ts at the pin), while get_page reads the
+      // exact slug: an upper-case read misses the stored page (INC-20261106-01, proven on qa1). The fake does the same.
       const slug = String(args.slug ?? "").toLowerCase();
+      // Upstream keeps each write's outcome under its request id and replays it for the same arguments
+      // (persistence_requests); other arguments under a used id are refused with `idempotency_conflict`.
+      type Outcome = { error: string } | { ok: true };
+      const ledgered = (outcome: () => Outcome) => {
+        const id = typeof args.request_id === "string" ? args.request_id : null;
+        const { request_id: _id, ...intent } = args;
+        const digest = JSON.stringify([name, source, intent]);
+        const prior = id ? requests.get(id) : undefined;
+        const result: Outcome = prior ? (prior.digest === digest ? prior.outcome : { error: "idempotency_conflict" }) : outcome();
+        if (id && !prior) requests.set(id, { digest, outcome: result });
+        return "error" in result ? toolError(result.error) : reply({ content: [{ type: "text", text: JSON.stringify({ ok: true }) }] });
+      };
       if (name === "get_page") {
-        const page = pages.get(slug);
+        const page = pages.get(String(args.slug ?? ""));
         return page ? reply({ content: [{ type: "text", text: JSON.stringify({ slug, revision: page.revision, content: page.content }) }] }) : toolError("page_not_found");
       }
       if (name === "put_page") {
-        const page = pages.get(slug);
-        if (page && args.expected_revision !== page.revision) return toolError("revision_conflict");
-        pages.set(slug, { content: String(args.content), revision: `r${++counter}` });
-        return reply({ content: [{ type: "text", text: JSON.stringify({ ok: true }) }] });
+        return ledgered(() => {
+          const page = pages.get(slug);
+          // GBrain >= 0.60.162: an existing page without expected_revision is `revision_required`; a stale one `revision_conflict`
+          if (page && args.expected_revision === undefined) return { error: "revision_required" };
+          if (page && args.expected_revision !== page.revision) return { error: "revision_conflict" };
+          const refused = state.refusePut?.(source, slug, args);
+          if (refused) return { error: refused };
+          pages.set(slug, { content: String(args.content), revision: `r${++counter}` });
+          return { ok: true };
+        });
       }
       if (name === "delete_page") {
-        pages.delete(slug);
-        return reply({ content: [{ type: "text", text: JSON.stringify({ ok: true }) }] });
+        return ledgered(() => {
+          const page = pages.get(slug);
+          if (!page) return { error: "page_not_found" };
+          if (args.expected_revision !== page.revision) return { error: args.expected_revision === undefined ? "revision_required" : "revision_conflict" };
+          pages.delete(slug);
+          return { ok: true };
+        });
       }
       if (name === "context_pack") {
         // MEMORY_VERBS v1 shape (cards, facts, open threads); `entities` is a comma-separated string upstream

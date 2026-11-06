@@ -314,6 +314,8 @@ export class Knowledge {
         ? new NotebookClient({ baseUrl: this.config.notebookUrl, password: this.config.notebookPassword, fetch: this.opts.fetch })
         : null;
     const projector = engine ? new Projector(db, store, areas, engine, now) : null;
+    // INC-20261106-01: a failed projection is logged (ids, attempt, error code; never content), it was silent
+    if (projector) projector.log = (msg, fields) => this.engineLog?.(msg, fields);
     this.services = { db, store, areas, engine, notebook, projector, config: this.config };
     // C373: a new Governance directory creates its person and team areas; their engine sources follow in the background
     onDirectoryModel(db, (model) => {

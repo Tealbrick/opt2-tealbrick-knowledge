@@ -3,7 +3,7 @@
 // upstream admin API. Every MCP call carries a token of a client bound to exactly ONE GBrain source
 // (one Knowledge area), so upstream itself enforces source isolation. One client per (source, agent)
 // keeps upstream ownership (forget) and delta cursors per agent.
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { callToolAnswer, GBrainError, listTools, readJsonResource, type ToolAnswer } from "./transport.ts";
 
 /** Upstream source id grammar (≤ 32 chars). */
@@ -38,6 +38,16 @@ export function deterministicRequestId(...parts: readonly string[]): string {
   const hex = createHash("sha256").update(JSON.stringify(parts)).digest("hex");
   const variant = ((Number.parseInt(hex.slice(16, 18), 16) & 0x3f) | 0x80).toString(16);
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-${variant}${hex.slice(18, 20)}-${hex.slice(20, 32)}`;
+}
+
+/** The slug GBrain stores for a page: upstream lower-cases every slug on write and reads the exact slug (INC-20261106-01). */
+export function canonicalPageSlug(slug: string): string {
+  return slug.toLowerCase();
+}
+
+/** A write refused on its revision precondition: read the revision again and retry once. */
+function revisionRetry(error: unknown): boolean {
+  return error instanceof GBrainError && (error.upstreamCode === "revision_conflict" || error.upstreamCode === "revision_required");
 }
 
 export interface GBrainClientOptions {
@@ -338,36 +348,64 @@ export class GBrainClient {
     throw new GBrainServiceError("gbrain_admin_unavailable");
   }
 
-  /** Knowledge owns its projected pages: write against the current revision with a deterministic request id. */
+  /**
+   * Knowledge owns its projected pages: write against the current revision with a request id that is deterministic per
+   * projection attempt. INC-20261106-01:
+   * - The slug is the lower-case form GBrain stores (validateSlug lower-cases on write, get_page reads the exact slug): with
+   *   the upper-case ULID get_page answered page_not_found, put_page went out without `expected_revision`, and GBrain
+   *   (>= 0.60.162) refused every update of an existing page with `revision_required`.
+   * - GBrain keeps a refused write under its request id and replays the refusal for the same arguments. The id was derived
+   *   from slug, content and revision, so every retry of a refused write got the stored refusal back, forever. Each try
+   *   now sends a fresh id: a retry is a new write. `expected_revision` keeps a repeated write safe (a write that did
+   *   execute moves the revision; the next try re-reads it and writes the same content again).
+   * - Knowledge's document is the whole page: an edit that shortens a large page or drops a Timeline section is intended
+   *   (`allow_shrink`, `drop_timeline`), not a partial read sent back.
+   * `revision_conflict` and `revision_required` re-read the revision once.
+   */
   async putCanonicalPage(sourceId: string, slug: string, content: string): Promise<void> {
-    const contentHash = createHash("sha256").update(content).digest("hex");
-    for (let attempt = 0; attempt < 2; attempt++) {
-      const revision = await this.pageRevision(sourceId, slug);
+    const pageSlug = canonicalPageSlug(slug);
+    for (let tryNo = 0; tryNo < 2; tryNo++) {
+      const revision = await this.pageRevision(sourceId, pageSlug);
       try {
         await this.call(sourceId, "put_page", {
-          slug,
+          slug: pageSlug,
           content,
           ...(revision ? { expected_revision: revision } : {}),
-          request_id: deterministicRequestId("put_page", sourceId, slug, contentHash, revision ?? "create"),
+          allow_shrink: true,
+          drop_timeline: true,
+          request_id: randomUUID(),
         }, { timeoutMs: 300_000 });
         return;
       } catch (error) {
-        if (attempt === 0 && error instanceof GBrainError && error.code === "revision_conflict") continue;
+        if (tryNo === 0 && revisionRetry(error)) continue;
         throw error;
       }
     }
   }
 
   async deleteCanonicalPage(sourceId: string, slug: string): Promise<"deleted" | "absent"> {
-    const revision = await this.pageRevision(sourceId, slug);
-    if (!revision) return "absent";
-    await this.call(sourceId, "delete_page", { slug, expected_revision: revision, request_id: deterministicRequestId("delete_page", sourceId, slug, revision) });
-    return "deleted";
+    const pageSlug = canonicalPageSlug(slug);
+    for (let tryNo = 0; tryNo < 2; tryNo++) {
+      const revision = await this.pageRevision(sourceId, pageSlug);
+      if (!revision) return "absent";
+      try {
+        await this.call(sourceId, "delete_page", {
+          slug: pageSlug,
+          expected_revision: revision,
+          request_id: randomUUID(),
+        });
+        return "deleted";
+      } catch (error) {
+        if (tryNo === 0 && revisionRetry(error)) continue;
+        throw error;
+      }
+    }
+    return "absent";
   }
 
   private async pageRevision(sourceId: string, slug: string): Promise<string | null> {
     try {
-      const page = (await this.call(sourceId, "get_page", { slug, include_content: true })) as Record<string, unknown> | null;
+      const page = (await this.call(sourceId, "get_page", { slug, include_content: false })) as Record<string, unknown> | null;
       return page && typeof page.revision === "string" ? page.revision : null;
     } catch (error) {
       if (error instanceof GBrainError && error.code === "page_not_found") return null;
