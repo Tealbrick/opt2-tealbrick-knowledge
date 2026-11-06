@@ -7,8 +7,8 @@
 // Receipts (`redact`) carry ids, field names and counts only: never an identity value, a label, a stance or history text.
 // C392 R2: `relationship_forget_scan` (read) and `relationship_forget` (destructive), owner only (src/forget.ts).
 import { readFileSync } from "node:fs";
-import type { HandlerSpec, Json, OpContext } from "@opt2-tealbrick/spec/sdk";
-import { forgetPerson, forgetScan, requireKnownOperator } from "./forget.ts";
+import type { Db, HandlerSpec, Json, OpContext } from "@opt2-tealbrick/spec/sdk";
+import { documentTitle, forgetPerson, forgetScan, personOf, requireKnownOperator } from "./forget.ts";
 import type { Knowledge, Services } from "./knowledge.ts";
 import { decideProposals, getRelationship, listRelationships, operatorForAgent, propose, RelationshipError, type RelType, relationshipsOverview, requireListedOperator, setRelationship } from "./relationships.ts";
 
@@ -61,6 +61,55 @@ export const NOT_POSSIBLE_YET: readonly { store: string; reason: string }[] = [
 ];
 
 const fieldsOf = (input: In) => ["type", "identities", "label", "stance", "trust"].filter((k) => input[k] !== undefined);
+
+/** S3-5: at most this many engine pages are purged inside the forget call; the rest stay queued for the drain timer. */
+export const INLINE_PURGE_LIMIT = 10;
+/** The SDK refuses a hold view over 16 000 characters (hold_view_too_large); the document list is cut well before. */
+const CONFIRM_MAX = 15_000;
+
+/**
+ * S2: the owner-facing confirmation of a forget: NAMES the person (label, id, operator), states that the delete is
+ * permanent, LISTS the documents to delete (area, title, id), the ids that would be refused, and what is not possible
+ * yet. Shown to the owner only (the scan answer, a hold view): receipts, the log and the stored forget report keep ids
+ * and counts. Plain text; reads only.
+ */
+export function forgetConfirmation(db: Db, operator: string, person: string, purgeDocuments: readonly string[], done?: ReturnType<typeof forgetScan>): string {
+  const p = personOf(db, operator, person);
+  const count = (table: string) => Number(db.prepare(`SELECT count(*) AS n FROM ${table} WHERE person_id = ? AND operator = ?`).get(person, operator)?.n ?? 0);
+  const scan = done ?? forgetScan(db, operator, person);
+  const picked = [...new Set(purgeDocuments)];
+  const purge = picked.filter((id) => scan.found.has(id));
+  const kept = picked.filter((id) => !scan.found.has(id));
+  const head = [
+    `Forget "${p.label}" (${person}) in the relationships of operator ${operator}.`,
+    "This delete is permanent. It cannot be undone, and Knowledge cannot restore it.",
+    `Deleted from Relationships: the person, ${count("kn_rel_identities")} identities, ${count("kn_rel_proposals")} proposals, ${count("kn_rel_history")} history items. One log row with counts stays.`,
+    "",
+    `Documents deleted for good, with every revision, comment and link, and their memory engine pages (${purge.length}):`,
+  ];
+  const lines: string[] = [];
+  let size = head.join("\n").length;
+  for (const [i, id] of purge.entries()) {
+    const m = scan.found.get(id);
+    const line = `- ${m?.area ?? "?"}: "${documentTitle(db, id)}" (${id})${m?.deleted ? ", already deleted in the Library" : ""}`;
+    if (size + line.length > CONFIRM_MAX - 2_000) {
+      lines.push(`- and ${purge.length - i} more`);
+      break;
+    }
+    lines.push(line);
+    size += line.length + 1;
+  }
+  if (!purge.length) lines.push("- none");
+  const tail = [
+    ...(kept.length ? ["", `Kept (this forget's scan does not match them, so they are not deleted): ${kept.slice(0, 100).join(", ")}`] : []),
+    "",
+    `Other documents that name the person and stay: ${scan.found.size - purge.length}.`,
+    "",
+    "Not possible yet:",
+    ...NOT_POSSIBLE_YET.map((n) => `- ${n.store}: ${n.reason}`),
+  ];
+  return [...head, ...lines, ...tail].join("\n").slice(0, CONFIRM_MAX);
+}
 
 export function createRelationshipHandlers(d: RelationshipDeps): Record<string, HandlerSpec<In, Json>> {
   const { wrap, fail, knowledge } = d;
@@ -147,8 +196,18 @@ export function createRelationshipHandlers(d: RelationshipDeps): Record<string, 
           ownerOnly(ctx);
           const operator = String(input.operator);
           requireKnownOperator(ctx.db, operator);
-          const scan = forgetScan(ctx.db, operator, String(input.person));
-          return { operator, person: String(input.person), scan: { terms: scan.terms, skippedShort: scan.skippedShort, truncated: scan.truncated }, matched: scan.matched, notPossibleYet: NOT_POSSIBLE_YET };
+          const person = String(input.person);
+          const scan = forgetScan(ctx.db, operator, person);
+          const picked = Array.isArray(input.purgeDocuments) ? input.purgeDocuments.map(String) : [];
+          return {
+            operator,
+            person,
+            scan: { terms: scan.terms, skippedShort: scan.skippedShort, truncated: scan.truncated },
+            matched: scan.matched,
+            // the text the owner confirms before relationship_forget (person ops are never held by the SDK: the page shows it)
+            confirmation: forgetConfirmation(ctx.db, operator, person, picked, scan),
+            notPossibleYet: NOT_POSSIBLE_YET,
+          };
         }),
     },
 
@@ -156,8 +215,26 @@ export function createRelationshipHandlers(d: RelationshipDeps): Record<string, 
       redact: (input, output) => {
         const out = output as { documents?: { purged?: unknown[]; pending?: unknown[]; refused?: unknown[] } } | undefined;
         const n = (v: unknown) => (Array.isArray(v) ? v.length : 0);
-        const docs = out?.documents ? `: ${n(out.documents.purged)} documents purged, ${n(out.documents.pending)} engine pages pending, ${n(out.documents.refused)} refused` : "";
-        return `forgot person ${String(input.person).slice(0, 40)} of ${String(input.operator).slice(0, 40)}${docs}`;
+        const who = `person ${String(input.person).slice(0, 40)} of ${String(input.operator).slice(0, 40)}`;
+        // no output = the hold summary (the SDK calls redact(input) for a hold): ids and counts only, like the receipt
+        if (!out?.documents) return `forget ${who}: ${n(input.purgeDocuments)} documents to delete for good`;
+        return `forgot ${who}: ${n(out.documents.purged)} documents purged, ${n(out.documents.pending)} engine pages pending, ${n(out.documents.refused)} refused`;
+      },
+      // S2: if the SDK holds this call, the owner sees the person's name, the documents and that it is permanent. The handler
+      // spec gets the input only, so the view reads the database the app is bound to (synchronous node:sqlite); unbound or
+      // unreadable → the ids and the same warning. SDK 0.1.48 never holds a person op (handlePersonOp runs it at once), so
+      // today the same text reaches the owner as `confirmation` of relationship_forget_scan, before the page calls forget.
+      holdView: (input) => {
+        const operator = String(input.operator);
+        const person = String(input.person);
+        const picked = Array.isArray(input.purgeDocuments) ? input.purgeDocuments.map(String) : [];
+        try {
+          const db = knowledge.current()?.db;
+          if (db) return forgetConfirmation(db, operator, person, picked);
+        } catch {
+          // fall through to the id-only view
+        }
+        return [`Forget person ${person} in the relationships of operator ${operator}.`, "This delete is permanent. It cannot be undone.", `Documents to delete for good: ${picked.length ? picked.join(", ") : "none"}.`].join("\n");
       },
       run: (input, ctx) =>
         wrap(async () => {
@@ -173,9 +250,13 @@ export function createRelationshipHandlers(d: RelationshipDeps): Record<string, 
             if (error instanceof RelationshipError) throw fail(error.code, error.message, error.httpStatus);
             throw error;
           }
-          // The engine pages of the purged documents: purge them now through the helper; what does not answer stays queued
-          // (kn_forget_queue, drained by the projection timer) and is reported `engine_pending`.
-          const queued = core.purged.filter((p) => p.queued).map((p) => p.documentId);
+          // The engine pages of the purged documents: purge them now through the helper; what does not answer, and every page
+          // over the inline limit, stays queued (kn_forget_queue, drained by the projection timer) and is reported `engine_pending`.
+          // S3-5: at most INLINE_PURGE_LIMIT pages inline (a helper call can take 25 s each); the rest wait for the timer
+          const queued = core.purged
+            .filter((p) => p.queued)
+            .map((p) => p.documentId)
+            .slice(0, INLINE_PURGE_LIMIT);
           const drained = queued.length ? await knowledge.drainForget(s, ctx, queued).catch(() => null) : null;
           const done = new Set(drained?.done ?? []);
           return {

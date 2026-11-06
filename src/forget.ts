@@ -29,9 +29,12 @@ export interface DocumentMatch {
 export interface ScanResult {
   terms: number;
   skippedShort: number;
-  matched: DocumentMatch[];
+  /** each with the document's current title, for the owner only (S3: tells false positives apart); never stored */
+  matched: (DocumentMatch & { title: string })[];
   truncated: boolean;
 }
+/** Titles in a scan answer and the confirmation text are cut to this many characters. */
+export const TITLE_CHARS = 120;
 
 const chars = (s: string) => [...s].length;
 const personUnknown = () => new RelationshipError("person_unknown", "This person is not in the relationships of this operator.", 404);
@@ -45,7 +48,7 @@ export function forgetTerms(label: string, values: readonly string[]): { terms: 
 }
 
 /** The person (of this operator) with its label and identity values; another operator's person is `person_unknown`. */
-function personOf(db: Db, operator: string, person: string): { label: string; values: string[] } {
+export function personOf(db: Db, operator: string, person: string): { label: string; values: string[] } {
   const row = db.prepare("SELECT label FROM kn_rel_people WHERE id = ? AND operator = ?").get(person, operator);
   if (!row) throw personUnknown();
   const values = db
@@ -114,12 +117,23 @@ export function scanDocuments(db: Db, terms: readonly string[]): Map<string, Doc
 
 const sorted = (found: Map<string, DocumentMatch>) => [...found.values()].sort((a, b) => (a.documentId < b.documentId ? -1 : a.documentId > b.documentId ? 1 : 0));
 
-/** Owner read: what a forget of this person would find, without changing anything. */
-export function forgetScan(db: Db, operator: string, person: string): ScanResult {
+/** A document's current title, cut to TITLE_CHARS code points ("" when the document is gone). */
+export function documentTitle(db: Db, id: string): string {
+  const title = String(db.prepare("SELECT title FROM kn_documents WHERE id = ?").get(id)?.title ?? "");
+  return [...title].slice(0, TITLE_CHARS).join("");
+}
+
+/**
+ * Owner read: what a forget of this person would find, without changing anything. Each match carries the document's title
+ * so the owner can tell a false positive apart; this answer is a read (never stored, no receipt). The forget's own report
+ * and everything it stores carry ids only.
+ */
+export function forgetScan(db: Db, operator: string, person: string): ScanResult & { found: Map<string, DocumentMatch> } {
   const p = personOf(db, operator, person);
   const { terms, skippedShort } = forgetTerms(p.label, p.values);
-  const all = sorted(scanDocuments(db, terms));
-  return { terms: terms.length, skippedShort, matched: all.slice(0, MATCH_LIMIT), truncated: all.length > MATCH_LIMIT };
+  const found = scanDocuments(db, terms);
+  const all = sorted(found);
+  return { terms: terms.length, skippedShort, matched: all.slice(0, MATCH_LIMIT).map((m) => ({ ...m, title: documentTitle(db, m.documentId) })), truncated: all.length > MATCH_LIMIT, found };
 }
 
 /**

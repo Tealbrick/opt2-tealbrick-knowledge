@@ -13,7 +13,7 @@ import { syncDirectory } from "../src/directory-feed.ts";
 import { forgetTerms } from "../src/forget.ts";
 import { NARROWING_POLICY } from "../src/handlers.ts";
 import { areaSourceId } from "../src/ids.ts";
-import { NOT_POSSIBLE_YET } from "../src/relationship-ops.ts";
+import { INLINE_PURGE_LIMIT, NOT_POSSIBLE_YET } from "../src/relationship-ops.ts";
 import { context, FakeScopes, memoryDb, TestError } from "./helpers.ts";
 
 const ADA = "agt_01AAAAAAAAAAAAAAAAAAAAAAAA"; // owned by ct_anna
@@ -42,7 +42,10 @@ const EMAIL = "Dana.Client@Acme-LLC.example";
 const EMAIL_NORM = "dana.client@acme-llc.example";
 const PHONE = "+49 151 2345 6789";
 const LABEL = "Dana Client";
-const SECRET_TEXT = ["dana client", EMAIL_NORM, "4915123456789", "Quarterly review", "Old contact sheet", "Deleted notes"];
+/** Document and comment text: never in any answer. */
+const BODY_TEXT = ["agenda: pricing", EMAIL_NORM, "4915123456789", "phone numbers moved", "sent to dana client today", "notes about", "price list 2026"];
+/** Titles and the label: in the owner's scan answer and confirmation only, never in the forget report, a receipt or the log. */
+const TITLES = ["dana client", "Call with Dana Client", "Quarterly review", "Old contact sheet", "Deleted notes", "Pricing"];
 const MISSING = "kdoc_01ZZZZZZZZZZZZZZZZZZZZZZZZ";
 
 async function setup(opts: { engine?: boolean } = {}) {
@@ -78,7 +81,7 @@ async function setup(opts: { engine?: boolean } = {}) {
   const services = knowledge.bind(db);
   await services.areas.ensureShared(scopes.asStore());
   const agentArea = await services.areas.ensureAgentArea({ id: ADA, name: "Ada" }, scopes.asStore());
-  return { db, knowledge, services, agentArea: agentArea.id, ctx, owner, run, receipts, helperCalls, engine, scopes };
+  return { db, definition, knowledge, services, agentArea: agentArea.id, ctx, owner, run, receipts, helperCalls, engine, scopes };
 }
 
 /** ct_anna's agent proposes Dana (email + phone, label, history); ct_ben's agent knows the same email as its own person. */
@@ -161,7 +164,7 @@ test("C392 R2: forget deletes every row of the person, nothing of another person
   await assert.rejects(env.run("relationship_forget", { operator: "ct_anna", person: dana }, env.owner()), rejects("person_unknown"));
 });
 
-test("C392 R2: the scan finds title, body, an OLD revision only, a comment and a soft-deleted document in every area, and never returns text", async () => {
+test("C392 R2: the scan finds title, body, an OLD revision only, a comment and a soft-deleted document in every area, with titles, never body text", async () => {
   const env = await setup();
   const { dana } = await people(env);
   const d = documents(env);
@@ -175,13 +178,21 @@ test("C392 R2: the scan finds title, body, an OLD revision only, a comment and a
     [d.deleted]: ["company", true, ["body", "revision"]],
   });
   assert.deepEqual(scan.scan, { terms: 4, skippedShort: 0, truncated: false }, "label, email, phone with and without +");
+  const titles = Object.fromEntries((scan.matched as { documentId: string; title: string }[]).map((m) => [m.documentId, m.title]));
+  assert.deepEqual(titles, { [d.title]: "Call with Dana Client", [d.body]: "Quarterly review", [d.old]: "Old contact sheet", [d.comment]: "Pricing", [d.deleted]: "Deleted notes" });
   const text = JSON.stringify(scan).toLowerCase();
-  for (const s of SECRET_TEXT) assert.ok(!text.includes(s.toLowerCase()), `the scan returns no text (${s})`);
+  for (const s of BODY_TEXT) assert.ok(!text.includes(s.toLowerCase()), `the scan returns no body or comment text (${s})`);
   // the scan changes nothing
   assert.equal(count(env.db, "SELECT count(*) AS n FROM kn_rel_people WHERE id = ?", dana), 1);
   // the forget's own scan returns the same matches
   const out = await env.run("relationship_forget", { operator: "ct_anna", person: dana }, env.owner());
-  assert.deepEqual(out.documents.matched, scan.matched);
+  assert.deepEqual(
+    out.documents.matched,
+    scan.matched.map(({ title: _t, ...m }: Record<string, unknown>) => m),
+    "the forget report (stored for an idempotent replay) has no titles",
+  );
+  const stored = [JSON.stringify(out), ...env.receipts, JSON.stringify(env.db.prepare("SELECT * FROM kn_rel_log").all())].join("\n").toLowerCase();
+  for (const s of [...TITLES, ...BODY_TEXT]) assert.ok(!stored.includes(s.toLowerCase()), `no title, label or text in the forget report, receipts or log (${s})`);
   assert.deepEqual(out.documents.purged, []);
   assert.equal(count(env.db, "SELECT count(*) AS n FROM kn_documents"), 6, "no document is deleted without purgeDocuments");
 });
@@ -305,8 +316,18 @@ test("C392 R2: manifest ops, owner-only shapes, narrowing refused, helper path d
   assert.deepEqual([scan.audience, scan.crud, scan.effect, scan.idempotency, scan.receipt], ["person", ["read"], "read", "none", false]);
   assert.equal(NARROWING_POLICY.relationship_forget, "unsupported");
   assert.equal(NARROWING_POLICY.relationship_forget_scan, "unsupported");
-  const gbrain = JSON.stringify(manifest).includes('"/purge-page"');
-  assert.ok(gbrain, "the helper path is declared");
+  // S3-3: `/purge-page` is declared ONLY as a helper path of the `gbrain` service (nowhere else in the manifest)
+  const where: string[] = [];
+  const walk = (v: unknown, path: string) => {
+    if (v === "/purge-page") where.push(path);
+    else if (Array.isArray(v)) for (const [i, x] of v.entries()) walk(x, `${path}[${i}]`);
+    else if (v && typeof v === "object") for (const [k, x] of Object.entries(v)) walk(x, `${path}.${k}`);
+  };
+  walk(manifest, "$");
+  const services = manifest.runtime.services as { id: string; helper?: { paths: string[] } }[];
+  const gbrainAt = services.findIndex((x) => x.id === "gbrain");
+  assert.deepEqual(where, [`$.runtime.services[${gbrainAt}].helper.paths[${services[gbrainAt]?.helper?.paths.indexOf("/purge-page")}]`]);
+  assert.deepEqual(services.filter((x) => x.helper?.paths.includes("/purge-page")).map((x) => x.id), ["gbrain"]);
   const skill = readFileSync(new URL("../skills/knowledge-relationships/SKILL.md", import.meta.url), "utf8");
   assert.match(skill, /You cannot forget a person/u);
   assert.match(skill, /Relationships page in Knowledge/u);
@@ -330,4 +351,59 @@ test("C392 migration 0005: applies after 0001-0004 with data; the queue holds id
   assert.equal(raw.prepare("SELECT count(*) AS n FROM kn_rel_people").get()?.n, 1);
   const columns = raw.prepare("PRAGMA table_info(kn_forget_queue)").all().map((c) => c.name);
   assert.deepEqual(columns, ["source_id", "document_id", "attempts", "next_attempt_at", "last_error", "created_at"]);
+});
+
+test("S2: the confirmation (scan answer and hold view) names the person, says it is permanent, lists each document with area and title, and the not-possible-yet lines; the hold summary keeps ids and counts", async () => {
+  const env = await setup();
+  const { dana } = await people(env);
+  const d = documents(env);
+  const input = { operator: "ct_anna", person: dana, purgeDocuments: [d.body, d.deleted, d.other] };
+  const scan = await env.run("relationship_forget_scan", input, env.owner());
+  const text = String(scan.confirmation);
+  assert.ok(text.startsWith(`Forget "${LABEL}" (${dana}) in the relationships of operator ct_anna.`), text);
+  assert.match(text, /This delete is permanent\. It cannot be undone/u);
+  assert.match(text, /the person, 2 identities, 2 proposals, 1 history items/u);
+  assert.ok(text.includes(`their memory engine pages (2):\n- company: "Quarterly review" (${d.body})\n- company: "Deleted notes" (${d.deleted}), already deleted in the Library\n`), text);
+  assert.ok(text.includes(`Kept (this forget's scan does not match them, so they are not deleted): ${d.other}`), text);
+  assert.match(text, /Other documents that name the person and stay: 3\./u);
+  for (const n of NOT_POSSIBLE_YET) assert.ok(text.includes(`- ${n.store}: ${n.reason}`), n.store);
+  for (const s of BODY_TEXT) assert.ok(!text.toLowerCase().includes(s), `no document text in the confirmation (${s})`);
+  // the hold view of the forget is the same text (if the SDK ever holds the person op); its summary = ids + counts
+  const forget = env.definition.handlers.relationship_forget as { holdView: (i: Json) => string; redact: (i: Json, o?: Json) => string };
+  assert.equal(forget.holdView(input as unknown as Json), text);
+  assert.equal(forget.redact(input as unknown as Json), `forget person ${dana} of ct_anna: 3 documents to delete for good`);
+  // unbound (no database yet): ids and the warning, never a throw
+  const { definition: fresh } = knowledgeDefinition({ KNOWLEDGE_ENGINE: "gbrain" }, TestError, { drainIntervalMs: 0 });
+  const view = (fresh.handlers.relationship_forget as { holdView: (i: Json) => string }).holdView(input as unknown as Json);
+  assert.match(view, /^Forget person rp_\w+ in the relationships of operator ct_anna\.\nThis delete is permanent\./u);
+  // a very long title is cut to 120 characters in the scan answer
+  const long = env.services.store.createDocument({ area: "company", title: `${"Long ".repeat(40)}Dana Client`, body: "x", actor: OWNER.id });
+  const again = await env.run("relationship_forget_scan", { operator: "ct_anna", person: dana }, env.owner());
+  const t = (again.matched as { documentId: string; title: string }[]).find((m) => m.documentId === long.id)?.title ?? "";
+  assert.equal([...t].length, 120);
+});
+
+test("S3-4: an app caller is refused on relationship_forget and relationship_forget_scan; nothing changes", async () => {
+  const env = await setup();
+  const { dana } = await people(env);
+  const app = env.ctx(ADA, { caller: { type: "app", id: "ins_01M5PM73ZZ0BSERVER00000000", name: "Observer", product: "observer", mode: null } as unknown as OpContext["caller"] });
+  await assert.rejects(env.run("relationship_forget", { operator: "ct_anna", person: dana }, app), rejects("scope_denied"));
+  await assert.rejects(env.run("relationship_forget_scan", { operator: "ct_anna", person: dana }, app), rejects("scope_denied"));
+  assert.equal(count(env.db, "SELECT count(*) AS n FROM kn_rel_people WHERE id = ?", dana), 1);
+  assert.equal(count(env.db, "SELECT count(*) AS n FROM kn_rel_log WHERE action = 'person_forgotten'"), 0);
+});
+
+test("S3-5: at most 10 engine pages are purged inside the forget call; the rest stay queued (pending) for the drain timer", async () => {
+  const env = await setup();
+  const { dana } = await people(env);
+  const ids = Array.from({ length: 12 }, (_, i) => env.services.store.createDocument({ area: "company", title: `Dana Client note ${i}`, body: "x", actor: OWNER.id }).id);
+  const out = await env.run("relationship_forget", { operator: "ct_anna", person: dana, purgeDocuments: ids }, env.owner());
+  assert.equal(env.helperCalls.length, INLINE_PURGE_LIMIT);
+  assert.equal(out.documents.purged.length, 12);
+  assert.equal(out.documents.purged.filter((p: { engine: string }) => p.engine === "purged").length, 10);
+  assert.equal(out.documents.pending.length, 2);
+  assert.equal(count(env.db, "SELECT count(*) AS n FROM kn_forget_queue"), 2);
+  assert.equal(count(env.db, "SELECT count(*) AS n FROM kn_documents WHERE id IN (SELECT value FROM json_each(?))", JSON.stringify(ids)), 0, "every document itself is gone at once");
+  assert.deepEqual(await env.knowledge.drainForget(env.services, env.owner()), { done: out.documents.pending.map((p: { documentId: string }) => p.documentId), failed: [] });
+  assert.equal(count(env.db, "SELECT count(*) AS n FROM kn_forget_queue"), 0);
 });

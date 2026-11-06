@@ -3819,7 +3819,7 @@
     {
       "id": "relationship_forget_scan",
       "title": "Find what names a person (before forget)",
-      "description": "Before a forget: list the Knowledge documents of every area (live and deleted, every revision and comment) that contain the name or an identity of one person of one operator. Returns document ids, areas and where the person was found, never the text. Changes nothing.",
+      "description": "Before a forget: list the Knowledge documents of every area (live and deleted, every revision and comment) that contain the name or an identity of one person of one operator, with each document's title so you can tell a false match apart. With the documents you plan to delete, it also returns the confirmation text to show before the forget. Changes nothing.",
       "input": {
         "type": "object",
         "additionalProperties": false,
@@ -3838,6 +3838,15 @@
             "type": "string",
             "pattern": "^rp_[0-9A-HJKMNP-TV-Z]{26}$",
             "description": "A relationships person id (rp_…)."
+          },
+          "purgeDocuments": {
+            "type": "array",
+            "maxItems": 100,
+            "items": {
+              "type": "string",
+              "pattern": "^kdoc_[0-9A-HJKMNP-TV-Z]{26}$"
+            },
+            "description": "Optional: the document ids you plan to delete with relationship_forget; the confirmation text lists them."
           }
         }
       },
@@ -3886,7 +3895,8 @@
                 "documentId",
                 "area",
                 "deleted",
-                "where"
+                "where",
+                "title"
               ],
               "properties": {
                 "documentId": {
@@ -3917,6 +3927,11 @@
                     ]
                   },
                   "description": "Where a name or identity of the person was found. body = the current body, summary, tags and source; revision = any stored revision. Never the text."
+                },
+                "title": {
+                  "type": "string",
+                  "maxLength": 120,
+                  "description": "The document's current title (shown to the owner; never stored)."
                 }
               }
             }
@@ -3944,6 +3959,12 @@
               }
             },
             "description": "What this forget cannot reach yet, store by store."
+          },
+          "confirmation": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 16000,
+            "description": "The text to show the owner before relationship_forget: the person's name, that the delete is permanent, each document to delete (area, title, id), the ids that would be kept, and what is not possible yet."
           }
         }
       },

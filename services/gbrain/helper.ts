@@ -88,13 +88,13 @@ function purgePage(source: string, document: string): Promise<"purged" | "absent
   const slug = `knowledge-docs/${document.toLowerCase()}`;
   const args = ["run", `${root}/src/cli.ts`, "delete", slug, "--source-id", source, "--purge", "--force", "--request-id", randomUUID(), "--json"];
   return new Promise((resolve, reject) => {
-    const child = execFile("bun", args, { timeout: SOURCES_ADD_TIMEOUT_MS, killSignal: "SIGKILL" }, (error, stdout, stderr) => {
+    const child = execFile("bun", args, { timeout: SOURCES_ADD_TIMEOUT_MS, killSignal: "SIGKILL" }, (error, stdout) => {
       const ms = Date.now() - started;
       if (!error) {
         logLine({ event: "page_purge", outcome: "purged", ms });
         return resolve("purged");
       }
-      if (`${stdout}${stderr}`.includes("page_not_found")) {
+      if (cliErrorCode(stdout) === "page_not_found") {
         logLine({ event: "page_purge", outcome: "absent", ms });
         return resolve("absent");
       }
@@ -104,6 +104,29 @@ function purgePage(source: string, document: string): Promise<"purged" | "absent
     });
     child.stdin?.end();
   });
+}
+
+/**
+ * The error code of a `--json` CLI failure, or null. Under `--json` upstream writes exactly one envelope to stdout with the
+ * code at the top level (`writeCliError`, src/cli/cli-error.ts:53-74 at the pin; an NDJSON stream ends with that envelope as
+ * its last line). Read from the LAST line that parses as a JSON object: `code`, else `error.code`. Never a substring match:
+ * page text or another error that mentions `page_not_found` must not count as an absent page.
+ */
+function cliErrorCode(stdout: string): string | null {
+  const lines = stdout.split("\n").map((l) => l.trim()).filter(Boolean);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    let doc: unknown;
+    try {
+      doc = JSON.parse(lines[i] as string);
+    } catch {
+      continue;
+    }
+    if (!doc || typeof doc !== "object" || Array.isArray(doc)) continue;
+    const d = doc as { code?: unknown; error?: { code?: unknown } | null };
+    const code = typeof d.code === "string" ? d.code : d.error && typeof d.error.code === "string" ? d.error.code : null;
+    return code;
+  }
+  return null;
 }
 
 async function readJson(req: AsyncIterable<unknown>): Promise<Record<string, unknown> | null> {
@@ -179,4 +202,9 @@ const server = createServer(async (req, res) => {
     reply(502, { error: { code: "source_add_failed", message: "the engine could not create the source", details: { cause } } });
   }
 });
+// Loopback only: the one way in is tb-exec's helper proxy, which forwards a request only with a valid instance assertion
+// (signed by this Knowledge instance's key, bound to this service, path and body, never replayed) and only for the manifest's
+// declared paths. SDK tests: opt2-tealbrick-sdk packages/miniapp-sdk/test/exec/tb-exec.test.ts "helper proxy refuses a wrong
+// key, a sibling service, a tampered body, a missing header and a replay" and "helper proxy refuses an undeclared path even
+// with a valid assertion"; parseArgs there refuses a non-loopback helper target. test/gbrain-helper.test.ts checks the bind.
 server.listen(3141, "127.0.0.1", () => logLine({ event: "helper_listening", port: 3141 }));
