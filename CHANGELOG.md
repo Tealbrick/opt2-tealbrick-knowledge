@@ -2,6 +2,14 @@
 
 All notable changes to the Knowledge mini app. Versions are assigned at merge (C340).
 
+## 0.1.34 (2026-11-06)
+
+C390 (knowledge#38), the second half: the GBrain and notebook databases are in every backup, and tb-exec listens on IPv4 and IPv6.
+
+- The backup gap: `gbrain-db` and `notebook-db` declared a backup, but the app had no private address for them, so every backup and pre-update snapshot logged "service not deployed; left out of the backup" and held only the app database. New env `KNOWLEDGE_GBRAIN_DB_HOST` (`{{services.gbrain-db.host}}`) and `KNOWLEDGE_NOTEBOOK_DB_HOST` (`{{services.notebook-db.host}}`) let the SDK dump both: `services/gbrain-db.pgdump` and `services/notebook-db.surql`. A manifest test fails if a service with a backup has no address entry.
+- miniapp-sdk 0.1.46 → 0.1.48 in the app and 0.1.41 → 0.1.48 in tb-exec of the companion images: tb-exec listens on `::` with a `0.0.0.0` fallback, and a helper or backup failure carries a cause label (`details.cause`), which `area provisioning failed` logs since 0.1.33. manifest 0.1.35 → 0.1.37 (the SDK's own pin).
+- `upgradeFrom` `>=0.1.20 <=0.1.33`.
+
 ## 0.1.33 (2026-11-05)
 
 C390 (knowledge#38), diagnostics: a memory area that cannot get its engine source now says why.
