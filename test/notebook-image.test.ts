@@ -47,7 +47,41 @@ test("INC-20261106-02: a failed research call is reported with a short cause cod
     fetch: (async () => new Response(JSON.stringify({ detail }), { status: 502, headers: { "content-type": "application/json" } })) as typeof fetch,
   });
   client.onFailure = (failure) => seen.push(failure);
-  await assert.rejects(client.health().then((ok) => (ok ? null : Promise.reject(new Error("unhealthy")))));
-  assert.deepEqual(seen, [{ method: "GET", path: "/health", status: 502, cause: "unsupported_parameter:top_p" }]);
+  await assert.rejects(client.listSources("notebook:n1"));
+  assert.equal(seen.length, 1);
+  assert.deepEqual({ ...(seen[0] as object), path: "" }, { method: "GET", path: "", status: 502, cause: "unsupported_parameter:top_p" });
+  assert.ok(!String((seen[0] as { path: string }).path).includes("?"), "no query in the logged path");
   assert.ok(!JSON.stringify(seen).includes("walrus"), "no upstream text");
+  // a long error body (cut JSON) is read only up to 4 KB and still classified from the raw prefix
+  const long = new NotebookClient({
+    baseUrl: "http://notebook.test",
+    password: "pw",
+    fetch: (async () => new Response(JSON.stringify({ detail: `Unsupported parameter: 'temperature' ${"x".repeat(100_000)}` }), { status: 502, headers: { "content-type": "application/json" } })) as typeof fetch,
+  });
+  const longSeen: { cause: string }[] = [];
+  long.onFailure = (failure) => longSeen.push(failure);
+  await assert.rejects(long.listSources("notebook:n1"));
+  assert.equal(longSeen[0]?.cause, "unsupported_parameter:temperature");
+  // 404 and the health probe are not logged; an unreachable engine is
+  const quiet: unknown[] = [];
+  const notFound = new NotebookClient({ baseUrl: "http://notebook.test", password: "pw", fetch: (async () => new Response("{}", { status: 404 })) as typeof fetch });
+  notFound.onFailure = (failure) => quiet.push(failure);
+  await assert.rejects(notFound.listSources("notebook:n1"));
+  assert.equal(await notFound.health(), false);
+  assert.deepEqual(quiet, []);
+  const down = new NotebookClient({ baseUrl: "http://notebook.test", password: "pw", fetch: (async () => { throw new TypeError("fetch failed"); }) as typeof fetch });
+  const downSeen: { cause: string; status: unknown }[] = [];
+  down.onFailure = (failure) => downSeen.push(failure);
+  await assert.rejects(down.listSources("notebook:n1"));
+  assert.deepEqual(downSeen.map((f) => [f.status, f.cause]), [["none", "unreachable"]]);
+});
+
+test("INC-20261106-02: cause codes", async () => {
+  const { failureCause } = await import("../src/engines/notebook/client.ts");
+  assert.equal(failureCause(502, "Fernet decrypt failed for credential"), "credential_decrypt");
+  assert.equal(failureCause(502, "The model gpt-x does not exist or you do not have access (authentication ok)"), "model_not_found");
+  assert.equal(failureCause(422, "No default model configured"), "model_config");
+  assert.equal(failureCause(502, "Request timed out"), "timeout");
+  assert.equal(failureCause(502, "This model's maximum context length is 128000 tokens"), "context_too_long");
+  assert.equal(failureCause(400, "bad"), "upstream_rejected");
 });

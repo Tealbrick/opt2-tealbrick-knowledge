@@ -71,14 +71,43 @@ export function failureCause(status: number, detail: string): string {
   const param = /unsupported (?:parameter|value)/u.test(text) ? PARAMETERS.find((name) => text.includes(`'${name}'`) || text.includes(`"${name}"`)) : undefined;
   if (param) return `unsupported_parameter:${param}`;
   if (/unsupported (?:parameter|value)/u.test(text)) return "unsupported_parameter";
-  if (/decrypt|encryption key|fernet|invalid token/u.test(text)) return "credential_decrypt";
+  if (/decrypt|encryption key|fernet/u.test(text)) return "credential_decrypt";
+  if (/model[^.]{0,40}(?:not found|does not exist)|model_not_found|unknown model/u.test(text)) return "model_not_found";
   if (/api key|apikey|unauthori[sz]ed|authentication|\b401\b|invalid_api_key|expired/u.test(text)) return "auth_failed";
   if (/rate limit|\b429\b|quota|insufficient_quota/u.test(text)) return "rate_limited";
-  if (/model[^.]{0,40}(?:not found|does not exist)|model_not_found|unknown model/u.test(text)) return "model_not_found";
   if (/credential|no default model|not configured|configuration/u.test(text)) return "model_config";
   if (/timed? ?out|timeout/u.test(text)) return "timeout";
   if (/context length|too many tokens|maximum context/u.test(text)) return "context_too_long";
   return status >= 500 ? "upstream_error" : "upstream_rejected";
+}
+
+/** At most `limit` bytes of a response body (decoded), then the rest is cancelled: a large error body is never buffered. */
+async function readPrefix(response: Response, limit: number): Promise<string> {
+  const reader = response.body?.getReader();
+  if (!reader) return "";
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    while (size < limit) {
+      const { done, value } = await reader.read();
+      if (done || !value) break;
+      chunks.push(value);
+      size += value.byteLength;
+    }
+  } catch {
+    // aborted or broken: classify what arrived
+  } finally {
+    await reader.cancel().catch(() => undefined);
+  }
+  const all = new Uint8Array(Math.min(size, limit));
+  let at = 0;
+  for (const chunk of chunks) {
+    const part = chunk.subarray(0, all.byteLength - at);
+    all.set(part, at);
+    at += part.byteLength;
+    if (at >= all.byteLength) break;
+  }
+  return new TextDecoder().decode(all);
 }
 
 /** One failed research engine call: method, path without query, HTTP status (or null) and the cause code. */
@@ -118,19 +147,19 @@ export class NotebookClient {
       });
     } catch (error) {
       const cause = error instanceof Error && error.name === "TimeoutError" ? "timeout" : "unreachable";
-      this.onFailure?.({ method, path: path.split("?")[0] ?? path, status: "none", cause });
+      if (path !== "/health") this.onFailure?.({ method, path: path.split("?")[0] ?? path, status: "none", cause });
       throw failure("upstream_unavailable", null);
     }
     if (!response.ok) {
-      if (response.status !== 404) {
-        // a bounded read of {"detail": …}: only the derived cause code leaves this function
-        let detail = "";
+      if (response.status !== 404 && path !== "/health") {
+        // only the derived cause code leaves this function
+        const raw = await readPrefix(response, 4096);
+        let detail = raw;
         try {
-          const raw = (await response.text()).slice(0, 4096);
           const parsed = JSON.parse(raw) as unknown;
-          detail = isObject(parsed) && typeof parsed.detail === "string" ? parsed.detail : raw;
+          if (isObject(parsed) && typeof parsed.detail === "string") detail = parsed.detail;
         } catch {
-          detail = "";
+          // a cut or non-JSON body: classify the raw prefix
         }
         this.onFailure?.({ method, path: path.split("?")[0] ?? path, status: response.status, cause: failureCause(response.status, detail) });
       } else {
