@@ -53,6 +53,8 @@ function revisionRetry(error: unknown): boolean {
 /** Refusals after which putCanonicalPage reads the page again (revision, content marker, timeline) and retries. */
 const REREAD_CODES: ReadonlySet<string> = new Set(["revision_conflict", "revision_required", "timeline_rows_would_be_removed"]);
 const CONTENT_MARKER = "knowledge_content_sha256";
+/** GBrain's Timeline section heading (timeline-omission.ts at the pin): `## Timeline` or `## History`. */
+const TIMELINE_HEADING = /^##\s+(timeline|history)\b/imu;
 
 /** The document with `knowledge_content_sha256: "<hex>"` (quoted: YAML never reads it as a number) as its first frontmatter key (content without frontmatter: unchanged). */
 export function withContentMarker(content: string, hash: string): string {
@@ -403,7 +405,11 @@ export class GBrainClient {
         if (page && contentMarkerOf(page) === hash) return; // a lost answer: the page already holds this document
         revision = page && typeof page.revision === "string" ? page.revision : null;
         if (code === "timeline_rows_would_be_removed") {
-          timeline = page && typeof page.timeline === "string" && page.timeline.trim() ? page.timeline.trim() : null;
+          // Only a document WITHOUT its own Timeline section gets the page's section appended (never a second section; with
+          // its own section the refusal goes to the projector: logged, backed off, capped). GBrain's `timeline` field is
+          // the whole section with its heading (seen on qa1: "## Timeline\n\n- **2026-01-05** | …").
+          const own = TIMELINE_HEADING.test(content);
+          timeline = !own && page && typeof page.timeline === "string" && TIMELINE_HEADING.test(page.timeline) ? page.timeline.trim() : null;
           if (!timeline) throw error;
         }
       }

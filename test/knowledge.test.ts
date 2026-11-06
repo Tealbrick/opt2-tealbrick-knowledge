@@ -1636,6 +1636,20 @@ test("INC-20261106-01: timeline entries another writer added to the page are kep
   const after = pages?.get(pageSlug(doc.id));
   assert.match(after?.content ?? "", /plain body, edited/u);
   assert.match(after?.content ?? "", /Kickoff held/u, "the agent's dated entry survives the edit");
+  assert.equal((after?.content.match(/^## Timeline/gmu) ?? []).length, 1, "one Timeline section");
+
+  // a document with its OWN Timeline section never gets a second one: the refusal is the projector's (logged, capped)
+  pages?.set(pageSlug(doc.id), { ...(after ?? { content: "", revision: "r" }), revision: "r-agent-2", timeline: `${timeline}\n- **2026-02-01** | Agent row` });
+  gbrain.putHook = (_source, _slug, args) => (/Own row/u.test(String(args.content)) ? { error: "timeline_rows_would_be_removed" } : undefined);
+  try {
+    await run("document_update", { id: doc.id, body: "plain body\n\n## Timeline\n\n- **2026-03-01** | Own row" }, ctx(ADA));
+    await settle(knowledge);
+    const puts = pageCalls("put_page", doc.id).filter((c) => /Own row/u.test(String(c.args.content)));
+    assert.equal(puts.length, 1, "no retry with an appended second section");
+    assert.ok(puts.every((c) => (String(c.args.content).match(/^## Timeline/gmu) ?? []).length === 1));
+  } finally {
+    gbrain.putHook = undefined;
+  }
 });
 
 test("INC-20261106-01: the boot retry of a failed row stops after 3 boots (no schema change); a new edit starts over", async () => {
