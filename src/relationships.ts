@@ -188,9 +188,10 @@ export function requireListedOperator(db: Db, operator: string, now: number = Da
 
 // ── log ──
 
-type LogAction = "person_created" | "proposed" | "history_added" | "proposal_accepted" | "proposal_rejected" | "relationship_set";
+/** `person_forgotten` (C392 R2) is the one tombstone a forget leaves: person id, operator, actor, time and counts only. */
+type LogAction = "person_created" | "proposed" | "history_added" | "proposal_accepted" | "proposal_rejected" | "relationship_set" | "person_forgotten";
 
-function log(db: Db, now: number, actor: string, action: LogAction, operator: string, person: string | null, detail: string | null): void {
+export function log(db: Db, now: number, actor: string, action: LogAction, operator: string, person: string | null, detail: string | null): void {
   db.prepare("INSERT INTO kn_rel_log (at, actor, action, operator, person_id, detail) VALUES (?, ?, ?, ?, ?, ?)").run(now, actor, action, operator, person, detail);
 }
 
