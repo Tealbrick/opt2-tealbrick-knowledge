@@ -61,7 +61,61 @@ export interface NotebookClientOptions {
   fetch?: typeof fetch;
 }
 
+/**
+ * INC-20261106-02: the cause of a failed research engine call, as a short fixed code from upstream's error text (never the
+ * text itself: it may quote the prompt or a provider message). Open Notebook answers errors as {"detail": "<text>"}.
+ */
+const PARAMETERS = ["top_p", "temperature", "max_tokens", "max_completion_tokens", "reasoning_effort", "response_format", "tools", "stream"];
+export function failureCause(status: number, detail: string): string {
+  const text = detail.toLowerCase();
+  const param = /unsupported (?:parameter|value)/u.test(text) ? PARAMETERS.find((name) => text.includes(`'${name}'`) || text.includes(`"${name}"`)) : undefined;
+  if (param) return `unsupported_parameter:${param}`;
+  if (/unsupported (?:parameter|value)/u.test(text)) return "unsupported_parameter";
+  if (/decrypt|encryption key|fernet/u.test(text)) return "credential_decrypt";
+  if (/model[^.]{0,40}(?:not found|does not exist)|model_not_found|unknown model/u.test(text)) return "model_not_found";
+  if (/api key|apikey|unauthori[sz]ed|authentication|\b401\b|invalid_api_key|expired/u.test(text)) return "auth_failed";
+  if (/rate limit|\b429\b|quota|insufficient_quota/u.test(text)) return "rate_limited";
+  if (/credential|no default model|not configured|configuration/u.test(text)) return "model_config";
+  if (/timed? ?out|timeout/u.test(text)) return "timeout";
+  if (/context length|too many tokens|maximum context/u.test(text)) return "context_too_long";
+  return status >= 500 ? "upstream_error" : "upstream_rejected";
+}
+
+/** At most `limit` bytes of a response body (decoded), then the rest is cancelled: a large error body is never buffered. */
+async function readPrefix(response: Response, limit: number): Promise<string> {
+  const reader = response.body?.getReader();
+  if (!reader) return "";
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    while (size < limit) {
+      const { done, value } = await reader.read();
+      if (done || !value) break;
+      chunks.push(value);
+      size += value.byteLength;
+    }
+  } catch {
+    // aborted or broken: classify what arrived
+  } finally {
+    await reader.cancel().catch(() => undefined);
+  }
+  const all = new Uint8Array(Math.min(size, limit));
+  let at = 0;
+  for (const chunk of chunks) {
+    const part = chunk.subarray(0, all.byteLength - at);
+    all.set(part, at);
+    at += part.byteLength;
+    if (at >= all.byteLength) break;
+  }
+  return new TextDecoder().decode(all);
+}
+
+/** One failed research engine call: method, path without query, HTTP status (or null) and the cause code. */
+export type NotebookFailure = { method: string; path: string; status: number | string; cause: string };
+
 export class NotebookClient {
+  /** INC-20261106-02: called for every failed call (Knowledge logs it); never carries upstream text. */
+  onFailure: ((failure: NotebookFailure) => void) | null = null;
   private readonly baseUrl: string;
   private readonly password: string;
   private readonly timeoutMs: number;
@@ -91,11 +145,26 @@ export class NotebookClient {
         headers: { authorization: `Bearer ${this.password}`, accept: "application/json", ...(body === undefined ? {} : { "content-type": "application/json" }) },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       });
-    } catch {
+    } catch (error) {
+      const cause = error instanceof Error && error.name === "TimeoutError" ? "timeout" : "unreachable";
+      if (path !== "/health") this.onFailure?.({ method, path: path.split("?")[0] ?? path, status: "none", cause });
       throw failure("upstream_unavailable", null);
     }
     if (!response.ok) {
-      await response.body?.cancel();
+      if (response.status !== 404 && path !== "/health") {
+        // only the derived cause code leaves this function
+        const raw = await readPrefix(response, 4096);
+        let detail = raw;
+        try {
+          const parsed = JSON.parse(raw) as unknown;
+          if (isObject(parsed) && typeof parsed.detail === "string") detail = parsed.detail;
+        } catch {
+          // a cut or non-JSON body: classify the raw prefix
+        }
+        this.onFailure?.({ method, path: path.split("?")[0] ?? path, status: response.status, cause: failureCause(response.status, detail) });
+      } else {
+        await response.body?.cancel();
+      }
       throw failure(response.status === 404 ? "not_found" : "upstream_rejected", response.status);
     }
     if (response.status === 204) return null;
