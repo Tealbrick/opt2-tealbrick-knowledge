@@ -104,10 +104,12 @@ export const NARROWING_POLICY: Readonly<Record<string, "items" | "untagged" | "n
   // C380 Governance ops (app caller `fleet` only): no memory item is read or returned, so a tag narrowing has nothing to limit
   access_list: "none",
   access_revoke: "none",
-  // C392 R1 relationships: third-party people, proposals and history carry no memory tags and return no memory item
-  relationships_list: "none",
-  relationship_get: "none",
-  relationship_propose: "none",
+  // C392 R1 relationships (hardening F6): third-party people, proposals and history carry no memory tags, so a tag narrowing
+  // cannot limit what an agent reads or records about a person (a narrowed call could still read every person of its
+  // operator): the agent ops refuse it (`narrowing_unsupported`). The person ops are the owner's (Rules never narrows them).
+  relationships_list: "unsupported",
+  relationship_get: "unsupported",
+  relationship_propose: "unsupported",
   relationships_overview: "none",
   relationship_confirm: "none",
   relationship_set: "none",

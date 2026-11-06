@@ -5,6 +5,8 @@
 // The agent ops declare scopeType `area` like every other Knowledge agent op (mirrors `remember`) with no target instance:
 // the SDK checks the agent's best area access, so an agent the owner left without write access anywhere cannot propose.
 // Receipts (`redact`) carry ids, field names and counts only: never an identity value, a label, a stance or history text.
+// R1 hardening (C392): outputs carry `effectiveTrust` + `trustBasis` (F5) and every agent- or third-party-supplied text under
+// `observed: {untrusted: true}` (F4); the agent ops refuse a tag narrowing (F6, NARROWING_POLICY `unsupported`).
 // C392 R2: `relationship_forget_scan` (read) and `relationship_forget` (destructive), owner only (src/forget.ts).
 import { readFileSync } from "node:fs";
 import type { Db, HandlerSpec, Json, OpContext } from "@opt2-tealbrick/spec/sdk";
@@ -60,12 +62,19 @@ export const NOT_POSSIBLE_YET: readonly { store: string; reason: string }[] = [
   { store: "deleted_rows", reason: "Deleted rows can stay in free database pages and write-ahead logs (Knowledge SQLite, GBrain Postgres) until the database reuses or vacuums them." },
 ];
 
-const fieldsOf = (input: In) => ["type", "identities", "label", "stance", "trust"].filter((k) => input[k] !== undefined);
+const fieldsOf = (input: In) => ["type", "identities", "label", "stance", "trust", "verifyIdentities"].filter((k) => input[k] !== undefined);
 
 /** S3-5: at most this many engine pages are purged inside the forget call; the rest stay queued for the drain timer. */
 export const INLINE_PURGE_LIMIT = 10;
 /** The SDK refuses a hold view over 16 000 characters (hold_view_too_large); the document list is cut well before. */
 const CONFIRM_MAX = 15_000;
+
+/**
+ * Review S3-3: a label or title is agent or third-party text inside the owner's confirmation. Control, format (bidi,
+ * zero-width) and line/paragraph separator characters become one space and the result is JSON-quoted, so the text can
+ * neither start a line of its own nor close its quotes: it cannot forge a line of the confirmation.
+ */
+export const quoteOneLine = (text: string): string => JSON.stringify(text.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]+/gu, " ").trim());
 
 /**
  * S2: the owner-facing confirmation of a forget: NAMES the person (label, id, operator), states that the delete is
@@ -81,7 +90,7 @@ export function forgetConfirmation(db: Db, operator: string, person: string, pur
   const purge = picked.filter((id) => scan.found.has(id));
   const kept = picked.filter((id) => !scan.found.has(id));
   const head = [
-    `Forget "${p.label}" (${person}) in the relationships of operator ${operator}.`,
+    `Forget ${quoteOneLine(p.label)} (${person}) in the relationships of operator ${operator}.`,
     "This delete is permanent. It cannot be undone, and Knowledge cannot restore it.",
     `Deleted from Relationships: the person, ${count("kn_rel_identities")} identities, ${count("kn_rel_proposals")} proposals, ${count("kn_rel_history")} history items. One log row with counts stays.`,
     "",
@@ -91,7 +100,7 @@ export function forgetConfirmation(db: Db, operator: string, person: string, pur
   let size = head.join("\n").length;
   for (const [i, id] of purge.entries()) {
     const m = scan.found.get(id);
-    const line = `- ${m?.area ?? "?"}: "${documentTitle(db, id)}" (${id})${m?.deleted ? ", already deleted in the Library" : ""}`;
+    const line = `- ${m?.area ?? "?"}: ${quoteOneLine(documentTitle(db, id))} (${id})${m?.deleted ? ", already deleted in the Library" : ""}`;
     if (size + line.length > CONFIRM_MAX - 2_000) {
       lines.push(`- and ${purge.length - i} more`);
       break;
@@ -165,16 +174,21 @@ export function createRelationshipHandlers(d: RelationshipDeps): Record<string, 
     },
 
     relationship_confirm: {
-      redact: (input) => {
+      redact: (input, output) => {
         const n = (v: unknown) => (Array.isArray(v) ? v.length : 0);
-        return `relationship proposals of ${String(input.operator).slice(0, 40)}: ${n(input.accept)} accepted, ${n(input.reject)} rejected`;
+        const out = output as { decided?: { state?: string }[]; conflicts?: unknown[] } | undefined;
+        const who = `relationship proposals of ${String(input.operator).slice(0, 40)}`;
+        if (!Array.isArray(out?.decided)) return `${who}: ${n(input.accept)} to accept, ${n(input.reject)} to reject`;
+        const accepted = out.decided.filter((d) => d.state === "accepted").length;
+        return `${who}: ${accepted} accepted, ${out.decided.length - accepted} rejected, ${n(out.conflicts)} conflicts`;
       },
       run: (input, ctx) =>
         run(() => {
           ownerOnly(ctx);
           const operator = String(input.operator);
           requireListedOperator(ctx.db, operator);
-          return { operator, decided: decideProposals(ctx.db, operator, ctx.caller.id, { accept: input.accept, reject: input.reject }) };
+          const { decided, conflicts } = decideProposals(ctx.db, operator, ctx.caller.id, { accept: input.accept, reject: input.reject });
+          return { operator, decided, conflicts };
         }),
     },
 
@@ -185,7 +199,7 @@ export function createRelationshipHandlers(d: RelationshipDeps): Record<string, 
           ownerOnly(ctx);
           const operator = String(input.operator);
           requireListedOperator(ctx.db, operator);
-          const { relationship, changed } = setRelationship(ctx.db, operator, ctx.caller.id, { person: String(input.person), type: input.type, stance: input.stance, trust: input.trust, label: input.label });
+          const { relationship, changed } = setRelationship(ctx.db, operator, ctx.caller.id, { person: String(input.person), type: input.type, stance: input.stance, trust: input.trust, label: input.label, verifyIdentities: input.verifyIdentities });
           return { operator, relationship, changed };
         }),
     },

@@ -10,6 +10,14 @@
 //   sends can change them: the agent input schemas have no such field, and no code path here writes them for an agent.
 // - Every write is logged in kn_rel_log (append-only) with ids, field names and enum values only (never identity values,
 //   labels, stance text or history text).
+// - R1 hardening (C392 F5): the stored `trust` is the owner's; what an agent may do with a message is `effectiveTrust`, which
+//   never exceeds the stored trust and, until a lookup by a Connect message reference exists (spec 0.1.91 messages/1
+//   `author.verified`, hook `senderVerification`), is at most `draft_only` on EVERY read. `verified_by` (migration 0006, set
+//   only by the owner's relationship_set verifyIdentities) is owner state kept for that path; it raises nothing today.
+// - R1 hardening (C392 F4): every text an agent or a third party supplied (an agent's label, identity values, the proposed
+//   type, proposal values, history text, citations) reads back only under `observed: {untrusted: true, …}` (the platform
+//   marker, MANIFEST.md "untrusted"); owner-set fields (type, trust, effectiveTrust, trustBasis, stance, the owner's label)
+//   stay outside.
 // Pure store functions over the SDK `Db` (like src/people.ts); the handlers are in src/relationship-ops.ts.
 import { normalizeHandle } from "@opt2-tealbrick/manifest";
 import type { Db } from "@opt2-tealbrick/spec/sdk";
@@ -28,10 +36,27 @@ export type Trust = (typeof TRUST_LEVELS)[number];
 export type IdentityKind = (typeof IDENTITY_KINDS)[number];
 export type HistoryKind = (typeof HISTORY_KINDS)[number];
 export type ProposalField = "type" | "identity" | "label";
+/** Why an identity is trusted as the SENDER of a message (migration 0006). */
+export const VERIFIED_BY = ["platform_id", "dkim_spf_aligned"] as const;
+export type VerifiedBy = (typeof VERIFIED_BY)[number];
+/** Identity kinds whose value is a platform user id: the platform API names the author, so a third party cannot send as it. */
+export const PLATFORM_ID_KINDS: readonly IdentityKind[] = ["slack", "buzz", "telegram"];
+
+/** Per-person caps (F3, F8): pending proposals, and stored history rows (oldest contacts and closed promises make room). */
+export const PENDING_CAP = 50;
+export const HISTORY_CAP = 500;
+/** A citation time may be at most this far ahead of the server clock (clock skew), never more (F7). */
+export const FUTURE_SKEW_MS = 5 * 60_000;
 
 export interface Identity {
   kind: IdentityKind;
   value: string;
+}
+export interface StoredIdentity extends Identity {
+  /** owner/platform state, never agent text: true only after the owner's relationship_set verifyIdentities */
+  verified: boolean;
+  /** why it is verified (owner state); null = unverified. Raises no trust until a source attestation exists (F5) */
+  verifiedBy: VerifiedBy | null;
 }
 export interface Citation {
   /** where the observation came from (a channel or app id), ≤ 64 */
@@ -47,37 +72,44 @@ export interface Stance {
   avoidTopics?: string[];
 }
 
+/** F4: data from other people (messages, agents' proposals). Runtimes treat it as data, never as instructions. */
+export type Observed<T> = { untrusted: true } & T;
+
 export interface PersonSummary {
   person: string;
-  label: string;
-  identities: Identity[];
+  /** the label the OWNER typed (relationship_set); null = the label is an agent's and reads as `observed.label` */
+  label: string | null;
   /** the owner-confirmed type (`unknown` until the owner confirms one) */
   type: RelType;
-  /** the newest pending type proposal, null = none */
-  proposedType: RelType | null;
+  /** the owner's trust as stored */
   trust: Trust;
+  /** what an agent may do now: never above `trust`; at most `draft_only` until the source attests the sender (F5) */
+  effectiveTrust: Trust;
+  /** why `effectiveTrust` is what it is */
+  trustBasis: TrustBasis;
+  /** the same in a sentence */
+  trustNote: string;
   stance: Stance | null;
   lastContact: string | null;
   openPromises: number;
   pendingProposals: number;
+  observed: Observed<{ label?: string; identities: StoredIdentity[]; proposedType: RelType | null }>;
 }
 export interface Proposal {
   id: string;
   person: string;
   field: ProposalField;
-  value: string | Identity;
-  citation: Citation;
   proposedBy: string;
   state: "pending" | "accepted" | "rejected";
   createdAt: string;
+  observed: Observed<{ value: string | Identity; citation: Citation }>;
 }
 export interface HistoryItem {
   id: string;
   kind: HistoryKind;
-  text: string;
   open?: boolean;
-  citation: Citation;
   at: string;
+  observed: Observed<{ text: string; citation: Citation }>;
 }
 
 export class RelationshipError extends Error {
@@ -106,23 +138,53 @@ function text(value: unknown, field: string, max: number): string {
 
 // ── identities ──
 
-const HANDLE_KINDS: ReadonlySet<string> = new Set(["email", "slack", "buzz", "telegram"]);
+const HANDLE_KINDS: ReadonlySet<string> = new Set(["email", "buzz", "telegram"]);
+/** A Slack workspace (team) id and a Slack user id: a user id is unique only inside its workspace. */
+const SLACK_TEAM = /^T[A-Z0-9]{2,30}$/u;
+const SLACK_USER = /^[UW][A-Z0-9]{2,30}$/u;
+/** Example of the Slack identity input, used in refusals and descriptions. */
+export const SLACK_EXAMPLE = "T0123ABC:U0456DEF";
 
 /**
- * The one stored form of an identity. email, slack, buzz and telegram use the canonical handle rule of
- * `@opt2-tealbrick/manifest` (`normalizeHandle`, G-4: email lower-case addr-spec, Slack upper-case id, Buzz npub, Telegram
- * numeric id) and a value it refuses is refused (and a Slack conversation id: a person is a U/W user id). phone = `+` and 6 to 15 digits (spaces, dots, dashes and brackets are
- * dropped). other = trimmed text. Throws `invalid_identity` (400).
+ * A Slack identity is TEAM-QUALIFIED: `<team id>:<user id>` (T…:U… or T…:W…, upper case), stored as kind `slack` with that
+ * value. This differs on purpose from the canonical handle `slack:U…` (G-4): the same U… id can exist in two Slack
+ * workspaces, so a bare user id could name another workspace's person. A bare U… id is refused with a plain message.
+ */
+function slackIdentity(raw: string): Identity {
+  const parts = raw.toUpperCase().split(":");
+  if (parts.length === 1 && SLACK_USER.test(parts[0] ?? ""))
+    throw new RelationshipError("invalid_identity", `A Slack identity needs the workspace (team) id and the user id, as "team:user", for example ${SLACK_EXAMPLE}. A user id alone is not enough.`, 400);
+  const [team, user] = parts;
+  if (parts.length !== 2 || !SLACK_TEAM.test(team ?? "") || !SLACK_USER.test(user ?? ""))
+    throw new RelationshipError("invalid_identity", `A Slack identity is "team:user": a T… workspace id and a U… or W… user id, for example ${SLACK_EXAMPLE}.`, 400);
+  return { kind: "slack", value: `${team}:${user}` };
+}
+
+/**
+ * The one stored form of an identity. email, buzz and telegram use the canonical handle rule of `@opt2-tealbrick/manifest`
+ * (`normalizeHandle`, G-4: email lower-case addr-spec, Buzz npub, Telegram numeric id) and a value it refuses is refused.
+ * slack = team-qualified `T…:U…` (`slackIdentity`; a conversation id C/G/D is never a person). phone = `+` and 6 to 15
+ * digits (spaces, dots, dashes and brackets are dropped). other = trimmed text. Throws `invalid_identity` (400).
  */
 export function normalizeIdentity(kind: unknown, value: unknown): Identity {
+  const identity = canonicalIdentity(kind, value);
+  // F1: an identity proposal stores the JSON {kind, value} (kn_rel_proposals.value ≤ 400): quotes, backslashes and control
+  // characters grow in JSON, so check the stored form here instead of meeting a raw database CHECK error later
+  if (chars(JSON.stringify(identity)) > PROPOSAL_VALUE_MAX) throw new RelationshipError("invalid_identity", "This identity is too long to store.", 400);
+  return identity;
+}
+/** kn_rel_proposals.value CHECK (migration 0004). */
+const PROPOSAL_VALUE_MAX = 400;
+
+function canonicalIdentity(kind: unknown, value: unknown): Identity {
   if (typeof kind !== "string" || !(IDENTITY_KINDS as readonly string[]).includes(kind)) throw new RelationshipError("invalid_identity", `An identity kind must be one of: ${IDENTITY_KINDS.join(", ")}.`, 400);
   const raw = typeof value === "string" ? value.trim() : "";
   if (!raw || chars(raw) > 254) throw new RelationshipError("invalid_identity", "An identity needs a value of at most 254 characters.", 400);
+  if (kind === "slack") return slackIdentity(raw);
   if (HANDLE_KINDS.has(kind)) {
     const handle = normalizeHandle(`${kind}:${raw}`);
     const canonical = handle?.slice(kind.length + 1);
-    // a Slack C/G/D id names a conversation (a recipient), never a person: only U/W user ids identify a person
-    if (!canonical || (kind === "slack" && !/^[UW]/u.test(canonical))) throw new RelationshipError("invalid_identity", `This is not a valid ${kind} identity of a person.`, 400);
+    if (!canonical) throw new RelationshipError("invalid_identity", `This is not a valid ${kind} identity of a person.`, 400);
     return { kind: kind as IdentityKind, value: canonical };
   }
   if (kind === "phone") {
@@ -136,14 +198,79 @@ export function normalizeIdentity(kind: unknown, value: unknown): Identity {
 
 // ── citation ──
 
-/** A citation {source, ref, at} is REQUIRED on every agent write; `at` is stored as an ISO time. */
-export function normalizeCitation(input: unknown): Citation {
-  if (!isObj(input)) throw invalid("A citation {source, ref, at} of the source message is required.");
-  const source = text(input.source, "citation.source", 64);
-  const ref = text(input.ref, "citation.ref", 200);
+/**
+ * A citation {source, ref, at} is REQUIRED on every agent write; `at` is stored as an ISO time. F7: an `at` more than
+ * FUTURE_SKEW_MS after `now` is refused (a message cannot come from the future; it would also pin lastContact ahead).
+ */
+export function normalizeCitation(input: unknown, now: number = Date.now(), field = "citation"): Citation {
+  if (!isObj(input)) throw invalid(`A ${field} {source, ref, at} of the source message is required.`);
+  const source = text(input.source, `${field}.source`, 64);
+  const ref = text(input.ref, `${field}.ref`, 200);
   const at = typeof input.at === "string" ? Date.parse(input.at) : Number.NaN;
-  if (!Number.isFinite(at)) throw invalid("citation.at must be an ISO date or time.");
+  if (!Number.isFinite(at)) throw invalid(`${field}.at must be an ISO date or time.`);
+  if (at > now + FUTURE_SKEW_MS) throw invalid(`${field}.at is in the future. Cite the time the message was sent.`);
   return { source, ref, at: new Date(at).toISOString() };
+}
+
+// ── effective trust (F5) ──
+
+const TRUST_RANK: Record<Trust, number> = { hold: 0, draft_only: 1, reply: 2 };
+const atMost = (trust: Trust, cap: Trust): Trust => (TRUST_RANK[trust] <= TRUST_RANK[cap] ? trust : cap);
+
+/** Why `effectiveTrust` is what it is (an enum; `trustNote` says it in a sentence). */
+export const TRUST_BASIS = ["owner_hold", "owner_draft_only", "awaiting_source_attestation", "source_attested"] as const;
+export type TrustBasis = (typeof TRUST_BASIS)[number];
+
+/**
+ * What the SOURCE of a message (Connect) attests about its author: spec 0.1.91 messages/1 `author.verified`. It must come
+ * from Connect by a source message reference, never from the agent's input. No op takes one yet, so every caller passes null.
+ */
+export interface SourceAttestation {
+  verified: VerifiedBy;
+}
+
+/**
+ * F5 HOOK: the ONE place where a sender may become verified for one message. Coordinator rule (review of #43): trust above
+ * `draft_only` needs the author to come from the source, never from the agent, so without a source attestation this answers
+ * null, whatever the stored `verified_by` says (an owner-verified Slack id included).
+ * TODO(C392, spec 0.1.91 messages/1 `author.verified`): wire a lookup by Connect message reference (source message id →
+ * Connect-attested author) and pass its attestation here. Then: an attested `platform_id` counts for a Slack, Buzz or
+ * Telegram identity the owner verified (`verified_by = platform_id`, the owner's link of that id to this person); an attested
+ * `dkim_spf_aligned` counts for an email identity. Nothing else counts.
+ */
+export function senderVerification(identity: Identity, stored: VerifiedBy | null, attestation: SourceAttestation | null): VerifiedBy | null {
+  if (attestation === null) return null;
+  if (attestation.verified === "platform_id") return PLATFORM_ID_KINDS.includes(identity.kind) && stored === "platform_id" ? "platform_id" : null;
+  return identity.kind === "email" ? "dkim_spf_aligned" : null;
+}
+
+/** The sender of the message an agent acts on: the identity it was looked up by and the source's attestation (null today). */
+export interface Sender {
+  identity: Identity;
+  verifiedBy: VerifiedBy | null;
+  attestation: SourceAttestation | null;
+}
+
+const NOTES: Record<TrustBasis, string> = {
+  owner_hold: "The owner set hold: send nothing and do not draft.",
+  owner_draft_only: "The owner set draft only: draft for the owner, do not send.",
+  awaiting_source_attestation:
+    "Draft only: Knowledge cannot yet check with the message source (Connect) who sent the message, so the owner's higher trust has no effect yet.",
+  source_attested: "The message source attested the sender: the owner's trust applies.",
+};
+
+/**
+ * The trust an agent may act on, never above the owner's stored `trust` (which stays visible next to it). Today EVERY read
+ * is at most `draft_only` (by identity, verified Slack id included, by person id, the list, the overview): only a sender the
+ * SOURCE attests (`senderVerification`, not wired yet) may raise it to the stored trust. An owner-set `reply` is stored but
+ * has no effect until then (`awaiting_source_attestation`).
+ */
+export function effectiveTrust(stored: Trust, sender: Sender | null = null): { effectiveTrust: Trust; trustBasis: TrustBasis; trustNote: string } {
+  const out = (effective: Trust, basis: TrustBasis) => ({ effectiveTrust: effective, trustBasis: basis, trustNote: NOTES[basis] });
+  if (stored === "hold") return out("hold", "owner_hold");
+  if (stored === "draft_only") return out("draft_only", "owner_draft_only");
+  if (sender && senderVerification(sender.identity, sender.verifiedBy, sender.attestation)) return out(stored, "source_attested");
+  return out(atMost(stored, "draft_only"), "awaiting_source_attestation");
 }
 
 // ── stance ──
@@ -163,6 +290,7 @@ export function normalizeStance(input: unknown): Stance | null {
   }
   return out;
 }
+
 
 // ── who is the operator ──
 
@@ -189,7 +317,7 @@ export function requireListedOperator(db: Db, operator: string, now: number = Da
 // ── log ──
 
 /** `person_forgotten` (C392 R2) is the one tombstone a forget leaves: person id, operator, actor, time and counts only. */
-type LogAction = "person_created" | "proposed" | "history_added" | "proposal_accepted" | "proposal_rejected" | "relationship_set" | "person_forgotten";
+type LogAction = "person_created" | "proposed" | "history_added" | "history_pruned" | "proposal_accepted" | "proposal_rejected" | "relationship_set" | "person_forgotten";
 
 export function log(db: Db, now: number, actor: string, action: LogAction, operator: string, person: string | null, detail: string | null): void {
   db.prepare("INSERT INTO kn_rel_log (at, actor, action, operator, person_id, detail) VALUES (?, ?, ?, ?, ?, ?)").run(now, actor, action, operator, person, detail);
@@ -210,45 +338,69 @@ function ownedPerson(db: Db, operator: string, person: string): { id: string; la
   return { id: String(row.id), label: String(row.label) };
 }
 
-function identitiesOf(db: Db, person: string): Identity[] {
+const verifiedOf = (v: unknown): VerifiedBy | null => ((VERIFIED_BY as readonly unknown[]).includes(v) ? (v as VerifiedBy) : null);
+
+function identitiesOf(db: Db, person: string): StoredIdentity[] {
   return db
-    .prepare("SELECT kind, value FROM kn_rel_identities WHERE person_id = ? ORDER BY kind, value")
+    .prepare("SELECT kind, value, verified_by FROM kn_rel_identities WHERE person_id = ? ORDER BY kind, value")
     .all(person)
-    .map((r) => ({ kind: String(r.kind) as IdentityKind, value: String(r.value) }));
+    .map((r) => {
+      const verifiedBy = verifiedOf(r.verified_by);
+      return { kind: String(r.kind) as IdentityKind, value: String(r.value), verified: verifiedBy !== null, verifiedBy };
+    });
 }
 
-function summaryOf(db: Db, operator: string, person: string): PersonSummary {
+function summaryOf(db: Db, operator: string, person: string, sender: Sender | null = null): PersonSummary {
   const row = db
-    .prepare("SELECT p.id, p.label, r.type, r.trust, r.stance, r.last_contact_at FROM kn_rel_people p JOIN kn_relationships r ON r.person_id = p.id AND r.operator = p.operator WHERE p.id = ? AND p.operator = ?")
+    .prepare("SELECT p.id, p.label, p.label_set_by, r.type, r.trust, r.stance, r.last_contact_at FROM kn_rel_people p JOIN kn_relationships r ON r.person_id = p.id AND r.operator = p.operator WHERE p.id = ? AND p.operator = ?")
     .get(person, operator);
   if (!row) throw personUnknown();
   const proposed = db.prepare("SELECT value FROM kn_rel_proposals WHERE operator = ? AND person_id = ? AND field = 'type' AND state = 'pending' ORDER BY created_at DESC, id DESC LIMIT 1").get(operator, person);
   const pending = db.prepare("SELECT count(*) AS n FROM kn_rel_proposals WHERE operator = ? AND person_id = ? AND state = 'pending'").get(operator, person);
   const promises = db.prepare("SELECT count(*) AS n FROM kn_rel_history WHERE operator = ? AND person_id = ? AND kind = 'promise' AND open = 1").get(operator, person);
+  const identities = identitiesOf(db, person);
+  const trust = String(row.trust) as Trust;
+  const ownerLabel = row.label_set_by != null;
   return {
     person: String(row.id),
-    label: String(row.label),
-    identities: identitiesOf(db, person),
+    label: ownerLabel ? String(row.label) : null,
     type: String(row.type) as RelType,
-    proposedType: proposed ? (String(proposed.value) as RelType) : null,
-    trust: String(row.trust) as Trust,
+    trust,
+    ...effectiveTrust(trust, sender),
     stance: row.stance == null ? null : (JSON.parse(String(row.stance)) as Stance),
     lastContact: iso(row.last_contact_at == null ? null : Number(row.last_contact_at)),
     openPromises: Number(promises?.n ?? 0),
     pendingProposals: Number(pending?.n ?? 0),
+    observed: { untrusted: true, ...(ownerLabel ? {} : { label: String(row.label) }), identities, proposedType: proposed ? (String(proposed.value) as RelType) : null },
   };
 }
 
-const proposalOf = (r: Record<string, unknown>): Proposal => ({
+interface ProposalRow {
+  id: string;
+  person: string;
+  field: ProposalField;
+  value: string | Identity;
+  state: Proposal["state"];
+}
+const proposalRow = (r: Record<string, unknown>): ProposalRow => ({
   id: String(r.id),
   person: String(r.person_id),
   field: String(r.field) as ProposalField,
   value: r.field === "identity" ? (JSON.parse(String(r.value)) as Identity) : String(r.value),
-  citation: JSON.parse(String(r.citation)) as Citation,
-  proposedBy: String(r.proposed_by),
   state: String(r.state) as Proposal["state"],
-  createdAt: iso(Number(r.created_at)) as string,
 });
+const proposalOf = (r: Record<string, unknown>): Proposal => {
+  const p = proposalRow(r);
+  return {
+    id: p.id,
+    person: p.person,
+    field: p.field,
+    proposedBy: String(r.proposed_by),
+    state: p.state,
+    createdAt: iso(Number(r.created_at)) as string,
+    observed: { untrusted: true, value: p.value, citation: JSON.parse(String(r.citation)) as Citation },
+  };
+};
 
 function pendingProposals(db: Db, operator: string, person: string): Proposal[] {
   return db.prepare("SELECT * FROM kn_rel_proposals WHERE operator = ? AND person_id = ? AND state = 'pending' ORDER BY created_at, id").all(operator, person).map(proposalOf);
@@ -261,10 +413,9 @@ function historyOf(db: Db, operator: string, person: string, limit: number): His
     .map((r) => ({
       id: String(r.id),
       kind: String(r.kind) as HistoryKind,
-      text: String(r.text),
       ...(r.open == null ? {} : { open: Number(r.open) === 1 }),
-      citation: JSON.parse(String(r.citation)) as Citation,
       at: iso(Number(r.created_at)) as string,
+      observed: { untrusted: true, text: String(r.text), citation: JSON.parse(String(r.citation)) as Citation },
     }));
 }
 
@@ -287,23 +438,40 @@ export function listRelationships(db: Db, operator: string, filter: { type?: Rel
 
 /** The person an identity names for this operator, or null. */
 export function personByIdentity(db: Db, operator: string, identity: Identity): string | null {
-  const row = db.prepare("SELECT person_id FROM kn_rel_identities WHERE operator = ? AND kind = ? AND value = ?").get(operator, identity.kind, identity.value);
-  return row ? String(row.person_id) : null;
+  return identityRow(db, operator, identity)?.person ?? null;
 }
 
-/** One of the operator's people with recent history and pending proposals; another operator's person is `person_unknown`. */
+function identityRow(db: Db, operator: string, identity: Identity): { person: string; verifiedBy: VerifiedBy | null } | null {
+  const row = db.prepare("SELECT person_id, verified_by FROM kn_rel_identities WHERE operator = ? AND kind = ? AND value = ?").get(operator, identity.kind, identity.value);
+  return row ? { person: String(row.person_id), verifiedBy: verifiedOf(row.verified_by) } : null;
+}
+
+/**
+ * One of the operator's people with recent history and pending proposals; another operator's person is `person_unknown`.
+ * By `identity` or by `person`, `effectiveTrust` is at most `draft_only` today: the agent names the identity, so it cannot
+ * prove who sent a message; only a future lookup by a Connect message reference passes a source attestation (F5).
+ */
 export function getRelationship(db: Db, operator: string, by: { person?: string; identity?: { kind: unknown; value: unknown } }): PersonSummary & { history: HistoryItem[]; proposals: Proposal[] } {
   if ((by.person === undefined) === (by.identity === undefined)) throw invalid("Name either person or identity.");
-  const person = by.person !== undefined ? ownedPerson(db, operator, String(by.person)).id : personByIdentity(db, operator, normalizeIdentity(by.identity?.kind, by.identity?.value));
-  if (!person) throw personUnknown();
-  return { ...summaryOf(db, operator, person), history: historyOf(db, operator, person, 50), proposals: pendingProposals(db, operator, person) };
+  let person: string;
+  let sender: Sender | null = null;
+  if (by.person !== undefined) person = ownedPerson(db, operator, String(by.person)).id;
+  else {
+    const identity = normalizeIdentity(by.identity?.kind, by.identity?.value);
+    const row = identityRow(db, operator, identity);
+    if (!row) throw personUnknown();
+    person = row.person;
+    // the agent chose this identity: no source attestation (null) until the Connect message-reference lookup exists
+    sender = { identity, verifiedBy: row.verifiedBy, attestation: null };
+  }
+  return { ...summaryOf(db, operator, person, sender), history: historyOf(db, operator, person, 50), proposals: pendingProposals(db, operator, person) };
 }
 
 // ── agent write: propose ──
 
 export interface ProposeInput {
   person?: string;
-  new?: { label: unknown; identities: unknown };
+  new?: unknown;
   type?: unknown;
   identities?: unknown;
   label?: unknown;
@@ -317,6 +485,8 @@ export interface ProposeResult {
   history: string[];
   /** fields that already had the proposed value (nothing to propose) */
   unchanged: ProposalField[];
+  /** F8: older history rows (contacts, closed promises) dropped to keep the person within HISTORY_CAP */
+  pruned: number;
 }
 
 const identityList = (input: unknown, field: string): Identity[] => {
@@ -330,32 +500,42 @@ const identityList = (input: unknown, field: string): Identity[] => {
   return [...seen.values()];
 };
 
+const identityTaken = (identity: Identity, owner: string, prefix = "") =>
+  new RelationshipError("identity_taken", `${prefix}This ${identity.kind} identity already belongs to person ${owner}. Propose on that person instead.`, 409);
+
 /**
- * An agent's proposal, all or nothing. A new third party gets a person row (its label and identities as observed) with type
- * `unknown` and trust `hold`; an identity another of the operator's people already has is `identity_taken` (propose on that
- * person instead). On an existing person, type, identities and label become PENDING proposals (the same pending value is
- * not proposed twice; the current value is reported `unchanged`). History items are written at once. Never stance or trust.
+ * An agent's proposal, all or nothing. A new third party gets a person row (its label and identities as observed, all
+ * UNVERIFIED) with type `unknown` and trust `hold`. An identity another of the operator's people already has is
+ * `identity_taken` (for a new person and, F3, for an identity proposal on an existing one): propose on that person instead.
+ * On an existing person, type, identities and label become PENDING proposals (the same pending value is not proposed
+ * twice; the current value is reported `unchanged`); at most PENDING_CAP pending per person (`too_many_pending`). History
+ * items are written at once, each with its own citation or the call's (F7); the person keeps at most HISTORY_CAP rows (F8).
+ * Never stance, trust or a verification.
  */
 export function propose(db: Db, operator: string, agentId: string, input: ProposeInput, now: number = Date.now()): ProposeResult {
   if ((input.person === undefined) === (input.new === undefined)) throw invalid("Name either an existing person or a new one.");
+  if (input.new !== undefined && !isObj(input.new)) throw invalid("`new` must be {label, identities}.");
   if (input.new !== undefined && (input.identities !== undefined || input.label !== undefined)) throw invalid("For a new person, put the label and identities inside `new`.");
-  const citation = normalizeCitation(input.citation);
-  const citationJson = JSON.stringify(citation);
+  const citation = normalizeCitation(input.citation, now);
   const type = input.type === undefined ? null : input.type;
   if (type !== null && (typeof type !== "string" || !REL_TYPES.includes(type as RelType) || type === "unknown")) throw invalid(`type must be one of: ${REL_TYPES.filter((t) => t !== "unknown").join(", ")}.`);
   const history = input.history === undefined ? [] : input.history;
   if (!Array.isArray(history) || history.length > 20) throw invalid("history must be a list of at most 20 items.");
-  const items = history.map((item) => {
-    if (!isObj(item)) throw invalid("Each history item is {kind, text, open}.");
+  const items = history.map((item, i) => {
+    if (!isObj(item)) throw invalid("Each history item is {kind, text, open, citation}.");
     if (typeof item.kind !== "string" || !(HISTORY_KINDS as readonly string[]).includes(item.kind)) throw invalid(`A history kind must be one of: ${HISTORY_KINDS.join(", ")}.`);
     if (item.open !== undefined && (item.kind !== "promise" || typeof item.open !== "boolean")) throw invalid("Only a promise has `open` (true or false).");
-    return { kind: item.kind as HistoryKind, text: text(item.text, "history text", 500), open: item.kind === "promise" ? (item.open === false ? 0 : 1) : null };
+    // F7: an item may cite its own message; otherwise the call's citation
+    const cited = item.citation === undefined ? citation : normalizeCitation(item.citation, now, `history[${i}].citation`);
+    return { kind: item.kind as HistoryKind, text: text(item.text, "history text", 500), open: item.kind === "promise" ? (item.open === false ? 0 : 1) : null, citation: cited };
   });
-  const newPerson = input.new === undefined ? null : { label: text(input.new.label, "new.label", 120), identities: identityList(input.new.identities, "new.identities") };
+  const fresh = isObj(input.new) ? input.new : null;
+  const newPerson = fresh ? { label: text(fresh.label, "new.label", 120), identities: identityList(fresh.identities, "new.identities") } : null;
   if (newPerson && !newPerson.identities.length) throw invalid("A new person needs at least one identity.");
   const identities = input.identities === undefined ? [] : identityList(input.identities, "identities");
   const label = input.label === undefined ? null : text(input.label, "label", 120);
   if (!newPerson && type === null && !identities.length && label === null && !items.length) throw invalid("Nothing to propose: send a type, identities, a label or history.");
+  const citationJson = JSON.stringify(citation);
 
   return db.transaction(() => {
     let person: string;
@@ -363,12 +543,13 @@ export function propose(db: Db, operator: string, agentId: string, input: Propos
     if (newPerson) {
       for (const id of newPerson.identities) {
         const owner = personByIdentity(db, operator, id);
-        if (owner) throw new RelationshipError("identity_taken", `This ${id.kind} identity already belongs to person ${owner}. Propose on that person instead.`, 409);
+        if (owner) throw identityTaken(id, owner);
       }
       person = newId("rp");
       created = true;
       db.prepare("INSERT INTO kn_rel_people (id, operator, label, created_at, updated_at) VALUES (?, ?, ?, ?, ?)").run(person, operator, newPerson.label, now, now);
       db.prepare("INSERT INTO kn_relationships (operator, person_id) VALUES (?, ?)").run(operator, person);
+      // an agent's identity is never verified (verified_by NULL): only the owner confirms a platform id (F5)
       for (const id of newPerson.identities) db.prepare("INSERT INTO kn_rel_identities (person_id, operator, kind, value, created_at, created_by) VALUES (?, ?, ?, ?, ?, ?)").run(person, operator, id.kind, id.value, now, agentId);
       log(db, now, agentId, "person_created", operator, person, `identities: ${newPerson.identities.map((i) => i.kind).join(", ")}`);
     } else person = ownedPerson(db, operator, String(input.person)).id;
@@ -391,32 +572,63 @@ export function propose(db: Db, operator: string, agentId: string, input: Propos
       else add("type", type as string);
     }
     for (const id of identities) {
-      if (current.identities.some((i) => i.kind === id.kind && i.value === id.value)) unchanged.add("identity");
+      const owner = personByIdentity(db, operator, id);
+      if (owner === person) unchanged.add("identity");
+      else if (owner) throw identityTaken(id, owner);
       else add("identity", JSON.stringify(id));
     }
     if (label !== null) {
-      if (label === current.label) unchanged.add("label");
+      if (label === (current.label ?? current.observed.label)) unchanged.add("label");
       else add("label", label);
     }
-    const fresh = proposals.filter((p) => !p.existing);
-    if (fresh.length) log(db, now, agentId, "proposed", operator, person, fresh.map((p) => `${p.field} ${p.id}`).join("; "));
+    const added = proposals.filter((p) => !p.existing);
+    if (added.length) {
+      const pending = Number(db.prepare("SELECT count(*) AS n FROM kn_rel_proposals WHERE operator = ? AND person_id = ? AND state = 'pending'").get(operator, person)?.n ?? 0);
+      if (pending > PENDING_CAP) throw new RelationshipError("too_many_pending", `This person already has ${PENDING_CAP} proposals waiting for the owner. Wait until the owner decides them.`, 409);
+      log(db, now, agentId, "proposed", operator, person, added.map((p) => `${p.field} ${p.id}`).join("; "));
+    }
 
     const historyIds: string[] = [];
     let lastContact: number | null = null;
     for (const item of items) {
       const id = newId("rph");
-      db.prepare("INSERT INTO kn_rel_history (id, operator, person_id, kind, text, open, citation, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").run(id, operator, person, item.kind, item.text, item.open, citationJson, agentId, now);
+      db.prepare("INSERT INTO kn_rel_history (id, operator, person_id, kind, text, open, citation, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").run(id, operator, person, item.kind, item.text, item.open, JSON.stringify(item.citation), agentId, now);
       historyIds.push(id);
-      if (item.kind === "contact") lastContact = Math.min(Date.parse(citation.at), now);
+      if (item.kind === "contact") lastContact = Math.max(lastContact ?? 0, Math.min(Date.parse(item.citation.at), now));
     }
     if (lastContact !== null) db.prepare("UPDATE kn_relationships SET last_contact_at = max(coalesce(last_contact_at, 0), ?) WHERE operator = ? AND person_id = ?").run(lastContact, operator, person);
+    let pruned = 0;
     if (items.length) {
       const counts = HISTORY_KINDS.map((k) => [k, items.filter((i) => i.kind === k).length] as const).filter(([, n]) => n > 0);
       log(db, now, agentId, "history_added", operator, person, counts.map(([k, n]) => `${k} x${n}`).join(", "));
+      pruned = pruneHistory(db, operator, person, agentId, historyIds, now);
     }
-    if (fresh.length || items.length) db.prepare("UPDATE kn_rel_people SET updated_at = ? WHERE id = ?").run(now, person);
-    return { person, created, proposals, history: historyIds, unchanged: [...unchanged] };
+    if (added.length || items.length) db.prepare("UPDATE kn_rel_people SET updated_at = ? WHERE id = ?").run(now, person);
+    return { person, created, proposals, history: historyIds, unchanged: [...unchanged], pruned };
   });
+}
+
+/**
+ * F8: a person keeps at most HISTORY_CAP history rows. Over the cap, the OLDEST contacts and closed promises (kept counts in
+ * `lastContact`; nothing is owed) are dropped first, never this call's own rows. Topics and open promises are never dropped
+ * silently: if they alone fill the cap, the write is refused (`history_full`, nothing written) so no commitment is lost.
+ */
+function pruneHistory(db: Db, operator: string, person: string, actor: string, keep: readonly string[], now: number): number {
+  const total = Number(db.prepare("SELECT count(*) AS n FROM kn_rel_history WHERE operator = ? AND person_id = ?").get(operator, person)?.n ?? 0);
+  const excess = total - HISTORY_CAP;
+  if (excess <= 0) return 0;
+  const victims = db
+    .prepare(
+      `SELECT id, kind FROM kn_rel_history WHERE operator = ? AND person_id = ? AND (kind = 'contact' OR (kind = 'promise' AND open = 0))
+         AND id NOT IN (SELECT value FROM json_each(?)) ORDER BY created_at, id LIMIT ?`,
+    )
+    .all(operator, person, JSON.stringify(keep), excess);
+  if (victims.length < excess)
+    throw new RelationshipError("history_full", `This person already has ${HISTORY_CAP} history items that are topics or open promises. Record no more for this person and tell the owner.`, 409);
+  for (const v of victims) db.prepare("DELETE FROM kn_rel_history WHERE id = ?").run(String(v.id));
+  const counts = (["contact", "promise"] as const).map((k) => [k, victims.filter((v) => v.kind === k).length] as const).filter(([, n]) => n > 0);
+  log(db, now, actor, "history_pruned", operator, person, counts.map(([k, n]) => `${k} x${n}`).join(", "));
+  return victims.length;
 }
 
 // ── owner reads and writes ──
@@ -445,8 +657,32 @@ export function relationshipsOverview(db: Db, only: string | null, now: number =
   };
 }
 
-/** Owner op: accept or reject pending proposals of one operator, all or nothing. */
-export function decideProposals(db: Db, operator: string, actor: string, input: { accept?: unknown; reject?: unknown }, now: number = Date.now()): { id: string; person: string; field: ProposalField; state: "accepted" | "rejected" }[] {
+export interface Decided {
+  id: string;
+  person: string;
+  field: ProposalField;
+  state: "accepted" | "rejected";
+  /** an accepted identity: whether it is verified now (false unless the owner verified it before with verifyIdentities) */
+  verified?: boolean;
+}
+/** F3: an accepted proposal that could not apply; it stays pending (the owner may reject it). */
+export interface Conflict {
+  id: string;
+  person: string;
+  field: ProposalField;
+  code: "identity_taken";
+  /** the person that already has the identity */
+  takenBy: string;
+}
+
+/**
+ * Owner op: accept or reject pending proposals of one operator. An unknown or already decided id refuses the whole call
+ * (nothing changes). F3: an accepted identity that another person of the operator already has is reported in `conflicts`
+ * and stays pending; the other decisions of the call apply. An accepted identity is added UNVERIFIED, always (review
+ * S2-2): accepting links it to the person, it does not say the sender of a message is that person; the owner verifies a
+ * platform id only with relationship_set verifyIdentities. An accepted label is still an agent's words (`observed`).
+ */
+export function decideProposals(db: Db, operator: string, actor: string, input: { accept?: unknown; reject?: unknown }, now: number = Date.now()): { decided: Decided[]; conflicts: Conflict[] } {
   const ids = (v: unknown): string[] => {
     if (v === undefined) return [];
     if (!Array.isArray(v)) throw invalid("accept and reject are lists of proposal ids.");
@@ -458,34 +694,52 @@ export function decideProposals(db: Db, operator: string, actor: string, input: 
   const all = [...accept, ...reject];
   if (new Set(all).size !== all.length) throw invalid("Name each proposal once.");
   return db.transaction(() => {
-    const decided: { id: string; person: string; field: ProposalField; state: "accepted" | "rejected" }[] = [];
-    for (const id of all) {
+    const rows = all.map((id) => {
       const row = db.prepare("SELECT * FROM kn_rel_proposals WHERE id = ? AND operator = ?").get(id, operator);
       if (!row) throw new RelationshipError("proposal_unknown", `There is no proposal ${id.slice(0, 40)} for this person.`, 404);
       if (row.state !== "pending") throw new RelationshipError("proposal_decided", `Proposal ${id.slice(0, 40)} is already ${String(row.state)}.`, 409);
-      const p = proposalOf(row);
-      const state = accept.includes(id) ? "accepted" : "rejected";
+      return proposalRow(row);
+    });
+    const decided: Decided[] = [];
+    const conflicts: Conflict[] = [];
+    for (const p of rows) {
+      const state = accept.includes(p.id) ? "accepted" : "rejected";
       if (state === "accepted") {
         if (p.field === "type") db.prepare("UPDATE kn_relationships SET type = ?, set_by = ?, set_at = ? WHERE operator = ? AND person_id = ?").run(p.value as string, actor, now, operator, p.person);
-        else if (p.field === "label") db.prepare("UPDATE kn_rel_people SET label = ? WHERE id = ?").run(p.value as string, p.person);
+        else if (p.field === "label") db.prepare("UPDATE kn_rel_people SET label = ?, label_set_by = NULL WHERE id = ?").run(p.value as string, p.person);
         else {
           const identity = p.value as Identity;
           const owner = personByIdentity(db, operator, identity);
-          if (owner && owner !== p.person) throw new RelationshipError("identity_taken", `Proposal ${id.slice(0, 40)}: this ${identity.kind} identity already belongs to person ${owner}.`, 409);
+          if (owner && owner !== p.person) {
+            conflicts.push({ id: p.id, person: p.person, field: p.field, code: "identity_taken", takenBy: owner });
+            continue;
+          }
           if (!owner) db.prepare("INSERT INTO kn_rel_identities (person_id, operator, kind, value, created_at, created_by) VALUES (?, ?, ?, ?, ?, ?)").run(p.person, operator, identity.kind, identity.value, now, actor);
         }
       }
-      db.prepare("UPDATE kn_rel_proposals SET state = ?, decided_at = ?, decided_by = ? WHERE id = ?").run(state, now, actor, id);
+      db.prepare("UPDATE kn_rel_proposals SET state = ?, decided_at = ?, decided_by = ? WHERE id = ?").run(state, now, actor, p.id);
       db.prepare("UPDATE kn_rel_people SET updated_at = ? WHERE id = ?").run(now, p.person);
-      log(db, now, actor, state === "accepted" ? "proposal_accepted" : "proposal_rejected", operator, p.person, `${p.field} ${id}${state === "accepted" && p.field === "type" ? ` type=${String(p.value)}` : ""}`);
-      decided.push({ id, person: p.person, field: p.field, state });
+      log(db, now, actor, state === "accepted" ? "proposal_accepted" : "proposal_rejected", operator, p.person, `${p.field} ${p.id}${state === "accepted" && p.field === "type" ? ` type=${String(p.value)}` : ""}`);
+      const verified = state === "accepted" && p.field === "identity" ? { verified: identityRow(db, operator, p.value as Identity)?.verifiedBy != null } : {};
+      decided.push({ id: p.id, person: p.person, field: p.field, state, ...verified });
     }
-    return decided;
+    return { decided, conflicts };
   });
 }
 
-/** Owner op: set type, stance, trust and/or label of one of the operator's people. */
-export function setRelationship(db: Db, operator: string, actor: string, input: { person: string; type?: unknown; stance?: unknown; trust?: unknown; label?: unknown }, now: number = Date.now()): { relationship: PersonSummary; changed: boolean } {
+/**
+ * Owner op: set type, stance, trust and/or label of one of the operator's people, and verify identities. A label set here
+ * is the owner's (`label_set_by`, it reads outside `observed`), also when it equals the agent's label. `verifyIdentities`
+ * (F5) marks Slack, Buzz or Telegram ids of THIS person as `platform_id`: the owner confirms the platform id is this person.
+ * Email, phone and other cannot be verified (`identity_unverifiable`): email waits for a per-message attestation from Connect.
+ */
+export function setRelationship(
+  db: Db,
+  operator: string,
+  actor: string,
+  input: { person: string; type?: unknown; stance?: unknown; trust?: unknown; label?: unknown; verifyIdentities?: unknown },
+  now: number = Date.now(),
+): { relationship: PersonSummary; changed: boolean } {
   const fields: Record<string, unknown> = {};
   if (input.type !== undefined) {
     if (!(REL_TYPES as readonly unknown[]).includes(input.type)) throw invalid(`type must be one of: ${REL_TYPES.join(", ")}.`);
@@ -500,19 +754,35 @@ export function setRelationship(db: Db, operator: string, actor: string, input: 
     fields.stance = stance === null ? null : JSON.stringify(stance);
   }
   const label = input.label === undefined ? null : text(input.label, "label", 120);
-  if (!Object.keys(fields).length && label === null) throw invalid("Set at least one of type, stance, trust or label.");
+  const verify = input.verifyIdentities === undefined ? [] : identityList(input.verifyIdentities, "verifyIdentities");
+  for (const id of verify)
+    if (!PLATFORM_ID_KINDS.includes(id.kind))
+      throw new RelationshipError("identity_unverifiable", `A ${id.kind} identity cannot be verified: only Slack, Buzz and Telegram ids. Email needs a per-message check by Connect, which is not available yet.`, 400);
+  if (!Object.keys(fields).length && label === null && !verify.length) throw invalid("Set at least one of type, stance, trust, label or verifyIdentities.");
   return db.transaction(() => {
     ownedPerson(db, operator, input.person);
-    const before = db.prepare("SELECT r.type, r.trust, r.stance, p.label FROM kn_relationships r JOIN kn_rel_people p ON p.id = r.person_id WHERE r.operator = ? AND r.person_id = ?").get(operator, input.person) as Record<string, unknown>;
-    const changedFields = [...Object.entries(fields).filter(([k, v]) => (before[k] ?? null) !== v).map(([k]) => k), ...(label !== null && label !== before.label ? ["label"] : [])];
-    if (changedFields.length) {
-      const sets = Object.keys(fields).map((k) => `${k} = ?`);
-      db.prepare(`UPDATE kn_relationships SET ${[...sets, "set_by = ?", "set_at = ?"].join(", ")} WHERE operator = ? AND person_id = ?`).run(...Object.values(fields), actor, now, operator, input.person);
-      if (label !== null) db.prepare("UPDATE kn_rel_people SET label = ? WHERE id = ?").run(label, input.person);
+    const before = db.prepare("SELECT r.type, r.trust, r.stance, p.label, p.label_set_by FROM kn_relationships r JOIN kn_rel_people p ON p.id = r.person_id WHERE r.operator = ? AND r.person_id = ?").get(operator, input.person) as Record<string, unknown>;
+    const toVerify = verify.filter((id) => {
+      const row = identityRow(db, operator, id);
+      if (row?.person !== input.person) throw new RelationshipError("identity_unknown", `This person has no such ${id.kind} identity.`, 404);
+      return row.verifiedBy !== "platform_id";
+    });
+    const labelChanged = label !== null && (label !== before.label || before.label_set_by == null);
+    const changedFields = [...Object.entries(fields).filter(([k, v]) => (before[k] ?? null) !== v).map(([k]) => k), ...(labelChanged ? ["label"] : [])];
+    if (changedFields.length || toVerify.length) {
+      if (changedFields.length) {
+        const sets = Object.keys(fields).map((k) => `${k} = ?`);
+        db.prepare(`UPDATE kn_relationships SET ${[...sets, "set_by = ?", "set_at = ?"].join(", ")} WHERE operator = ? AND person_id = ?`).run(...Object.values(fields), actor, now, operator, input.person);
+      }
+      if (labelChanged) db.prepare("UPDATE kn_rel_people SET label = ?, label_set_by = ? WHERE id = ?").run(label, actor, input.person);
+      for (const id of toVerify) db.prepare("UPDATE kn_rel_identities SET verified_by = 'platform_id' WHERE operator = ? AND kind = ? AND value = ?").run(operator, id.kind, id.value);
       db.prepare("UPDATE kn_rel_people SET updated_at = ? WHERE id = ?").run(now, input.person);
-      const detail = changedFields.map((k) => (k === "type" || k === "trust" ? `${k}=${String(fields[k])}` : k)).join(" ");
+      const detail = [
+        ...changedFields.map((k) => (k === "type" || k === "trust" ? `${k}=${String(fields[k])}` : k)),
+        ...(toVerify.length ? [`verified ${[...new Set(toVerify.map((i) => i.kind))].join(",")} x${toVerify.length}`] : []),
+      ].join(" ");
       log(db, now, actor, "relationship_set", operator, input.person, detail);
     }
-    return { relationship: summaryOf(db, operator, input.person), changed: changedFields.length > 0 };
+    return { relationship: summaryOf(db, operator, input.person), changed: changedFields.length > 0 || toVerify.length > 0 };
   });
 }
