@@ -41,7 +41,11 @@ test("INC-20261104-01 (0.1.36): the Open Notebook API keeps upstream's IPv4 bind
   // 0.1.35 set API_HOST=:: : uvicorn then listens on IPv6 only and Railway's IPv4 health check failed the deploy
   assert.doesNotMatch(docker, /API_HOST/u);
   assert.match(docker, /COPY services\/notebook\/entrypoint\.sh services\/notebook\/ipv6-forward\.ts \/opt\/knowledge\//u);
-  assert.match(code(read("notebook/entrypoint.sh")), /while :; do node \/opt\/knowledge\/ipv6-forward\.ts; sleep 1; done\) &\nexec /u);
+  const entry = code(read("notebook/entrypoint.sh"));
+  assert.match(entry, /node \/opt\/knowledge\/ipv6-forward\.ts \|\| true/u);
+  // crash loop → the container stops (Coordinator condition 2), and the forwarder starts before the upstream exec
+  assert.match(entry, /if \[ "\$n" -gt 5 \]; then[\s\S]*kill -KILL "\$main"/u);
+  assert.match(entry, /\) &\nexec \/app\/scripts\/docker-entrypoint\.sh "\$@"\n?$/u);
 });
 
 test("INC-20261104-01: gbrain serve binds :: by default (boot.ts)", () => {

@@ -47,9 +47,9 @@ export function startForward(o: ForwardOptions): Promise<Server> {
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const port = Number(process.env.KNOWLEDGE_NOTEBOOK_API_PORT ?? 5055);
   startForward({ listenPort: port, targetHost: "127.0.0.1", targetPort: port }).then(
-    () => log({ event: "listening", host: "::", port, target: `127.0.0.1:${port}` }),
+    () => log({ event: "listening", msg: `notebook ipv6 forwarder listening [::]:${port}`, host: "::", port, target: `127.0.0.1:${port}` }),
     (e: NodeJS.ErrnoException) => {
-      log({ event: "listen_failed", port, code: String(e.code ?? "error") });
+      log({ event: "listen_failed", msg: `notebook ipv6 forwarder cannot listen on [::]:${port}`, port, code: String(e.code ?? "error") });
       process.exit(1);
     },
   );

@@ -7,7 +7,7 @@ All notable changes to the Knowledge mini app. Versions are assigned at merge (C
 INC-20261104-01, second step. 0.1.35 never reached stable: its update on qa1 rolled back.
 
 - 0.1.35 set the Open Notebook API to `API_HOST=::`. uvicorn then listens on IPv6 only (asyncio sets `IPV6_V6ONLY`), Railway's health check probes over IPv4, and Railway failed the notebook deploy after 300 s. The API is back on upstream's IPv4 bind.
-- New `services/notebook/ipv6-forward.ts` (run by the image's Node, restarted if it exits) listens on `[::]:5055` with `IPV6_V6ONLY` and pipes each connection to `127.0.0.1:5055`. An IPv4 socket and an IPv6-only socket share the port (proven in the pinned image). So the API answers on IPv4 (health check) and on IPv6 (an IPv6-only Railway private network).
+- New `services/notebook/ipv6-forward.ts` (run by the image's Node) listens on `[::]:5055` with `IPV6_V6ONLY` and pipes each connection to `127.0.0.1:5055`. It logs "notebook ipv6 forwarder listening [::]:5055" at start and one line per restart, never traffic. A 6th start within 60 s (5 restarts) stops the container (tb-exec exits 137), so a broken IPv6 path is a failed deploy, not a silent outage behind a green IPv4 health check. An IPv4 socket and an IPv6-only socket share the port (proven in the pinned image). So the API answers on IPv4 (health check) and on IPv6 (an IPv6-only Railway private network).
 - notebook-db keeps 0.1.35's `[::]:8000` (proven live on qa1: "Started web server on [::]:8000", backup dump exitCode 0).
 - `upgradeFrom` `>=0.1.20 <=0.1.35`.
 
