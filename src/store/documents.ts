@@ -612,7 +612,7 @@ export class DocumentStore {
       .prepare(
         `INSERT INTO kn_projection (area_id, document_id, action, content_hash, state, attempts, next_attempt_at, last_error, updated_at)
          VALUES (?, ?, ?, NULL, 'pending', 0, 0, NULL, ?)
-         ON CONFLICT (area_id, document_id) DO UPDATE SET action = excluded.action, state = 'pending', attempts = 0, cycles = 0, next_attempt_at = 0, last_error = NULL, updated_at = max(excluded.updated_at, kn_projection.updated_at + 1)`,
+         ON CONFLICT (area_id, document_id) DO UPDATE SET action = excluded.action, state = 'pending', attempts = 0, next_attempt_at = 0, last_error = NULL, updated_at = max(excluded.updated_at, kn_projection.updated_at + 1)`,
       )
       .run(area, documentId, action, this.now());
   }

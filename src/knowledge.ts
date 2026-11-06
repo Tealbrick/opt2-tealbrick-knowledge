@@ -8,7 +8,7 @@ import { GBrainEngine } from "./engines/gbrain/engine.ts";
 import { NotebookClient } from "./engines/notebook/client.ts";
 import { areaSourceId, SHARED_AREA_ID } from "./ids.ts";
 import { ensureDirectoryAreas } from "./people.ts";
-import { Projector } from "./projection.ts";
+import { type ProjectionKey, Projector } from "./projection.ts";
 import { DocumentStore } from "./store/documents.ts";
 
 /** What provisioning needs from an SDK context (OpContext has both). */
@@ -254,6 +254,9 @@ export interface KnowledgeOptions {
 
 /** SDK C85 background `callApp` (StartContext), as Knowledge uses it for the Governance directory (C373). */
 export type StartContextCallApp = (product: string, op: string, input: Json) => Promise<{ status: "ok"; output: unknown } | { status: "held"; holdId: string }>;
+
+/** kn_state `engine_catchup`: the one-time INC-20261106-01 catch-up ran on this database. */
+const CATCHUP_VERSION = "0.1.37";
 
 export class Knowledge {
   readonly config: KnowledgeConfig;
@@ -542,6 +545,32 @@ export class Knowledge {
     if (!this.pendingRequeue || !services.projector) return 0;
     this.pendingRequeue = false;
     return services.projector.requeueAll();
+  }
+
+  /**
+   * INC-20261106-01, once per database (kn_state `engine_catchup`): pages of documents deleted before 0.1.37 stayed in the
+   * engine; queue their deletes. With the failed rows the boot retry re-queued, they go through the ONE paced drain (20 rows
+   * per pass, every 30 s, the same attempt cap), never a burst: each write is an embedding call on the customer's key.
+   * Logs counts only: "engine catch-up queued" now, "engine catch-up done" (ok / failed / still pending) once settled.
+   */
+  engineCatchUp(services: Services, retried: readonly ProjectionKey[], log: (msg: string, fields: Record<string, number>) => void, checkMs = 60_000): void {
+    const projector = services.projector;
+    if (!projector) return;
+    const done = services.db.prepare("SELECT value FROM kn_state WHERE key = 'engine_catchup'").get();
+    const deletes = done?.value === CATCHUP_VERSION ? [] : projector.requeueDeletedPages();
+    services.db.prepare("INSERT INTO kn_state (key, value) VALUES ('engine_catchup', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(CATCHUP_VERSION);
+    const rows = [...deletes, ...retried];
+    if (!rows.length) return;
+    log("engine catch-up queued", { requeued: rows.length, deletes: deletes.length, failedRetried: retried.length });
+    let checks = 0;
+    const timer = setInterval(() => {
+      const outcome = projector.outcome(rows);
+      // settled, or 6 h (every row then has its own log lines and the Settings counter)
+      if (outcome.pending > 0 && ++checks < (6 * 3_600_000) / checkMs) return;
+      clearInterval(timer);
+      log("engine catch-up done", { requeued: rows.length, ...outcome });
+    }, checkMs);
+    timer.unref();
   }
 
   /** Kick the projection outbox without waiting (called after every document write). */

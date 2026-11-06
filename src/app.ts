@@ -56,8 +56,10 @@ export function knowledgeDefinition(env: Record<string, string | undefined>, TbE
         knowledge.retryProvision(services, ctx as never, (msg, fields) => ctx.log.warn(msg, fields));
         // Rows that gave up while the engine was unusable (e.g. before 0.1.6 no engine token could be stored) retry at boot,
         // at most 3 boots per row (INC-20261106-01: they were re-written on every boot); the rest stay failed and counted.
-        const retry = services.projector?.retryFailed() ?? { retried: 0, stillFailed: 0 };
+        const retry = services.projector?.retryFailed() ?? { retried: 0, stillFailed: 0, rows: [] };
         if (retry.retried || retry.stillFailed) ctx.log.info("projection retry after boot", { rows: retry.retried, stillFailed: retry.stillFailed });
+        // INC-20261106-01: one-time catch-up of deletes the engine never got, paced through the same drain; counts logged
+        knowledge.engineCatchUp(services, retry.rows, (msg, fields) => ctx.log.info(msg, fields));
         const requeued = knowledge.requeueAfterRestore(services);
         if (requeued) ctx.log.info("projection requeued after restore", { rows: requeued });
         knowledge.kick(services);

@@ -15,6 +15,11 @@ const MAX_ATTEMPTS = 12;
 export const MAX_BOOT_RETRIES = 3;
 const BATCH = 20;
 
+export interface ProjectionKey {
+  area: string;
+  document: string;
+}
+
 /** Logger for projection failures: fields are ids, counts and an error code, never document content. */
 export type ProjectionLog = (msg: string, fields: Record<string, string | number>) => void;
 
@@ -68,12 +73,17 @@ export class Projector {
     const entry: { again: boolean; done: Promise<number> } = { again: false, done: Promise.resolve(0) };
     entry.done = (async () => {
       let rows = 0;
-      do {
-        entry.again = false;
-        rows += await this.pass();
-      } while (entry.again);
+      try {
+        do {
+          entry.again = false;
+          rows += await this.pass();
+        } while (entry.again);
+      } finally {
+        // in the same tick as the last `again` check: a drain asked for after it starts a new entry (no lost kick)
+        drains.delete(this.db);
+      }
       return rows;
-    })().finally(() => drains.delete(this.db));
+    })();
     drains.set(this.db, entry);
     return entry.done;
   }
@@ -112,22 +122,29 @@ export class Projector {
   /** Marks ready only if the row was not re-queued meanwhile (a newer change keeps it pending). */
   private done(areaId: string, documentId: string, hash: string | null, queuedAt: number) {
     this.db
-      .prepare("UPDATE kn_projection SET state = 'ready', content_hash = ?, attempts = 0, cycles = 0, last_error = NULL, updated_at = ? WHERE area_id = ? AND document_id = ? AND updated_at = ?")
+      .prepare("UPDATE kn_projection SET state = 'ready', content_hash = ?, attempts = 0, last_error = NULL, updated_at = ? WHERE area_id = ? AND document_id = ? AND updated_at = ?")
       .run(hash, this.now(), areaId, documentId, queuedAt);
   }
 
+  /**
+   * `attempts` counts every failed attempt since the last success or change of the document, across boots (INC-20261106-01):
+   * a run of MAX_ATTEMPTS ends in `failed`; the boot retry starts the next run without resetting the count, so the cap
+   * needs no schema change (a rollback to 0.1.36 opens the same database).
+   */
   private fail(areaId: string, documentId: string, attempts: number, error: string, code: string) {
     const next = attempts + 1;
-    const state = next >= MAX_ATTEMPTS ? "failed" : "pending";
-    const retryMs = backoffMs(next);
+    const inRun = ((next - 1) % MAX_ATTEMPTS) + 1;
+    const state = inRun >= MAX_ATTEMPTS ? "failed" : "pending";
+    const retryMs = backoffMs(inRun);
     this.db
       .prepare("UPDATE kn_projection SET attempts = ?, state = ?, next_attempt_at = ?, last_error = ? WHERE area_id = ? AND document_id = ?")
       .run(next, state, this.now() + retryMs, `${code}: ${error}`.slice(0, 300), areaId, documentId);
     this.log?.(state === "failed" ? "projection gave up" : "projection failed", {
       area: areaId,
       document: documentId,
-      attempt: next,
+      attempt: inRun,
       maxAttempts: MAX_ATTEMPTS,
+      bootRetry: Math.floor((next - 1) / MAX_ATTEMPTS),
       state,
       code,
       ...(state === "pending" ? { retryInS: Math.round(retryMs / 1000) } : {}),
@@ -147,15 +164,56 @@ export class Projector {
   }
 
   /**
-   * Re-queue failed rows at boot (e.g. after an engine outage) — keeps their content. INC-20261106-01: at most
-   * MAX_BOOT_RETRIES times per row; a row past that stays failed (and counted) until its document changes again.
+   * Re-queue failed rows at boot (e.g. after an engine outage) — keeps their content and their attempt count.
+   * INC-20261106-01: at most MAX_BOOT_RETRIES times per row (it was every boot, 12 writes each); a row past that stays
+   * failed (and counted in Settings) until its document changes again or a restore re-queues everything.
    */
-  retryFailed(): { retried: number; stillFailed: number } {
-    const retried = this.db
-      .prepare("UPDATE kn_projection SET state = 'pending', attempts = 0, next_attempt_at = 0, cycles = cycles + 1 WHERE state = 'failed' AND cycles < ?")
-      .run(MAX_BOOT_RETRIES).changes;
+  retryFailed(): { retried: number; stillFailed: number; rows: ProjectionKey[] } {
+    const limit = MAX_ATTEMPTS * (MAX_BOOT_RETRIES + 1);
+    const rows = this.db
+      .prepare("SELECT area_id, document_id FROM kn_projection WHERE state = 'failed' AND attempts < ?")
+      .all(limit)
+      .map((row) => ({ area: String(row.area_id), document: String(row.document_id) }));
+    const retried = this.db.prepare("UPDATE kn_projection SET state = 'pending', next_attempt_at = 0 WHERE state = 'failed' AND attempts < ?").run(limit).changes;
     const stillFailed = Number(this.db.prepare("SELECT COUNT(*) AS n FROM kn_projection WHERE state = 'failed'").get()?.n ?? 0);
-    return { retried, stillFailed };
+    return { retried, stillFailed, rows };
+  }
+
+  /**
+   * INC-20261106-01 catch-up: before 0.1.37 a delete never reached the engine (the revision read missed the page and the
+   * row was marked done), so pages of deleted documents may remain. Queue a delete for every deleted document whose row
+   * is settled; a row still pending is left alone. Idempotent: a page that is already gone is "absent" (one read).
+   */
+  requeueDeletedPages(): ProjectionKey[] {
+    const rows = this.db
+      .prepare(
+        `SELECT d.area_id, d.id FROM kn_documents d LEFT JOIN kn_projection p ON p.area_id = d.area_id AND p.document_id = d.id
+         WHERE d.deleted_at IS NOT NULL AND (p.state IS NULL OR p.state <> 'pending')`,
+      )
+      .all()
+      .map((row) => ({ area: String(row.area_id), document: String(row.id) }));
+    const queue = this.db.prepare(
+      `INSERT INTO kn_projection (area_id, document_id, action, content_hash, state, attempts, next_attempt_at, last_error, updated_at)
+       VALUES (?, ?, 'delete', NULL, 'pending', 0, 0, NULL, ?)
+       ON CONFLICT (area_id, document_id) DO UPDATE SET action = 'delete', state = 'pending', attempts = 0, next_attempt_at = 0, last_error = NULL, updated_at = max(excluded.updated_at, kn_projection.updated_at + 1)`,
+    );
+    this.db.transaction(() => {
+      for (const row of rows) queue.run(row.area, row.document, this.now());
+    });
+    return rows;
+  }
+
+  /** States of the given rows (catch-up outcome counts). */
+  outcome(rows: readonly ProjectionKey[]): { ok: number; failed: number; pending: number } {
+    const read = this.db.prepare("SELECT state FROM kn_projection WHERE area_id = ? AND document_id = ?");
+    const out = { ok: 0, failed: 0, pending: 0 };
+    for (const row of rows) {
+      const state = read.get(row.area, row.document)?.state;
+      if (state === "ready") out.ok++;
+      else if (state === "failed") out.failed++;
+      else if (state === "pending") out.pending++;
+    }
+    return out;
   }
 
   status(): { area: string; pending: number; ready: number; failed: number }[] {
